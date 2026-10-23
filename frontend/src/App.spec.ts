@@ -77,6 +77,30 @@ describe('App 状态流转（组件层）', () => {
     expect(wrapper.text()).toContain(okResponse.link)
   })
 
+  it('预校验错误（bad_url_format）停留状态②：错误文案可修改重试，不展示链接不进结果页', async () => {
+    vi.mocked(fetchPreview).mockResolvedValue({
+      ok: false,
+      target: 'clash',
+      errorCode: 'bad_url_format',
+      message: '',
+      link: 'http://192.168.1.10:8080/sub?target=auto&url=bad',
+    })
+    const wrapper = await mountApp()
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('not-a-url')
+    await wrapper.find('button[type="submit"]').trigger('submit')
+    await vi.waitFor(() => {
+      expect(wrapper.find('.error-note').text()).toContain('这不像一个订阅链接——检查一下是不是复制全了？')
+    })
+
+    // 停留状态②：主输入区仍在、无结果页、无链接文本、按钮恢复可点
+    expect(wrapper.find('.result').exists()).toBe(false)
+    expect(wrapper.find('input[aria-label="订阅链接"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('192.168.1.10:8080/sub')
+    const btn = wrapper.find('button[type="submit"]')
+    expect(btn.attributes('disabled')).toBeUndefined()
+  })
+
   it('状态③逃生口：点「？我是 Clash 用户」自动改选 clash 重新请求', async () => {
     vi.mocked(fetchPreview).mockResolvedValue(okResponse)
     const wrapper = await mountApp()

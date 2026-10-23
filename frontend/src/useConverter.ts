@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { ApiUnreachableError, fetchClients, fetchPreview } from './api'
-import { FALLBACK_CLIENTS, errorText } from './constants'
+import { FALLBACK_CLIENTS, PRECHECK_ERROR_CODES, errorText } from './constants'
 import type { ClientEntry, PreviewResponse } from './types'
 
 export type Phase = 'idle' | 'converting' | 'result'
@@ -33,6 +33,12 @@ export function useConverter() {
     convertError.value = null
     try {
       const res = await fetchPreview(inputUrl.value, selectedTarget.value)
+      // 预校验类错误（bad_url_*）：输入本身有问题，给链接无意义——停留状态②，展示文案可修改重试
+      if (!res.ok && res.errorCode && PRECHECK_ERROR_CODES.has(res.errorCode)) {
+        convertError.value = errorText(res.errorCode)
+        return
+      }
+      // 上游类错误与成功：进状态③（ok:false 时结果页警示条 + 链接 + 「未通过校验，仍可试用」）
       result.value = res
       phase.value = 'result'
     } catch (e) {

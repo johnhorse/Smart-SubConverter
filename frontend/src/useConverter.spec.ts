@@ -23,8 +23,8 @@ const okResponse: PreviewResponse = {
 const badResponse: PreviewResponse = {
   ok: false,
   target: 'clash',
-  errorCode: 'bad_url_format',
-  message: 'Extended said no',
+  errorCode: 'upstream_error',
+  message: 'Invalid request',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=xx',
 }
 
@@ -97,16 +97,39 @@ describe('useConverter 状态机', () => {
     expect(conv.convertError.value).toBeNull()
   })
 
-  it('ok:false 也进入状态③，errorCode 原样保留（结果页展示警示条）', async () => {
+  it('上游类 ok:false 也进入状态③，errorCode 原样保留（结果页展示警示条）', async () => {
     const conv = setup()
-    conv.inputUrl.value = 'not-a-url'
+    conv.inputUrl.value = 'https://example.com/broken'
     vi.mocked(fetchPreview).mockResolvedValue(badResponse)
 
     await conv.submit()
     expect(conv.phase.value).toBe('result')
     expect(conv.result.value?.ok).toBe(false)
-    expect(conv.result.value?.errorCode).toBe('bad_url_format')
+    expect(conv.result.value?.errorCode).toBe('upstream_error')
     expect(conv.result.value?.link).toContain('/sub?') // 链接照常展示（D4）
+  })
+
+  it.each([
+    ['bad_url_empty', ''],
+    ['bad_url_format', 'not-a-url'],
+    ['bad_url_private', 'http://192.168.1.5/sub'],
+  ])('预校验错误 %s 停留状态②，不进结果页不展示链接（D4 仲裁）', async (code, url) => {
+    const conv = setup()
+    conv.inputUrl.value = url
+    vi.mocked(fetchPreview).mockResolvedValue({
+      ok: false,
+      target: 'clash',
+      errorCode: code,
+      message: '',
+      link: `http://192.168.1.10:8080/sub?target=auto&url=${encodeURIComponent(url)}`,
+    })
+
+    await conv.submit()
+    expect(conv.phase.value).toBe('converting')
+    expect(conv.submitting.value).toBe(false)
+    expect(conv.result.value).toBeNull()
+    expect(conv.convertError.value).toBe(ERROR_MESSAGES[code])
+    expect(conv.advancedOpen.value).toBe(true) // chips 保持展开，可修改后重试
   })
 
   it('逃生口：一键改选 target=clash 并自动重新发起请求', async () => {

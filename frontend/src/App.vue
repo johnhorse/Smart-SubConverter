@@ -30,7 +30,8 @@ onMounted(() => {
           <p class="hero-sub">粘贴订阅链接，转成你的 App 能用的格式</p>
         </header>
 
-        <form class="convert-form" @submit.prevent="submit">
+        <!-- novalidate：URL 合法性由 sidecar 校验（错误码 bad_url_format + 人话文案），不用浏览器原生气泡 -->
+        <form class="convert-form" novalidate @submit.prevent="submit">
           <input
             v-model="inputUrl"
             class="url-input"

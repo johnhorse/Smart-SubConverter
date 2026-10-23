@@ -17,6 +17,9 @@ export function errorText(code: string | null | undefined): string {
   return ERROR_MESSAGES.upstream_error
 }
 
+// 预校验类错误（D4 仲裁：给链接无意义）：停留状态②可修改重试，不进结果页
+export const PRECHECK_ERROR_CODES = new Set(['bad_url_empty', 'bad_url_format', 'bad_url_private'])
+
 // /api/clients 不可用时的降级数据（与契约示例同构，保证页面可用）
 export const FALLBACK_CLIENTS: ClientEntry[] = [
   { id: 'auto', label: '自动识别', target: 'auto', verified: false },
