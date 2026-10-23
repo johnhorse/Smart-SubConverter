@@ -48,13 +48,16 @@ jobs:
             --build-arg BASE_IMAGE="$BASE_IMAGE" \
             -t "$IMAGE_NAME:smoke" .
 
-      # 冒烟 v0：起容器 → / 200、/healthz 200、/api/health 200 且 JSON 可解析（+ /api/clients 9 项）
-      # T2 将扩展为三步：fixture 转换（Clash/Surge）+ /api/preview 返回的 link 双 UA 经 nginx 拉取断言
-      - name: Smoke v0
-        run: |
-          docker run -d --name ssc-smoke -p 127.0.0.1:18080:80 "$IMAGE_NAME:smoke"
-          trap 'docker rm -f ssc-smoke' EXIT
-          sh image/smoke.sh http://127.0.0.1:18080
+      # 冒烟门禁（三步，本地 make smoke-local 共用同一脚本）：
+      #   1) 基础可用（/, /version, /api/health 真实自采, /api/clients）
+      #   2) fixture 转换（Clash/Surge 双 UA 经 /sub 直转断言格式）
+      #   3) 端到端（/api/preview 取 link → 双 UA 经 nginx 拉取断言）
+      # 全流程不依赖外网（fixture 由本地 python http.server 提供）；
+      # smoke.sh 自管容器（PRESET_URL 指向 fixture + host-gateway 映射），不过不发布
+      # arm64 有意不冒烟：GitHub runner 只有 amd64，qemu 模拟跑 subconverter 转换过慢；
+      # arm64 仅随多架构 push 构建产物存在
+      - name: Smoke（三步）
+        run: sh image/smoke.sh "$IMAGE_NAME:smoke" 18080
 
       # ---- 以下发布步骤仅在 push tag v* 时执行，且位于冒烟门禁之后（不过不发布）----
 

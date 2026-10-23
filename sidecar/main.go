@@ -1,17 +1,23 @@
 // ssc-sidecar：Smart SubConverter 镜像内 API 服务（仅监听容器回环，由 nginx 反代 /api/）。
-// 本文件是 V1 脚手架：/api/clients 完整实现；/api/health、/api/preview 为形状符合契约的桩，
-// 真实实现（Wave 2）以 docs/implementation/api-contract.md 为准。
+// 契约 truth source：docs/implementation/api-contract.md（字段名、错误码、判定序以此为准）。
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
 // 预设远端配置 URL（契约默认值，可被 env PRESET_URL 覆盖，冒烟测试用）
 const defaultPresetURL = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online.ini"
+
+const defaultPresetName = "ACL4SSR Online"
+
+// 探测转换的 sidecar→Extended 超时（契约钉死 10s；测试注入短值）
+const defaultProbeTimeout = 10 * time.Second
 
 type clientEntry struct {
 	ID       string `json:"id"`
@@ -45,11 +51,11 @@ type healthResponse struct {
 }
 
 type previewResponse struct {
-	OK        bool   `json:"ok"`
-	Target    string `json:"target"`
-	ErrorCode string `json:"errorCode"`
-	Message   string `json:"message"`
-	Link      string `json:"link"`
+	OK        bool    `json:"ok"`
+	Target    string  `json:"target"`
+	ErrorCode *string `json:"errorCode"`
+	Message   string  `json:"message"`
+	Link      string  `json:"link"`
 }
 
 // 客户端注册表（契约冻结：顺序即 chips 顺序，auto 永远第一；verified 随真机实测置 true）
@@ -65,11 +71,62 @@ var registry = []clientEntry{
 	{"v2rayn", "v2rayN", "v2rayn", false},
 }
 
-func presetURL() string {
-	if u := os.Getenv("PRESET_URL"); u != "" {
-		return u
+func isRegisteredTarget(t string) bool {
+	for _, c := range registry {
+		if c.Target == t {
+			return true
+		}
 	}
-	return defaultPresetURL
+	return false
+}
+
+// config 汇总 sidecar 全部环境变量（main 启动时读定；变量表见契约「环境变量」节）
+type config struct {
+	extendedBase string
+	publicBaseURL string
+	subToken     string
+	presetURL    string
+	probeTimeout time.Duration
+	pollInterval time.Duration
+}
+
+func loadConfigFromEnv() config {
+	getOr := func(name, def string) string {
+		if v := os.Getenv(name); v != "" {
+			return v
+		}
+		return def
+	}
+	c := config{
+		extendedBase: getOr("EXTENDED_BASE", "http://127.0.0.1:25500"),
+		publicBaseURL: os.Getenv("PUBLIC_BASE_URL"),
+		subToken:     os.Getenv("SUB_TOKEN"),
+		presetURL:    getOr("PRESET_URL", defaultPresetURL),
+		probeTimeout: defaultProbeTimeout,
+		pollInterval: 15 * time.Minute,
+	}
+	if raw := os.Getenv("POLL_INTERVAL"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			c.pollInterval = d
+		} else {
+			log.Printf("POLL_INTERVAL %q 解析失败，回退默认 15m", raw)
+		}
+	}
+	return c
+}
+
+type server struct {
+	cfg         config
+	mon         *monitor
+	probeClient *http.Client
+}
+
+func newServer(cfg config) *server {
+	return &server{
+		cfg:         cfg,
+		mon:         newMonitor(cfg),
+		probeClient: &http.Client{Timeout: cfg.probeTimeout},
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -80,38 +137,23 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-func handleClients(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleClients(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, clientsResponse{
 		Clients: registry,
-		Presets: []presetEntry{{ID: "default", Name: "ACL4SSR Online", URL: presetURL()}},
+		Presets: []presetEntry{{ID: "default", Name: defaultPresetName, URL: s.cfg.presetURL}},
 	})
 }
 
-// 桩：真实实现（Wave 2）= 解析 ${EXTENDED_BASE}/version 的 HTML 得 backendVersion
-// + 按 POLL_INTERVAL 周期对每个预设 URL 发 HEAD 自采 lastModifiedAt/lastSuccessAt/status 三态
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, healthResponse{
-		BackendVersion: "unknown",
-		Presets: []presetStatus{{
-			Name:           "ACL4SSR Online",
-			URL:            presetURL(),
-			LastModifiedAt: nil,
-			LastSuccessAt:  nil,
-			Status:         "unknown",
-		}},
-	})
+func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.mon.snapshot())
 }
 
-// 桩：真实实现（Wave 2）= URL 预校验（D7）+ 探测转换（10s 超时）+ link 服务端拼接，
-// 形状必须符合契约「POST /api/preview」节（响应恒 200，link 永远非空）
-func handlePreview(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, previewResponse{
-		OK:        false,
-		Target:    "clash",
-		ErrorCode: "backend_down",
-		Message:   "stub",
-		Link:      "http://stub/sub?target=auto",
-	})
+func (s *server) routes() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/clients", s.handleClients)
+	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("POST /api/preview", s.handlePreview)
+	return mux
 }
 
 func main() {
@@ -120,11 +162,9 @@ func main() {
 	if port == "" {
 		port = "8081"
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/clients", handleClients)
-	mux.HandleFunc("GET /api/health", handleHealth)
-	mux.HandleFunc("POST /api/preview", handlePreview)
+	s := newServer(loadConfigFromEnv())
+	go s.mon.pollLoop(context.Background(), s.cfg.pollInterval)
 	addr := "127.0.0.1:" + port
 	log.Printf("ssc-sidecar listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	log.Fatal(http.ListenAndServe(addr, s.routes()))
 }

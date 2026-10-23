@@ -39,8 +39,10 @@ run-local:
 	docker rm -f $(RUN_NAME) 2>/dev/null || true
 	docker run -d --name $(RUN_NAME) -p 127.0.0.1:$(LOCAL_PORT):80 $(IMAGE)
 
-smoke-local:
-	sh image/smoke.sh http://127.0.0.1:$(LOCAL_PORT)
+# 三步冒烟：smoke.sh 自管 fixture server 与被测容器生命周期（需能起 docker 容器）
+# 先停 ssc-local：冒烟容器独占 LOCAL_PORT（run-local 只验「镜像能起」，冒烟才是门禁）
+smoke-local: stop-local
+	sh image/smoke.sh $(IMAGE) $(LOCAL_PORT)
 
 stop-local:
 	docker rm -f $(RUN_NAME) 2>/dev/null || true
