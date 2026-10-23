@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Professor Synapse personal memory (mutable, per-machine)
+.claude/skills/professor-synapse/memory/
