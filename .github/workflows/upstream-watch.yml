@@ -1,0 +1,43 @@
+name: upstream-watch
+
+# 每日比对上游 aethersailor/subconverter-extended:latest 的 digest 与 image/base.lock，
+# 漂移则更新 lock 并开 PR；PR 合并后由 build workflow 的冒烟门禁把关（D3 更新策略）
+on:
+  schedule:
+    - cron: '30 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 比对上游 latest digest 与 base.lock
+        id: check
+        run: |
+          LATEST=$(docker buildx imagetools inspect aethersailor/subconverter-extended:latest --format '{{.Manifest.Digest}}')
+          CURRENT=$(grep -m1 '^aethersailor' image/base.lock | sed 's/.*@//')
+          echo "latest=$LATEST"
+          echo "lock=  $CURRENT"
+          if [ "$LATEST" != "$CURRENT" ]; then
+            sed -i "s|^aethersailor/subconverter-extended@.*|aethersailor/subconverter-extended@${LATEST}|" image/base.lock
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 开 PR 更新 base 镜像 pin
+        if: steps.check.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: 'chore(image): bump base 镜像 digest 至上游 latest'
+          title: 'base 镜像上游更新（digest bump）'
+          body: |
+            上游 `aethersailor/subconverter-extended:latest` digest 漂移，已更新 `image/base.lock`。
+
+            合并前请确认 build workflow 的冒烟门禁通过（新 digest 会走完整 build + smoke）。
+          branch: bot/base-image-bump
+          delete-branch: true

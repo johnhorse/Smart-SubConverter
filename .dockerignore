@@ -1,0 +1,7 @@
+# docker build context 只需要：image/ sidecar/ frontend/dist
+.git
+.claude
+.gstack
+docs
+frontend/*
+!frontend/dist

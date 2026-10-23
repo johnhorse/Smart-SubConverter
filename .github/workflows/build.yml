@@ -1,0 +1,101 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: smart-subconverter
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # arm64 目标下的 RUN 步骤（apk add 等）需要 qemu 模拟执行
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 准备构建变量
+        run: |
+          echo "BASE_IMAGE=$(grep -m1 '^aethersailor' image/base.lock)" >> "$GITHUB_ENV"
+          echo "GHCR_REPO=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      # 前端产物在 docker build 之前生成（与 Makefile build-image 同约定）；
+      # 前端未落地前放占位页，保证 main 分支 CI 可跑
+      # 注意用子 shell cd 而非 npm --prefix：--prefix 会把依赖装进仓库根目录 node_modules
+      - name: 前端产物
+        run: |
+          if [ -f frontend/package.json ]; then
+            (cd frontend && npm ci --no-audit --no-fund || npm install --no-audit --no-fund)
+            (cd frontend && npm run build)
+          else
+            mkdir -p frontend/dist && printf 'placeholder\n' > frontend/dist/index.html
+          fi
+
+      - name: Build（runner 本架构，供冒烟）
+        run: |
+          docker build -f image/Dockerfile \
+            --build-arg BASE_IMAGE="$BASE_IMAGE" \
+            -t "$IMAGE_NAME:smoke" .
+
+      # 冒烟 v0：起容器 → / 200、/healthz 200、/api/health 200 且 JSON 可解析（+ /api/clients 9 项）
+      # T2 将扩展为三步：fixture 转换（Clash/Surge）+ /api/preview 返回的 link 双 UA 经 nginx 拉取断言
+      - name: Smoke v0
+        run: |
+          docker run -d --name ssc-smoke -p 127.0.0.1:18080:80 "$IMAGE_NAME:smoke"
+          trap 'docker rm -f ssc-smoke' EXIT
+          sh image/smoke.sh http://127.0.0.1:18080
+
+      # ---- 以下发布步骤仅在 push tag v* 时执行，且位于冒烟门禁之后（不过不发布）----
+
+      - name: 登录 GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 同一次构建推送不可变版本 tag 与 latest：latest 只在冒烟通过后才移动（D 系列 tag 策略）
+      - name: Push GHCR（amd64+arm64，版本 tag + latest）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: image/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
+          push: true
+          tags: |
+            ${{ env.GHCR_REPO }}:${{ github.ref_name }}
+            ${{ env.GHCR_REPO }}:latest
+
+      # Docker Hub 第二发布源：secrets 未配置时跳过本步，不视为失败
+      - name: Push Docker Hub（amd64+arm64，版本 tag + latest）
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::notice::DOCKEHRUB secrets 未配置，跳过 Docker Hub 发布"
+            exit 0
+          fi
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          docker buildx build -f image/Dockerfile \
+            --build-arg BASE_IMAGE="$BASE_IMAGE" \
+            --platform linux/amd64,linux/arm64 \
+            -t "docker.io/$DOCKERHUB_USERNAME/$IMAGE_NAME:$GITHUB_REF_NAME" \
+            -t "docker.io/$DOCKERHUB_USERNAME/$IMAGE_NAME:latest" \
+            --push .

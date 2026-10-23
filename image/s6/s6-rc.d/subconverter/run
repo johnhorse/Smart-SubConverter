@@ -1,0 +1,40 @@
+#!/bin/sh
+# 复刻上游 /usr/local/bin/start-subconverter（assignment-findings ④ 原文）
+# Extended 为 glibc 二进制，靠 LD_LIBRARY_PATH 指向镜像内 glibc 库目录运行
+set -e
+
+# s6 v3 服务进程环境干净，容器 env 须从 stage0 写入的 /run/s6/container_environment 导入
+# （显式白名单导入，不做 eval）
+import_env() {
+  if [ -f "/run/s6/container_environment/$1" ]; then
+    export "$1=$(cat "/run/s6/container_environment/$1")"
+  fi
+}
+import_env PORT
+import_env PREF_PATH
+import_env MANAGED_CONFIG_PREFIX
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64) LIB_ARCH="x86_64-linux-gnu" ;;
+  aarch64|arm64) LIB_ARCH="aarch64-linux-gnu" ;;
+  *) LIB_ARCH="" ;;
+esac
+if [ -n "$LIB_ARCH" ]; then
+  export LD_LIBRARY_PATH="/lib/${LIB_ARCH}:/usr/lib/${LIB_ARCH}:/lib64:/usr/lib"
+fi
+
+# PUBLIC_BASE_URL → MANAGED_CONFIG_PREFIX（cont-init 已写文件；显式设置过的 env 不覆盖）
+if [ -f /run/ssc-managed-config-prefix ] && [ -z "$MANAGED_CONFIG_PREFIX" ]; then
+  MANAGED_CONFIG_PREFIX="$(cat /run/ssc-managed-config-prefix)"
+  export MANAGED_CONFIG_PREFIX
+fi
+
+CONF="${PREF_PATH:-/base/pref.toml}"
+CONF_DIR="$(dirname "$CONF")"
+mkdir -p "$CONF_DIR"
+if [ ! -f "$CONF" ] && [ -f /base/pref.example.toml ]; then
+  cp /base/pref.example.toml "$CONF"
+fi
+
+exec /usr/bin/subconverter -f "$CONF"

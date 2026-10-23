@@ -1,0 +1,5 @@
+# 上游 base 镜像 digest pin（D3 决策：构建不可变，禁止浮动 tag）
+# 上游：aethersailor/subconverter-extended，跟踪 tag：latest
+# 唯一来源文件：Makefile 与 CI 均从此处读取，经 --build-arg BASE_IMAGE 注入 Dockerfile
+# .github/workflows/upstream-watch.yml 每日比对 latest digest，漂移则更新本行并开 PR
+aethersailor/subconverter-extended@sha256:2da8f8d9d139de111606afe7beb2860f9bccd5c13de66ae0ee3cb9506c9dc9b7

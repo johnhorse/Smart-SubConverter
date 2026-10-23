@@ -1,0 +1,17 @@
+#!/bin/sh
+# 仅监听容器回环（nginx 反代 /api/ → 127.0.0.1:8081）
+# s6 v3 服务进程环境干净，容器 env 须从 stage0 写入的 /run/s6/container_environment 导入
+# （显式白名单导入；变量表见 docs/implementation/api-contract.md「环境变量」节）
+import_env() {
+  if [ -f "/run/s6/container_environment/$1" ]; then
+    export "$1=$(cat "/run/s6/container_environment/$1")"
+  fi
+}
+import_env SIDECAR_PORT
+import_env EXTENDED_BASE
+import_env PUBLIC_BASE_URL
+import_env SUB_TOKEN
+import_env PRESET_URL
+import_env POLL_INTERVAL
+
+exec /usr/bin/ssc-sidecar
