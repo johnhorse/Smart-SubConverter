@@ -135,5 +135,10 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 ## nginx 路由（镜像层，与契约相关部分）
 
 - `/` → 前端静态文件；`/api/` → sidecar；`/sub`、`/version`、`/healthz` → Extended(25500)
-- 对 sidecar 的反代：`proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme;`（R3-1，必做）
+- 对 sidecar 的反代：`proxy_set_header Host $http_host; proxy_set_header X-Forwarded-Proto $scheme;`（**注意用 `$http_host` 而非 `$host`**：nginx 的 `$host` 永远去掉端口，非 80 端口部署时 sidecar 推导的 link 会丢端口不可用——S2 三步冒烟实测抓出后修正）
 - `/sub`、`/api/` 关闭 access_log（D6 日志卫生；nginx 默认 access_log 含 query string）
+
+### 契约未定义场景的既定处理（S2 实现既成语义）
+
+- `target` 非注册表值：探测按 clash 进行，link 原样透传该 target，由 Extended 自然拒绝（不发明新错误码）
+- POST body 非法 JSON / 缺 url 字段：按 `bad_url_empty` 处理（响应恒 200 原则不变）
