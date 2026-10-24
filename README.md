@@ -73,7 +73,7 @@ volumes:
 ```yaml
 services:
   smart-subconverter:
-    image: ghcr.io/johnhorse/smart-subconverter:latest
+    image: johnhorse/smart-subconverter:latest
     container_name: smart-subconverter
     ports:
       - "8080:80"
