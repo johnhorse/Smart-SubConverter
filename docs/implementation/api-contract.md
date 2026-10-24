@@ -157,10 +157,14 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 
 ### 快照分层与刷新
 
-- **出厂快照**：vendor 于仓库 `image/rules-snapshot/`（原始未改写文件，含拉取时间戳 `SNAPSHOT_META`），构建时 COPY 进镜像 `/opt/rules-snapshot/`（只读兜底层）
-- **运行时快照**：`{DATA_DIR}/rules/`（volume 持久层）。sidecar 启动时确保该目录有一套可用快照（无则从出厂层复制并改写），此后按 `PRESET_REFRESH_INTERVAL`（默认 24h，启动时也先刷一轮）从上游逐文件刷新：**单文件成功即覆盖**（逐文件 last-known-good），失败保留旧文件；每轮刷新后重做 .ini 改写
-- **.ini 改写**：sidecar 将 .ini 中引用的规则集 GitHub URL 替换为运行时快照目录内的本地路径，改写产物落 `{DATA_DIR}/rules/`；引擎 `config=` 收到的是改写后 .ini 的本地路径。改写仅在 sidecar 侧发生（CI/vendor 不改写）
+引擎本地读取**硬限 `/base` 路径树**（canonical path 校验，pref 无配置项；`file://` 不支持、symlink 桥接被拒、范围外 ruleset 静默丢弃——2026-10-24 闸门实测，证据 /tmp/gate-probe.txt）。快照布局据此定：
+
+- **出厂快照**：vendor 于仓库 `image/rules-snapshot/`（原始未改写文件 + 拉取时间戳 `SNAPSHOT_META`），构建时 COPY 进镜像 `/base/rules-snapshot/`（只读兜底层，不被 volume 遮蔽）
+- **运行时快照**：`{DATA_DIR}/rules/`（volume 持久层；`DATA_DIR` 默认 `/base/data`，**必须位于 /base 树内**引擎才可读）。sidecar 启动时确保该目录有可用快照（无则从出厂层复制并改写），此后按 `PRESET_REFRESH_INTERVAL`（默认 24h，启动时先刷一轮）从上游逐文件刷新：**单文件成功即覆盖**（逐文件 last-known-good），失败保留旧文件；每轮刷新后重做 .ini 改写
+- **.ini 改写**：sidecar 将 .ini 中引用的规则集 GitHub URL 替换为运行时快照目录内的本地绝对路径，改写产物落 `{DATA_DIR}/rules/`；引擎 `config=` 收到的是改写后 .ini 的本地路径。改写仅在 sidecar 侧发生（CI/vendor 不改写）。改写器范围：仅 URL 形态的 ruleset 行（实测全集 35 个 URL、无 basename 冲突可平铺、无 include= 行、非 URL ruleset 仅 `[]FINAL`/`[]GEOIP,CN` 内置型）
+- **静默丢规则防护（实测风险，硬性要求）**：改写后必须校验该 .ini 引用的全部规则集文件路径存在，校验不过**不切换**（继续用旧改写产物）；冒烟断言本地化输出规则数 == GitHub 基线（ACL4SSR_Online 档 DOMAIN 94 / GEOIP 1，闸门实测值）
 - **引擎指向**：三档预设默认解析到「运行时快照改写后 .ini」；`PRESET_URL` 覆盖的档（仅 default）**豁免本地化**，sidecar 原样透传部署者 URL 给引擎（部署者自担网络）
+- **降级行为**：`DATA_DIR` 不在 /base 树内（显式自设的部署）→ 启动 log 警告 + 快照本地化整体禁用（三档全部按豁免档语义工作，health 如实反映），不拒启动
 
 ### 对既有契约面的影响
 
@@ -168,12 +172,11 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 - 建链冻结与幂等指纹：本地化档建链冻结的 config = 本地改写后 .ini 路径。升级后同指纹首建会生成**新短码**（config 解析结果变化，旧码仍有效），属预期一次性影响
 - **存量短链兼容**：`/s/` 代理发现冻结 config 为内置三档 GitHub URL 时，运行时映射为本地改写后 .ini 路径（库不动、存量短码原地升级为快照直读）
 - `POLL_INTERVAL` 健康轮询对本地化档不再发远端 HEAD（改为读快照刷新状态）；豁免档维持远端 HEAD 自采
+- 部署命令：`-v <vol>:/base/data`（原 `/data` 挂载点改至此，卷名与卷内数据不变，state.db 与规则快照同居一卷）；README 升级说明注明
 
-### 实施闸门（实现前实测，未过则回审）
+### 闸门实测结论（2026-10-24 已测毕，三项全过）
 
-1. 引擎 `config=` 接受本地文件路径（绝对路径）；.ini 内 ruleset 本地路径的解析基准
-2. 三档 .ini 引用的规则集全集清单与总体积；总量 > 10MB 则 vendor 策略回审
-3. 引擎磁盘缓存目录位置（本地化后 config/ruleset 不再依赖，订阅源缓存仍走引擎内置行为，不进契约承诺）
+① 本地路径可用但硬限 /base（上述布局依据）；volume 挂 /base 子路径实测输出与 GitHub 基线逐行一致。② 规则集全集 35 个 URL 去重 3.07 MiB（最大 1.44MB，无冲突）。③ 引擎磁盘缓存 `/base/cache/`（6h TTL，pref 默认开启；快照本地化后 config/ruleset 不再依赖，订阅源缓存走引擎内置，不进契约承诺）。完整证据：/tmp/gate-probe.txt、清单 /tmp/gate-rules/{urls.txt,MANIFEST.txt}（临时文件，缺失时从三档 .ini 重新解析）。
 
 ## GET /api/health
 
@@ -218,7 +221,7 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 | `POLL_INTERVAL` | `15m` | 健康轮询周期（仅豁免档远端 HEAD；本地化档由快照刷新循环驱动） |
 | `PRESET_REFRESH_INTERVAL` | `24h` | 快照刷新周期（启动时先刷一轮；本地化档 `status` fresh 阈值 = 2× 此值） |
 | `PROBE_TIMEOUT` | `30s` | preview 探测 sidecar→Extended 超时（v1.3.0 前硬编码 10s；慢网络下预检不再 10 秒判死） |
-| `DATA_DIR` | `/data` | SQLite `state.db` 所在目录（volume 挂载点；单测指向 tmp）；运行时快照在 `{DATA_DIR}/rules/` |
+| `DATA_DIR` | `/base/data` | SQLite `state.db` 与运行时快照 `rules/` 所在目录（volume 挂载点；**必须位于 /base 树内**引擎才可读本地快照，不在树内则快照本地化禁用并告警；单测指向 tmp） |
 | `SUB_PROXY_TIMEOUT` | `120s` | `/s/` 代理 sidecar→Extended 超时（v1.2.0 默认 30s；国内慢网络实测不够。快照本地化后常规请求应快，此值兜订阅源慢的情况） |
 
 ## nginx 路由（镜像层，与契约相关部分）
