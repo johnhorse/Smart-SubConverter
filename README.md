@@ -66,6 +66,37 @@ volumes:
   smart-sub-data:
 ```
 
+### 案例：Linux 宿主机有代理，让规则快照刷新走代理（docker compose）
+
+场景：部署机在国内，宿主机上已跑着 Clash/mihomo 类代理（HTTP 端口 `7890`）。`SNAPSHOT_PROXY` 让 sidecar 拉取 GitHub 上的 ACL4SSR 规则与模板时走这个代理；**朋友的订阅拉取不走代理**（始终直连，见 env 表）。
+
+```yaml
+services:
+  smart-subconverter:
+    image: ghcr.io/johnhorse/smart-subconverter:latest
+    container_name: smart-subconverter
+    ports:
+      - "8080:80"
+    volumes:
+      - smart-sub-data:/base/data
+    environment:
+      - PUBLIC_BASE_URL=http://192.168.1.100:8080
+      - SNAPSHOT_PROXY=http://host.docker.internal:7890
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux 必加：Docker 原生不认识这个域名，此行把它解析到宿主网关
+    restart: unless-stopped
+
+volumes:
+  smart-sub-data:
+```
+
+两个常见坑：
+
+- **代理要监听容器够得着的地址**：Clash/mihomo 默认只监听 `127.0.0.1`，容器从网关 IP 连过去是 `connection refused`（日志表现为规则快照一直刷新失败）。把代理的监听地址改为 `0.0.0.0`，或至少包含 Docker 网桥地址（通常 `172.17.0.1`）
+- **`0.0.0.0` 监听会把代理暴露到局域网**：确认代理配置里 `allow-lan` / 绑定地址的取值你是有意为之，或用防火墙把 7890 端口限制为仅 Docker 网段访问
+
+> macOS / Windows（Docker Desktop）不需要 `extra_hosts` 那行——`host.docker.internal` 原生可用。`docker run` 等价写法：`--add-host=host.docker.internal:host-gateway -e SNAPSHOT_PROXY=http://host.docker.internal:7890`。
+
 ### 端口绑定范围警告
 
 上面的 `-p 8080:80` 会把服务绑到**所有网卡**。对纯局域网机器这没问题，但**如果部署机有公网 IP，照抄这条命令等于把整个服务裸奔到公网**——任何扫到端口的人都能用你的转换服务，还能查看短链列表、删码（见[使用前须知](#四条使用前须知)与[管理端点信任边界](#短链数据与备份base-data-卷)）。公网 IP 主机请任选其一：
