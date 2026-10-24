@@ -24,6 +24,7 @@ const okResponse: PreviewResponse = {
   errorCode: null,
   message: '',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=abc',
+  deepLink: null,
 }
 
 async function mountApp() {
@@ -86,6 +87,7 @@ describe('App 状态流转（组件层）', () => {
       errorCode: 'bad_url_format',
       message: '',
       link: 'http://192.168.1.10:8080/sub?target=auto&url=bad',
+      deepLink: null,
     })
     const wrapper = await mountApp()
 

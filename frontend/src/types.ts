@@ -31,6 +31,7 @@ export interface PreviewResponse {
   errorCode: string | null
   message: string
   link: string
+  deepLink: string | null
 }
 
 export type PresetStatus = 'fresh' | 'stale' | 'unknown'

@@ -19,6 +19,7 @@ const okResponse: PreviewResponse = {
   errorCode: null,
   message: '',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=xx',
+  deepLink: null,
 }
 
 const badResponse: PreviewResponse = {
@@ -28,6 +29,7 @@ const badResponse: PreviewResponse = {
   errorCode: 'upstream_error',
   message: 'Invalid request',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=xx',
+  deepLink: null,
 }
 
 function setup() {
@@ -127,6 +129,7 @@ describe('useConverter 状态机', () => {
       errorCode: code,
       message: '',
       link: `http://192.168.1.10:8080/sub?target=auto&url=${encodeURIComponent(url)}`,
+      deepLink: null,
     })
 
     await conv.submit()
@@ -148,6 +151,7 @@ describe('useConverter 状态机', () => {
       errorCode: 'bad_preset',
       message: '',
       link: 'http://192.168.1.10:8080/sub?target=auto&url=xx',
+      deepLink: null,
     })
 
     await conv.submit()

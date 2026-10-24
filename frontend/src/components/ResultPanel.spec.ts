@@ -14,6 +14,7 @@ const okResult: PreviewResponse = {
   errorCode: null,
   message: '',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=abc',
+  deepLink: null,
 }
 
 const badResult: PreviewResponse = {
@@ -23,10 +24,11 @@ const badResult: PreviewResponse = {
   errorCode: 'upstream_error',
   message: 'Invalid request',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=abc',
+  deepLink: null,
 }
 
-function mountPanel(result: PreviewResponse, showEscape = true) {
-  return mount(ResultPanel, { props: { result, showEscape } })
+function mountPanel(result: PreviewResponse, showEscape = true, clientLabel = 'Surge') {
+  return mount(ResultPanel, { props: { result, showEscape, clientLabel } })
 }
 
 describe('ResultPanel', () => {
@@ -91,6 +93,29 @@ describe('ResultPanel', () => {
 
     const wrapper2 = mountPanel(okResult, false)
     expect(wrapper2.text()).not.toContain('我是 Clash 用户')
+  })
+
+  it('deepLink 非空时渲染「在 {label} 中打开」按钮，点击把 location.href 指向 deepLink', async () => {
+    const locationStub = { href: '' }
+    vi.stubGlobal('location', locationStub)
+    try {
+      const deepLink = 'surge://install-config?url=' + encodeURIComponent(okResult.link)
+      const wrapper = mountPanel({ ...okResult, target: 'surge', deepLink }, true, 'Surge')
+      const btn = wrapper.findAll('button').find((b) => b.text() === '在 Surge 中打开')
+      expect(btn).toBeTruthy()
+      await btn!.trigger('click')
+      expect(locationStub.href).toBe(deepLink)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('deepLink 为 null 时（auto/clash/singbox/v2rayn）copy-row 只剩复制按钮，无打开按钮残留', () => {
+    const wrapper = mountPanel(okResult)
+    const copyRow = wrapper.find('.copy-row')
+    expect(copyRow.findAll('button')).toHaveLength(1)
+    expect(copyRow.text()).not.toContain('中打开')
+    expect(copyRow.text()).toContain('链接含订阅信息，仅自用勿转发')
   })
 
   it('二维码渲染（qrcode.toDataURL）', async () => {

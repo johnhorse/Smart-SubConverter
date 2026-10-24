@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useConverter } from './useConverter'
 import { useHealth } from './useHealth'
 import ClientChips from './components/ClientChips.vue'
@@ -14,6 +14,11 @@ const {
 } = useConverter()
 
 const { badge, init: initHealth } = useHealth()
+
+// selectedTarget 存 target 值（与 ClientChips 选中口径一致），label 从注册表反查
+const selectedClientLabel = computed(
+  () => clients.value.find((c) => c.target === selectedTarget.value)?.label ?? '',
+)
 
 onMounted(() => {
   void initHealth()
@@ -84,6 +89,7 @@ onMounted(() => {
         v-else-if="result"
         :result="result"
         :show-escape="selectedTarget === 'auto'"
+        :client-label="selectedClientLabel"
         @escape="escapeToClash"
         @restart="restart"
       />

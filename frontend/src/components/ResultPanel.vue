@@ -5,7 +5,7 @@ import { copyText } from '../copy'
 import { errorText } from '../constants'
 import type { PreviewResponse } from '../types'
 
-const props = defineProps<{ result: PreviewResponse; showEscape: boolean }>()
+const props = defineProps<{ result: PreviewResponse; showEscape: boolean; clientLabel: string }>()
 const emit = defineEmits<{ (e: 'escape'): void; (e: 'restart'): void }>()
 
 const copied = ref(false)
@@ -21,6 +21,10 @@ async function doCopy() {
       copied.value = false
     }, 1500)
   }
+}
+
+function openInClient() {
+  if (props.result.deepLink) window.location.href = props.result.deepLink
 }
 
 async function renderQr(link: string) {
@@ -56,6 +60,10 @@ onBeforeUnmount(() => clearTimeout(copiedTimer))
     <div class="copy-row">
       <button type="button" class="primary-btn" @click="doCopy">
         {{ copied ? '已复制 ✓' : '复制' }}
+      </button>
+      <!-- deepLink 仅五家客户端非空（auto/clash/singbox/v2rayn 为 null），null 时只剩复制按钮 -->
+      <button v-if="result.deepLink" type="button" class="secondary-btn" @click="openInClient">
+        在 {{ clientLabel }} 中打开
       </button>
       <span class="copy-hint">链接含订阅信息，仅自用勿转发</span>
     </div>
