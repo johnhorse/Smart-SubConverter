@@ -56,3 +56,20 @@ ac8e964 fix(frontend): 预校验错误停留状态②（D4 仲裁分流）
 1. 读本文档 + `docs/designs/smart-subconverter-v1.md` + `docs/implementation/api-contract.md`
 2. 从「选择器位置」继续问用户（问题已备好，见上）
 3. 决策齐后：修订前提 2 → 更新契约 → 分发实施
+
+---
+
+## 规划定案（2026-10-24，本会话 grill 收口）
+
+「转换规则模板切换」四个决策全部定案，据此已修订设计文档（前提 2 / Open Questions / Next Steps）与 api-contract.md（增量修订记录见契约顶部）：
+
+1. **选择器位置**：放「高级」折叠区，标题扩为「高级 · 客户端与规则模板 ▸」，展开后客户端 chips + 规则模板 chips 两块；主路径零选项不变
+2. **模板来源**：sidecar 内置三档（随版本走，不做部署者自定义）：
+   - `default` / ACL4SSR 默认 → ACL4SSR_Online.ini
+   - `full_multimode` / 地区分组 + AI 分流 → ACL4SSR_Online_Full_MultiMode.ini（💬 Ai平台组候选含全部地区组，ChatGPT/Claude/Gemini 在客户端选地区即可定向；AI.list/OpenAi.list 实测覆盖三家）
+   - `full_adblockplus` / 全量 + 去广告 → ACL4SSR_Online_Full_AdblockPlus.ini
+   - 三 URL 均实测 200；旧记录里 MultiMode 404 是路径错（正确路径带 Full_ 前缀）
+3. **契约**：preview 加可选 `preset`（缺省/空串/"default" = default 档）；非注册表 id → `bad_preset` 报错不回落（link 仍以 default 档生成保持非空，preset 回显 null）；响应回显 `preset:{id,name}`（bad_preset 时 null，其余含 ok:false 恒回显）；`PRESET_URL` 收窄为仅覆盖 default 档；`/api/clients` presets 1→3 项形状不动；health 轮询 3 URL 形状不动
+4. **前端**：chips 直接显示 name（default 永远第一、默认选中，无「未选」态）；选中档下方一行描述（前端硬编码 id→描述：默认=按用途分组最简；地区分组+AI 分流=按用途+地区分组，含 AI 平台组可定向指定地区；全量+去广告=规则最全附广告拦截）；结果页 link 下标注「模板：{preset.name}」；bad_preset 文案「这个模板不可用，重新选一个试试」
+
+实施分发：sidecar lane + frontend lane 并行后台 agent（契约即 truth source），主会话亲验单测 + 冒烟 + 日志抽查。

@@ -35,7 +35,7 @@ Mode: Builder
 六条终版前提（含 codex 修订，全部经用户确认）：
 
 1. **不 fork 后端**：直接用 Aethersailor/SubConverter-Extended 官方镜像，跟随其 release；仓库零 subconverter/C++ 代码。
-2. **零必填选项**：主路径 = 一个输入框 + 一个按钮，`target=auto`（UA 识别）为默认**便利**路径；折叠的「指定客户端」为**正式支持**路径（替同事/朋友生成特定类型订阅时用）；三档规则预设（小白/进阶/全量）平台内置、V1 先落一档，不暴露给用户。
+2. **零必填选项**：主路径 = 一个输入框 + 一个按钮，`target=auto`（UA 识别）为默认**便利**路径；折叠的「指定客户端」为**正式支持**路径（替同事/朋友生成特定类型订阅时用）；三档规则预设（默认 / 地区分组+AI 分流 / 全量+去广告）平台内置、随版本演进，暴露于高级折叠区（2026-10-24 修订：原「V1 先落一档、不暴露给用户」提前补齐为三档；主路径零选项不变）。
 3. **单镜像一条命令（局域网开箱）**：单 image 内置前端静态页 + Extended 后端 + 内部反代（nginx）；V1 验收只覆盖局域网 HTTP 开箱；公网 HTTPS 不进 V1 架构，README 附录提供非官方 Caddy 反代示例（必须配合 token，见前提 6）。
 4. **V1 输出标准 `/sub` 订阅链接**（默认 auto）；兼容范围按「已验证客户端 × 协议 × 模板」实测标注，不照抄 Sub-Store 清单，不承诺「同一链接总能返回正确格式」（UA 被改写/未知客户端/同名不同内核是已知限制）。**链接隐私属性（D6 定案）**：`/sub` 链接以 URL 编码内嵌朋友的订阅凭据——页面结果态与 README 明示「链接含订阅信息，仅自用勿转发」；nginx 对 `/sub`、`/api/*` 关闭 access_log（或 log_format 去掉 `$args`），sidecar 日志不记录订阅 URL；根治 = V2 短链（服务端映射，已在候选池）。
 5. **规则新鲜度承诺降级为**「默认配置的远程规则自动更新」，逐客户端验证刷新路径（V1 验证范围 = Assignment 实测的两客户端，矩阵其余行标「未验证」）；降级行为选定：上游远端配置不可达时**不做本地兜底**（维持「不镜像不拷贝」），表现为客户端本次「更新订阅」失败或沿用其本地缓存（客户端行为），`/api/health` 徽章转 stale，README 说明；V2 候选「last-known-good 缓存」（若做需修订本条约束）。
@@ -92,6 +92,7 @@ Codex（gpt-6.1-sol）冷读结论，已交叉比对并采纳：
 - ~~前端组件化~~ 已定案（2026-10-23 实施启动）：**Vue 3**（三状态即状态机，响应式对口；T5 组件测试走 vitest + @vue/test-utils）
 - ~~auto 识别失败时的 fallback target 顺序策略~~ 实测收口（Assignment ⑤）：Extended 对未知 UA 直接返回 400「不支持的 target 参数值」，无 fallback 序列；V1 不引入 fallback，错误映射 + 「指定客户端」逃生口承接
 - ~~三档预设 V1 先落哪一档~~ 已定案：**ACL4SSR_Online.ini**（Assignment ③ 实测唯一 200 的候选；倾向的 MultiMode URL 已 404，另两档落 V1.5）
+- ~~三档预设补齐~~ 已定案（2026-10-24，下一版本实作）：内置三档 = Online（default）/ Full_MultiMode（full_multimode，地区分组 + AI 分流）/ Full_AdblockPlus（full_adblockplus，全量 + 去广告），暴露于「高级」折叠区；三个 URL 均实测 200（MultiMode 正确路径为 `ACL4SSR_Online_Full_MultiMode.ini`，此前 404 的是不带 Full 的路径；Ai平台组候选含全部地区组，AI 应用可定向指定地区）
 - （进程托管已定案：s6-overlay，见工程评审 Decision ledger R1 / D2）
 
 ## Success Criteria
@@ -126,7 +127,7 @@ Codex（gpt-6.1-sol）冷读结论，已交叉比对并采纳：
 3. 前端三状态页落地（以线框图为验收基准）+ sidecar `/api/health`、`/api/clients`
 4. 客户端 chips 交互 + 使用 sidecar `/api/preview` 返回的 `link`（服务端拼接、含 token 注入路径，前端不自行拼链接）+ 错误文案翻译
 5. 用 Assignment 数据回填 README 兼容矩阵表；两档部署文档
-6. V1.5 候选池：短链、导入深链、服务端二维码、三档预设补齐
+6. V1.5 候选池：短链、导入深链、服务端二维码（三档预设补齐已于 2026-10-24 提前定案实作，见 Open Questions）
 
 ## What I noticed about how you think
 

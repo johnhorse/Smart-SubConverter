@@ -2,6 +2,8 @@
 
 前端与 sidecar 的唯一接口。本文档是两端的 truth source：字段名、错误码、文案以此为准，改动需经主会话（双向同步改）。
 
+> 增量修订（2026-10-24，规则模板切换）：`presets` 内置三档；`POST /api/preview` 增可选 `preset` 请求字段与响应 `preset` 回显；新增错误码 `bad_preset`；`PRESET_URL` 语义收窄为仅覆盖 default 档。其余形状不变。
+
 Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081，仅容器内回环）。注意：**不能用 `PORT`**——该 env 已被 Extended（subconverter）占用。
 
 ## GET /api/clients
@@ -22,24 +24,29 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
     { "id": "v2rayn", "label": "v2rayN", "target": "v2rayn", "verified": false }
   ],
   "presets": [
-    { "id": "default", "name": "ACL4SSR Online", "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online.ini" }
+    { "id": "default", "name": "ACL4SSR 默认", "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online.ini" },
+    { "id": "full_multimode", "name": "地区分组 + AI 分流", "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_MultiMode.ini" },
+    { "id": "full_adblockplus", "name": "全量 + 去广告", "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_AdblockPlus.ini" }
   ]
 }
 ```
 
 - chips 顺序即返回顺序（`auto` 永远第一，前端默认选中）
 - `verified`：真机实测通过后置 true（V1 发布时全部 false，兼容矩阵随实测更新）
-- preset url 可被 env `PRESET_URL` 覆盖（冒烟测试用），覆盖时 `id/name` 不变
+- presets 顺序即返回顺序（`default` 永远第一，前端默认选中）；三个 url 均为 2026-10-24 实测 200。`full_multimode` 含按地区分组（港日美台新韩）+ 💬 Ai平台 组，Ai平台候选含全部地区组——ChatGPT / Claude / Gemini 等可定向走指定地区（在客户端的 Ai平台组里选地区即可，无需重新生成订阅）
+- env `PRESET_URL` 仅覆盖 `default` 档的 url（冒烟测试用），覆盖时 `id/name` 不变，其余两档不受影响
 
 ## POST /api/preview
 
 请求体：
 
 ```json
-{ "url": "https://…订阅链接…", "target": "auto" }
+{ "url": "https://…订阅链接…", "target": "auto", "preset": "full_multimode" }
 ```
 
 `target` 缺省、空串或 `"auto"` = 自动；否则必须是注册表中的 target 值。
+
+`preset` 可选，缺省、空串或 `"default"` = 默认档；否则必须是 `/api/clients` presets 中的 id。非注册表 id → `bad_preset`（**不做静默回落**——防「以为选了地区分组、实际拿到默认模板」的链接流出）。选中的档位烙进探测请求与生成 link 的 `config=` 参数。
 
 响应恒为 HTTP 200（sidecar 处理的错误都体现在字段里）：
 
@@ -47,6 +54,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 {
   "ok": true,
   "target": "clash",
+  "preset": { "id": "full_multimode", "name": "地区分组 + AI 分流" },
   "errorCode": null,
   "message": "",
   "link": "http://192.168.1.10:8080/sub?target=auto&url=…&config=…"
@@ -54,16 +62,18 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 ```
 
 - **`link` 永远非空**（D4 定案）：`ok:false` 时照常返回，前端仍展示并标注「未通过校验，仍可试用」
+- `preset`：本次生效的档位（id + name）。`bad_preset` 时为 `null`；其余情况（含 `ok:false`）恒回显解析后的合法档位，前端结果页据此标注「模板：{name}」
 - `ok:false` 时 `target` 为探测用的 target（auto → "clash"），`errorCode` 与 `message` 必填
 - `link` 由 sidecar 服务端拼接，前端一律直接使用该字段，不自行拼接
 
 ### sidecar 行为
 
-1. **URL 预校验（D7）**，不过返回对应 errorCode，不做上游调用：
+1. **预校验（D7 + 规则模板）**，不过返回对应 errorCode，不做上游调用：
    - 空串 / 纯空白 → `bad_url_empty`
    - 非 URL 或 scheme ∉ {http, https} → `bad_url_format`
    - 主机名为私网/回环字面量（localhost、127.0.0.0/8、10.0.0.0/8、172.16.0.0/12、192.168.0.0/16、169.254.0.0/16、0.0.0.0、[::1]）→ `bad_url_private`
-2. **探测转换**：GET `${EXTENDED_BASE}/sub?target=<探测target>&url=<enc>&config=<enc 预设url>`，超时 **10s**：
+   - `preset` 非注册表 id → `bad_preset`（此时不调上游；`link` 仍以 default 档生成以维持「link 永远非空」，`preset` 回显 `null`）
+2. **探测转换**：GET `${EXTENDED_BASE}/sub?target=<探测target>&url=<enc>&config=<enc 所选档位url>`，超时 **10s**：
    - 探测 target：用户显式指定 → 该 target；auto → `clash`（设计定案的启发式）
    - UA：按 target 家族给代表性 UA（clash→`clash-verge/v1.7.7`，surge→`Surge Mac/2398`，其余给通用 UA；探测 target 显式时 UA 影响很小）
    - 200 且格式粗验通过（clash 系：body 含 `proxies:`；surge 系：body 含 `[General]` 或以 `#!MANAGED-CONFIG` 开头；singbox：可 JSON 解析且含 `outbounds`；其余 target：body 非空且不含 `Invalid request`）→ `ok:true`
@@ -72,7 +82,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
    - 连接失败 → `backend_down`；超时 → `upstream_timeout`
 3. **link 拼接**（与探测结果无关，永远执行）：
    ```
-   ${origin}/sub?target=${请求target原样：auto或指定值}&url=${encodeURIComponent(用户url)}&config=${encodeURIComponent(预设url)}
+   ${origin}/sub?target=${请求target原样：auto或指定值}&url=${encodeURIComponent(用户url)}&config=${encodeURIComponent(所选档位url)}
    ```
    `SUB_TOKEN` env 非空时追加 `&token=${encodeURIComponent(SUB_TOKEN)}`
 4. **origin 推导（R3-1 定案，优先级从高到低）**：
@@ -86,6 +96,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 | `bad_url_empty` | 没贴链接 | 先粘贴你的订阅链接，再点「转换」 |
 | `bad_url_format` | 不是 http(s) 链接 | 这不像一个订阅链接——检查一下是不是复制全了？ |
 | `bad_url_private` | 私网/回环地址 | 这个链接指向内网地址，转换服务够不着它 |
+| `bad_preset` | preset 非注册表 id（仅手改请求/前后端错配会出现，UI 选不出非法值） | 这个模板不可用，重新选一个试试 |
 | `upstream_error` | Extended 返回错误/格式不对 | 转换没成功——可以试试展开「指定客户端」换一个，或稍后再来 |
 | `upstream_timeout` | sidecar→Extended 10s 超时 | 等太久没等到结果，再试一次看看？ |
 | `backend_down` | Extended 连不上 | 转换引擎暂时没响应，稍后再试 |
@@ -100,7 +111,7 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
   "backendVersion": "v1.10.5",
   "presets": [
     {
-      "name": "ACL4SSR Online",
+      "name": "ACL4SSR 默认",
       "url": "https://raw.githubusercontent.com/…/ACL4SSR_Online.ini",
       "lastModifiedAt": null,
       "lastSuccessAt": "2026-10-23T15:00:00Z",
@@ -129,7 +140,7 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 | `EXTENDED_BASE` | `http://127.0.0.1:25500` | Extended 内部地址 |
 | `PUBLIC_BASE_URL` | 无 | link origin 覆盖 + 镜像层转 `MANAGED_CONFIG_PREFIX`（见 assignment-findings ⑤） |
 | `SUB_TOKEN` | 空 | 非空时注入生成链接 |
-| `PRESET_URL` | ACL4SSR_Online.ini | 预设覆盖（冒烟用） |
+| `PRESET_URL` | ACL4SSR_Online.ini | 仅覆盖 `default` 档 url（冒烟用；其余档不受影响） |
 | `POLL_INTERVAL` | `15m` | 健康轮询周期 |
 
 ## nginx 路由（镜像层，与契约相关部分）
