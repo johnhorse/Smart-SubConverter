@@ -11,10 +11,8 @@ import (
 	"time"
 )
 
-// 预设远端配置 URL（契约默认值，可被 env PRESET_URL 覆盖，冒烟测试用）
+// default 档远端配置 URL（env PRESET_URL 仅覆盖 default 档 url，冒烟测试用）
 const defaultPresetURL = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online.ini"
-
-const defaultPresetName = "ACL4SSR Online"
 
 // 探测转换的 sidecar→Extended 超时（契约钉死 10s；测试注入短值）
 const defaultProbeTimeout = 10 * time.Second
@@ -50,12 +48,18 @@ type healthResponse struct {
 	Presets        []presetStatus `json:"presets"`
 }
 
+type presetRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 type previewResponse struct {
-	OK        bool    `json:"ok"`
-	Target    string  `json:"target"`
-	ErrorCode *string `json:"errorCode"`
-	Message   string  `json:"message"`
-	Link      string  `json:"link"`
+	OK        bool       `json:"ok"`
+	Target    string     `json:"target"`
+	Preset    *presetRef `json:"preset"`
+	ErrorCode *string    `json:"errorCode"`
+	Message   string     `json:"message"`
+	Link      string     `json:"link"`
 }
 
 // 客户端注册表（契约冻结：顺序即 chips 顺序，auto 永远第一；verified 随真机实测置 true）
@@ -80,14 +84,31 @@ func isRegisteredTarget(t string) bool {
 	return false
 }
 
+// 内置三档规则模板（契约 GET /api/clients presets 冻结值：顺序即返回顺序，default 永远第一）
+var presetTable = []presetEntry{
+	{"default", "ACL4SSR 默认", defaultPresetURL},
+	{"full_multimode", "地区分组 + AI 分流", "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_MultiMode.ini"},
+	{"full_adblockplus", "全量 + 去广告", "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_AdblockPlus.ini"},
+}
+
+// resolvePresets 拷贝内置三档；PRESET_URL 仅覆盖 default 档 url（id/name 与其余两档不受影响）
+func resolvePresets(presetURL string) []presetEntry {
+	ps := make([]presetEntry, len(presetTable))
+	copy(ps, presetTable)
+	if presetURL != "" && presetURL != ps[0].URL {
+		ps[0].URL = presetURL
+	}
+	return ps
+}
+
 // config 汇总 sidecar 全部环境变量（main 启动时读定；变量表见契约「环境变量」节）
 type config struct {
-	extendedBase string
+	extendedBase  string
 	publicBaseURL string
-	subToken     string
-	presetURL    string
-	probeTimeout time.Duration
-	pollInterval time.Duration
+	subToken      string
+	presetURL     string
+	probeTimeout  time.Duration
+	pollInterval  time.Duration
 }
 
 func loadConfigFromEnv() config {
@@ -98,12 +119,12 @@ func loadConfigFromEnv() config {
 		return def
 	}
 	c := config{
-		extendedBase: getOr("EXTENDED_BASE", "http://127.0.0.1:25500"),
+		extendedBase:  getOr("EXTENDED_BASE", "http://127.0.0.1:25500"),
 		publicBaseURL: os.Getenv("PUBLIC_BASE_URL"),
-		subToken:     os.Getenv("SUB_TOKEN"),
-		presetURL:    getOr("PRESET_URL", defaultPresetURL),
-		probeTimeout: defaultProbeTimeout,
-		pollInterval: 15 * time.Minute,
+		subToken:      os.Getenv("SUB_TOKEN"),
+		presetURL:     getOr("PRESET_URL", defaultPresetURL),
+		probeTimeout:  defaultProbeTimeout,
+		pollInterval:  15 * time.Minute,
 	}
 	if raw := os.Getenv("POLL_INTERVAL"); raw != "" {
 		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
@@ -117,6 +138,7 @@ func loadConfigFromEnv() config {
 
 type server struct {
 	cfg         config
+	presets     []presetEntry
 	mon         *monitor
 	probeClient *http.Client
 }
@@ -124,6 +146,7 @@ type server struct {
 func newServer(cfg config) *server {
 	return &server{
 		cfg:         cfg,
+		presets:     resolvePresets(cfg.presetURL),
 		mon:         newMonitor(cfg),
 		probeClient: &http.Client{Timeout: cfg.probeTimeout},
 	}
@@ -140,7 +163,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func (s *server) handleClients(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, clientsResponse{
 		Clients: registry,
-		Presets: []presetEntry{{ID: "default", Name: defaultPresetName, URL: s.cfg.presetURL}},
+		Presets: s.presets,
 	})
 }
 

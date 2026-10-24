@@ -110,9 +110,20 @@ import json, sys
 d = json.load(sys.stdin)
 n = len(d["clients"])
 assert n == 9, f"clients={n}"
-assert any("host.docker.internal" in p["url"] for p in d["presets"]), "clients presets 未带 PRESET_URL 覆盖"
+ps = d["presets"]
+assert len(ps) == 3, f"presets={len(ps)}"
+ids = [p["id"] for p in ps]
+assert ids == ["default", "full_multimode", "full_adblockplus"], f"preset ids={ids}"
+u0 = ps[0]["url"]
+assert "host.docker.internal" in u0, f"default 档未带 PRESET_URL 覆盖: {u0}"
+n0 = ps[0]["name"]
+assert n0 == "ACL4SSR 默认", f"default name={n0}"
+u1 = ps[1]["url"]
+u2 = ps[2]["url"]
+assert u1 == "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_MultiMode.ini", f"multimode url={u1}"
+assert u2 == "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_AdblockPlus.ini", f"adblockplus url={u2}"
 '; then
-    echo "PASS /api/clients 200 且含 9 个 clients + 预设覆盖"
+    echo "PASS /api/clients 200：9 clients + 3 presets（default 档带 PRESET_URL 覆盖，其余两档内置）"
 else
     echo "FAIL /api/clients"
     rc=1
@@ -180,6 +191,23 @@ assert_fetch_link() {
 
 assert_fetch_link "经 nginx 以 clash UA 拉取 link" "$CLASH_UA" "proxies:"
 assert_fetch_link "经 nginx 以 surge UA 拉取 link（auto 按 UA 适配）" "$SURGE_UA" "[General]"
+
+# ---- preset 档位链路：full_multimode → preset 回显 + link 的 config= 为 Full_MultiMode 内置 URL
+# （PRESET_URL 只覆盖 default 档；不断言 ok——离线环境 Extended 拉不到 GitHub config，探测失败属预期）
+FM_ENC=$(python3 -c 'import urllib.parse; print(urllib.parse.quote("https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_MultiMode.ini", safe=""))')
+if curl -s -m 30 -X POST "$BASE/api/preview" \
+    -H 'Content-Type: application/json' \
+    -d "{\"url\":\"$SUB_URL\",\"target\":\"auto\",\"preset\":\"full_multimode\"}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['preset'] == {'id': 'full_multimode', 'name': '地区分组 + AI 分流'}, 'preset=%s' % d['preset']
+assert 'config=' + sys.argv[1] in d['link'], 'link=%s' % d['link']
+" "$FM_ENC"; then
+    echo "PASS /api/preview preset=full_multimode（preset 回显 + link config= 为 Full_MultiMode URL）"
+else
+    echo "FAIL /api/preview preset=full_multimode"
+    rc=1
+fi
 
 if [ "$rc" -eq 0 ]; then
     echo "== 冒烟三步全部 PASS =="

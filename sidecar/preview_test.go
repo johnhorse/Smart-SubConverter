@@ -316,3 +316,156 @@ func TestPreviewUnknownTargetFallsBackToClash(t *testing.T) {
 		t.Fatalf("未知 target 响应 = %+v", resp)
 	}
 }
+
+const (
+	fullMultiModeURL   = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_MultiMode.ini"
+	fullAdblockPlusURL = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_AdblockPlus.ini"
+)
+
+// preset 缺省/空串/"default" 均落 default 档；testConfig 的 presetURL 即覆盖后的 default url
+func TestPreviewPresetDefaultVariants(t *testing.T) {
+	var gotConfig string
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotConfig = r.URL.Query().Get("config")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("proxies: x"))
+	}))
+	defer ext.Close()
+	s := newServer(testConfig(ext.URL))
+	for _, body := range []string{
+		`{"url":"https://sub.example.com/l"}`,
+		`{"url":"https://sub.example.com/l","preset":""}`,
+		`{"url":"https://sub.example.com/l","preset":"default"}`,
+	} {
+		resp, _ := postPreview(t, s, body, "h:1", "")
+		if !resp.OK || resp.Preset == nil || resp.Preset.ID != "default" || resp.Preset.Name != "ACL4SSR 默认" {
+			t.Fatalf("body %s → preset 回显 %+v，应 default 档", body, resp.Preset)
+		}
+		if gotConfig != "https://example.com/preset.ini" {
+			t.Errorf("body %s → 探测 config=%s，default 档应用 PRESET_URL 覆盖值", body, gotConfig)
+		}
+		if !strings.Contains(resp.Link, "config="+jsQueryEscape("https://example.com/preset.ini")) {
+			t.Errorf("body %s → link 未烙 default 档 config: %s", body, resp.Link)
+		}
+	}
+}
+
+// 合法档位：探测与 link 的 config= 均为该档内置 URL（PRESET_URL 只覆盖 default 档，不影响其余两档）
+func TestPreviewPresetFullMultiMode(t *testing.T) {
+	var gotConfig string
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotConfig = r.URL.Query().Get("config")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("proxies: x"))
+	}))
+	defer ext.Close()
+	s := newServer(testConfig(ext.URL))
+	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/l","preset":"full_multimode"}`, "h:1", "")
+	if !resp.OK || resp.Preset == nil || resp.Preset.ID != "full_multimode" || resp.Preset.Name != "地区分组 + AI 分流" {
+		t.Fatalf("preset 回显 = %+v", resp.Preset)
+	}
+	if gotConfig != fullMultiModeURL {
+		t.Errorf("探测 config=%s，应用 Full_MultiMode URL（PRESET_URL 不得覆盖该档）", gotConfig)
+	}
+	if !strings.Contains(resp.Link, "config="+jsQueryEscape(fullMultiModeURL)) {
+		t.Errorf("link 未烙 full_multimode 档 config: %s", resp.Link)
+	}
+}
+
+func TestPreviewBadPreset(t *testing.T) {
+	called := false
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(200)
+	}))
+	defer ext.Close()
+	s := newServer(testConfig(ext.URL))
+
+	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/l","preset":"nope"}`, "h:1", "")
+	if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "bad_preset" {
+		t.Fatalf("非法 preset 响应 = %+v", resp)
+	}
+	if resp.Preset != nil {
+		t.Errorf("bad_preset 时 preset 应回显 null: %+v", resp.Preset)
+	}
+	if resp.Message == "" {
+		t.Error("bad_preset 时 message 必填")
+	}
+	if resp.Target != "clash" {
+		t.Errorf("target = %s，auto 探测值应为 clash", resp.Target)
+	}
+	if called {
+		t.Error("bad_preset 不应触达上游")
+	}
+	// link 仍以 default 档生成（此处为 testConfig 覆盖后的 default url），维持「link 永远非空」
+	if !strings.Contains(resp.Link, "config="+jsQueryEscape("https://example.com/preset.ini")) {
+		t.Errorf("bad_preset 的 link 应以 default 档生成: %s", resp.Link)
+	}
+
+	// 契约预校验判定序：bad_url_* 先于 bad_preset
+	resp2, _ := postPreview(t, s, `{"url":"","preset":"nope"}`, "h:1", "")
+	if resp2.ErrorCode == nil || *resp2.ErrorCode != "bad_url_empty" {
+		t.Errorf("url 与 preset 双非法 → code %v，应 bad_url_empty 优先", resp2.ErrorCode)
+	}
+	// bad_url_* 时 preset 合法 → 恒回显该档
+	resp3, _ := postPreview(t, s, `{"url":"not a url","preset":"full_multimode"}`, "h:1", "")
+	if resp3.ErrorCode == nil || *resp3.ErrorCode != "bad_url_format" {
+		t.Fatalf("bad_url_format 响应 = %+v", resp3)
+	}
+	if resp3.Preset == nil || resp3.Preset.ID != "full_multimode" {
+		t.Errorf("bad_url_format + 合法 preset → 回显 %+v，应恒回显生效档", resp3.Preset)
+	}
+}
+
+// ok:false（上游失败）时 preset 仍回显生效档位，link 仍烙该档 config=
+func TestPreviewPresetEchoOnFailure(t *testing.T) {
+	ext := stubExtended(t, 500, "boom", 0)
+	defer ext.Close()
+	s := newServer(testConfig(ext.URL))
+	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/l","preset":"full_adblockplus"}`, "h:1", "")
+	if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "upstream_error" {
+		t.Fatalf("响应 = %+v", resp)
+	}
+	if resp.Preset == nil || resp.Preset.ID != "full_adblockplus" || resp.Preset.Name != "全量 + 去广告" {
+		t.Errorf("ok:false 时 preset 应回显生效档位: %+v", resp.Preset)
+	}
+	if !strings.Contains(resp.Link, "config="+jsQueryEscape(fullAdblockPlusURL)) {
+		t.Errorf("link 应烙 full_adblockplus 档 config: %s", resp.Link)
+	}
+}
+
+// /api/clients：三档顺序与精确值；PRESET_URL 只覆盖 default 档 url，id/name 不变
+func TestHandleClientsPresets(t *testing.T) {
+	w := httptest.NewRecorder()
+	newServer(testConfig("http://unused")).handleClients(w, httptest.NewRequest(http.MethodGet, "/api/clients", nil))
+	var resp clientsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Presets) != 3 {
+		t.Fatalf("presets 档数 = %d，应为 3", len(resp.Presets))
+	}
+	want := []presetEntry{
+		{"default", "ACL4SSR 默认", "https://example.com/preset.ini"},
+		{"full_multimode", "地区分组 + AI 分流", fullMultiModeURL},
+		{"full_adblockplus", "全量 + 去广告", fullAdblockPlusURL},
+	}
+	for i, w := range want {
+		if resp.Presets[i] != w {
+			t.Errorf("presets[%d] = %+v, want %+v", i, resp.Presets[i], w)
+		}
+	}
+
+	// 无 PRESET_URL 覆盖时 default 档用内置 url
+	cfg := testConfig("http://unused")
+	cfg.presetURL = ""
+	w2 := httptest.NewRecorder()
+	newServer(cfg).handleClients(w2, httptest.NewRequest(http.MethodGet, "/api/clients", nil))
+	var resp2 clientsResponse
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
+		t.Fatal(err)
+	}
+	if resp2.Presets[0].URL != defaultPresetURL {
+		t.Errorf("无覆盖时 default url = %s, want %s", resp2.Presets[0].URL, defaultPresetURL)
+	}
+}

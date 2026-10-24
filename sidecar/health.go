@@ -23,22 +23,21 @@ type presetState struct {
 }
 
 type monitor struct {
-	mu              sync.Mutex
-	backendVersion  string
-	preset          presetState
-	extendedBase    string
-	presetURL       string
-	presetName      string
-	client          *http.Client
-	retryInterval   time.Duration // 未就绪时的重试间隔（默认 5s；测试注入短值）
+	mu             sync.Mutex
+	backendVersion string
+	presets        []presetState // 与 defs 下标对齐
+	defs           []presetEntry // 解析后的三档（default 档 url 已按 PRESET_URL 覆盖）
+	extendedBase   string
+	client         *http.Client
+	retryInterval  time.Duration // 未就绪时的重试间隔（默认 5s；测试注入短值）
 }
 
 func newMonitor(cfg config) *monitor {
 	return &monitor{
 		backendVersion: "unknown",
+		presets:        make([]presetState, len(presetTable)),
+		defs:           resolvePresets(cfg.presetURL),
 		extendedBase:   cfg.extendedBase,
-		presetURL:      cfg.presetURL,
-		presetName:     defaultPresetName,
 		client:         &http.Client{Timeout: 10 * time.Second},
 		retryInterval:  5 * time.Second,
 	}
@@ -51,7 +50,14 @@ func (m *monitor) pollLoop(ctx context.Context, interval time.Duration) {
 		// preset 从未成功或版本未取到时用短间隔重试，直到就绪再进入正常周期
 		d := interval
 		m.mu.Lock()
-		ready := m.preset.lastSuccessAt != nil && m.backendVersion != "unknown"
+		presetReady := false
+		for i := range m.presets {
+			if m.presets[i].lastSuccessAt != nil {
+				presetReady = true
+				break
+			}
+		}
+		ready := presetReady && m.backendVersion != "unknown"
 		m.mu.Unlock()
 		if !ready && d > m.retryInterval {
 			d = m.retryInterval
@@ -67,7 +73,7 @@ func (m *monitor) pollLoop(ctx context.Context, interval time.Duration) {
 
 func (m *monitor) poll() {
 	m.pollBackendVersion()
-	m.pollPreset()
+	m.pollPresets()
 }
 
 func (m *monitor) pollBackendVersion() {
@@ -85,12 +91,18 @@ func (m *monitor) pollBackendVersion() {
 	m.mu.Unlock()
 }
 
-// pollPreset 对预设 URL 发 HEAD，读 etag + last-modified。
+// pollPresets 对每个预设档位 url 发 HEAD，读 etag + last-modified。
 // 抓取失败保留旧 lastModifiedAt/lastSuccessAt（上次成功的时间不因本次失败失效）。
-func (m *monitor) pollPreset() {
+func (m *monitor) pollPresets() {
+	for i, def := range m.defs {
+		m.pollPresetAt(i, def.URL)
+	}
+}
+
+func (m *monitor) pollPresetAt(i int, rawURL string) {
 	failed := true
 	var etag, lastModified string
-	req, err := http.NewRequest(http.MethodHead, m.presetURL, nil)
+	req, err := http.NewRequest(http.MethodHead, rawURL, nil)
 	if err == nil {
 		var resp *http.Response
 		resp, err = m.client.Do(req)
@@ -105,23 +117,24 @@ func (m *monitor) pollPreset() {
 	}
 	if err != nil {
 		// preset URL 是部署者配置而非用户订阅链接，错误类型入日志可定位网络问题且不违 D6
-		log.Printf("health poll preset 失败: %T", err)
+		log.Printf("health poll preset[%d] 失败: %T", i, err)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	st := &m.presets[i]
 	if failed {
-		m.preset.lastAttemptFailed = true
+		st.lastAttemptFailed = true
 		return
 	}
-	m.preset.lastAttemptFailed = false
+	st.lastAttemptFailed = false
 	now := time.Now()
-	m.preset.lastSuccessAt = &now
-	m.preset.etag = etag
-	m.preset.lastModifiedAt = nil
+	st.lastSuccessAt = &now
+	st.etag = etag
+	st.lastModifiedAt = nil
 	if lastModified != "" {
 		if t, err := http.ParseTime(lastModified); err == nil {
 			utc := t.UTC()
-			m.preset.lastModifiedAt = &utc
+			st.lastModifiedAt = &utc
 		}
 	}
 }
@@ -153,15 +166,16 @@ func rfc3339Ptr(t *time.Time) *string {
 func (m *monitor) snapshot() healthResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	p := m.preset
-	return healthResponse{
-		BackendVersion: m.backendVersion,
-		Presets: []presetStatus{{
-			Name:           m.presetName,
-			URL:            m.presetURL,
-			LastModifiedAt: rfc3339Ptr(p.lastModifiedAt),
-			LastSuccessAt:  rfc3339Ptr(p.lastSuccessAt),
-			Status:         p.statusOf(time.Now()),
-		}},
+	out := make([]presetStatus, len(m.defs))
+	for i, def := range m.defs {
+		st := m.presets[i]
+		out[i] = presetStatus{
+			Name:           def.Name,
+			URL:            def.URL,
+			LastModifiedAt: rfc3339Ptr(st.lastModifiedAt),
+			LastSuccessAt:  rfc3339Ptr(st.lastSuccessAt),
+			Status:         st.statusOf(time.Now()),
+		}
 	}
+	return healthResponse{BackendVersion: m.backendVersion, Presets: out}
 }

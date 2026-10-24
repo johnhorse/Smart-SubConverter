@@ -106,13 +106,13 @@ func isTimeoutErr(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
-// probeConvert 向 Extended 发探测 GET /sub 并按契约归类结果。
+// probeConvert 向 Extended 发探测 GET /sub 并按契约归类结果（config 用所选档位 url）。
 // 日志只记 target 与 errorCode（D6：探测 URL 含订阅链接，绝不入日志）。
-func (s *server) probeConvert(subURL, target string) probeResult {
+func (s *server) probeConvert(subURL, target, presetURL string) probeResult {
 	q := url.Values{}
 	q.Set("target", target)
 	q.Set("url", subURL)
-	q.Set("config", s.cfg.presetURL)
+	q.Set("config", presetURL)
 	req, err := http.NewRequest(http.MethodGet, s.cfg.extendedBase+"/sub?"+q.Encode(), nil)
 	if err != nil {
 		return probeResult{false, "backend_down", "构造上游请求失败"}
@@ -163,12 +163,27 @@ var validateMessages = map[string]string{
 	"bad_url_empty":   "未提供订阅链接",
 	"bad_url_format":  "不是有效的 http(s) 链接",
 	"bad_url_private": "链接指向私网或回环地址，转换服务无法访问",
+	"bad_preset":      "指定的规则模板不可用",
+}
+
+// resolvePreset：preset 缺省/空串/"default" → default 档；注册表 id → 该档；否则非法
+func resolvePreset(presets []presetEntry, id string) (presetEntry, bool) {
+	if id == "" {
+		return presets[0], true
+	}
+	for _, p := range presets {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return presetEntry{}, false
 }
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SubURL string `json:"url"`
 		Target string `json:"target"`
+		Preset string `json:"preset"`
 	}
 	// 契约要求响应恒 200：请求体解析失败按「未提供链接」处理，不发明新错误码
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
@@ -182,18 +197,41 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		probeTarget = "clash"
 	}
 
-	origin := deriveOrigin(s.cfg.publicBaseURL, r.Host, r.Header.Get("X-Forwarded-Proto"))
-	link := buildLink(origin, linkTarget, req.SubURL, s.cfg.presetURL, s.cfg.subToken)
+	// 生效档位烙进探测请求与 link 的 config=（契约「选中的档位烙进」）；
+	// bad_preset 时 link 仍以 default 档生成，维持「link 永远非空」
+	sel, presetOK := resolvePreset(s.presets, req.Preset)
+	linkPresetURL := sel.URL
+	if !presetOK {
+		linkPresetURL = s.presets[0].URL
+	}
+	// preset 回显：bad_preset 时 null，其余情况（含 ok:false）恒回显解析后的合法档
+	var echo *presetRef
+	if presetOK {
+		echo = &presetRef{ID: sel.ID, Name: sel.Name}
+	}
 
+	origin := deriveOrigin(s.cfg.publicBaseURL, r.Host, r.Header.Get("X-Forwarded-Proto"))
+	link := buildLink(origin, linkTarget, req.SubURL, linkPresetURL, s.cfg.subToken)
+
+	// 契约预校验判定序：bad_url_* 先于 bad_preset
 	if code := validateURL(req.SubURL); code != "" {
 		writeJSON(w, http.StatusOK, previewResponse{
-			OK: false, Target: probeTarget, ErrorCode: &code, Message: validateMessages[code], Link: link,
+			OK: false, Target: probeTarget, Preset: echo, ErrorCode: &code, Message: validateMessages[code], Link: link,
+		})
+		return
+	}
+	if !presetOK {
+		// 不静默回落（防「以为选了 A、实际拿到默认模板」的链接流出）；preset 输入值不入日志
+		code := "bad_preset"
+		log.Printf("preview 预校验: code=bad_preset target=%s", probeTarget)
+		writeJSON(w, http.StatusOK, previewResponse{
+			OK: false, Target: probeTarget, Preset: nil, ErrorCode: &code, Message: validateMessages[code], Link: link,
 		})
 		return
 	}
 
-	pr := s.probeConvert(req.SubURL, probeTarget)
-	resp := previewResponse{OK: pr.ok, Target: probeTarget, Message: pr.message, Link: link}
+	pr := s.probeConvert(req.SubURL, probeTarget, sel.URL)
+	resp := previewResponse{OK: pr.ok, Target: probeTarget, Preset: echo, Message: pr.message, Link: link}
 	if !pr.ok {
 		resp.ErrorCode = &pr.errorCode
 	}
