@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -114,7 +115,8 @@ func (m *snapshotManager) bootstrap() {
 	}
 }
 
-// readVendorMeta 解析出厂层 SNAPSHOT_META（RFC3339 或 unix 秒），失败返回 nil
+// readVendorMeta 解析出厂层 SNAPSHOT_META 取拉取时间：JSON（fetch.sh 产出形如
+// {"pulledAt":"2026-10-24T09:56:16Z",...}）、纯 RFC3339、unix 秒三种，失败返回 nil
 func (m *snapshotManager) readVendorMeta() *time.Time {
 	data, err := os.ReadFile(filepath.Join(m.vendorDir, snapshotMetaFile))
 	if err != nil {
@@ -129,6 +131,15 @@ func (m *snapshotManager) readVendorMeta() *time.Time {
 	if _, err := fmt.Sscanf(raw, "%d", &sec); err == nil && sec > 0 {
 		t := time.Unix(sec, 0).UTC()
 		return &t
+	}
+	var meta struct {
+		PulledAt string `json:"pulledAt"`
+	}
+	if err := json.Unmarshal([]byte(raw), &meta); err == nil && meta.PulledAt != "" {
+		if t, err := time.Parse(time.RFC3339, meta.PulledAt); err == nil {
+			utc := t.UTC()
+			return &utc
+		}
 	}
 	log.Printf("snapshot %s 内容无法解析: %q", snapshotMetaFile, raw)
 	return nil

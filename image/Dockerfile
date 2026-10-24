@@ -64,6 +64,11 @@ COPY frontend/dist /usr/share/nginx/html
 # sidecar 启动时复制到 {DATA_DIR}/rules/ 并改写 .ini 后供引擎本地读取（api-contract.md「规则快照」节）
 COPY image/rules-snapshot/ /base/rules-snapshot/
 
+# QX 修复（v1.3.2）：基础模板的 network/server check URL 原为 gstatic https——QX 下载远程配置时
+# 直连探测该 URL（官方 TF log：须直连可达），国内直连 gstatic 不通 → 「malformed network check URL」
+# 导入失败。构建时原位替换为国内直连可达的 vivo 204（不 vendor 模板：base 镜像升级自动带新版再补丁）
+RUN sed -i 's|https://www.gstatic.com/generate_204|http://wifi.vivo.com.cn/generate_204|g' /base/base/all_base.tpl
+
 # s6 服务树（nginx / sidecar / subconverter 三个 longrun + managed-config oneshot）+ user bundle
 # 注意：s6-rc oneshot 的 up 文件是 execline 脚本（shebang 不生效），故只放一行指向 sh 脚本
 COPY image/s6/ /etc/s6-overlay/

@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -298,6 +299,26 @@ func TestBootstrapVendorOffline(t *testing.T) {
 	m.bootstrap()
 	if got := readTB(t, filepath.Join(m.rulesDir, "a.list")); got != "newer-than-vendor" {
 		t.Errorf("运行时层已有文件不应被出厂层覆盖: %q", got)
+	}
+}
+
+// SNAPSHOT_META 为 fetch.sh 产出的 JSON 形态（v1.3.0 早期实现与 readVendorMeta 的
+// 纯时间戳约定不一致导致解析失败）：readVendorMeta 兼容取 pulledAt
+func TestBootstrapVendorMetaJSON(t *testing.T) {
+	vendor := t.TempDir()
+	metaAt := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Second)
+	writeTB(t, filepath.Join(vendor, "ACL4SSR_Online.ini"), "ruleset=DIRECT,http://up/a.list\n")
+	writeTB(t, filepath.Join(vendor, "a.list"), "a-content")
+	writeTB(t, filepath.Join(vendor, snapshotMetaFile),
+		fmt.Sprintf(`{"pulledAt":%q,"upstream":{"commit":"abc"},"files":{"a.list":"xx"}}`, metaAt.Format(time.RFC3339)))
+
+	m := newTestManager(t)
+	m.vendorDir = vendor
+	m.presets = []presetEntry{{"default", "ACL4SSR 默认", "http://127.0.0.1:1/ACL4SSR_Online.ini"}}
+	m.bootstrap()
+	st := m.stateOf("default")
+	if st.lastRefreshedAt == nil || !st.lastRefreshedAt.Equal(metaAt) {
+		t.Fatalf("JSON META 的 pulledAt 未生效: %v, want %v", st.lastRefreshedAt, metaAt)
 	}
 }
 
