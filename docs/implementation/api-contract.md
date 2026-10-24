@@ -10,6 +10,8 @@
 
 > 增量修订（2026-10-24，v1.3.0 规则快照）：三档预设默认**快照本地化**（引擎读本地文件，对 GitHub 零网络依赖；`presets[].url` 仍为上游原始 URL 作来源披露，形状不变）；`GET /api/health` presets 新增 `lastRefreshedAt`、`status` 本地化档改快照刷新驱动（豁免档维持远端 HEAD 语义）；`PRESET_URL` 语义改为「覆盖即豁免本地化」；`/s/` 代理对存量短链的冻结 config 做内置 URL → 本地路径运行时映射；新增 env `PRESET_REFRESH_INTERVAL` / `PROBE_TIMEOUT`；`SUB_PROXY_TIMEOUT` 默认 30s→120s。详见「规则快照（v1.3.0）」节。
 
+> 增量修订（2026-10-24，v1.3.1）：`GET /s/{code}` 的 404/502 错误响应内容协商——`Accept: text/html`（浏览器直开）返回人话 HTML 页，客户端/程序化消费维持 JSON 不变。详见「GET /s/{code}」节第 5 条。
+
 Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081，仅容器内回环）。注意：**不能用 `PORT`**——该 env 已被 Extended（subconverter）占用。
 
 ## GET /api/clients
@@ -141,8 +143,9 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 1. 查表 miss → HTTP 404，body `{"error":"not_found"}`（客户端能展示，朋友侧表现为「订阅更新失败」）；查表运行时 DB 错误 → HTTP 500，body `{"error":"internal"}`（罕见运维态，不在预定义错误内）
 2. hit → 容器内 GET `${EXTENDED_BASE}/sub?target={存的target}&url={enc source_url}&config={enc config_url}`（`SUB_TOKEN` 非空时追加 `&token=…`——token 只在容器内注入，朋友的短链不带 token），响应**流式透传**给客户端（不整包缓冲；响应头只透传 `Content-Type`，长度类头由 Go 按流自动处理）
 3. **UA 透传**：客户端 UA 原样传给 Extended（`target=auto` 识别依赖它）。UA 显式 Set（空 UA 设为空串——Go Transport 对未设置 UA 会补 `Go-http-client/1.1`，破坏识别）；已知边界：直连 /sub 的「无 UA header」与空串 header 在 Extended 侧行为可能有差异，未知客户端本就 fallback
-4. 超时 `${SUB_PROXY_TIMEOUT}`（默认 30s，订阅生成可能慢于 preview 的 10s）；Extended 非 200 / 连接失败 / 超时 → HTTP 502，body `{"error":"upstream_unavailable"}`
-5. **日志卫生（D6 延续 + OH-2）**：nginx 对 `/s/` `access_log off`（短码即 bearer 凭据，不落 access log）；sidecar 自身日志只记脱敏摘要 `s/ hit code=Ab3*** status=200 latency=1.2s`（code 前 3 位 + 状态 + 耗时，不记完整码、不记订阅 URL）
+4. 超时 `${SUB_PROXY_TIMEOUT}`（默认 120s，v1.3.0 起；订阅生成可能慢于 preview）；Extended 非 200 / 连接失败 / 超时 → HTTP 502，body `{"error":"upstream_unavailable"}`
+5. **错误响应内容协商（v1.3.1）**：404 `not_found` 与 502 `upstream_unavailable` 两个错误，当请求 `Accept` 含 `text/html`（浏览器直开）时返回同状态码的**人话 HTML 页**（`Content-Type: text/html; charset=utf-8`；404 = 「链接不存在或已被撤销」、502 = 「这是订阅链接，请在客户端中打开」并附「若客户端拉取仍见此页则上游暂时不可用」提示）；其余 Accept（客户端 / 程序化消费）维持 JSON error code **不变**。500 `internal` 恒 JSON（内部错误不做人话包装）。动机：浏览器 UA 不在 Extended 识别表内、直开必 400→502，冷 JSON 曾被误读为「服务故障」；浏览器不是订阅拉取客户端，人话页消除误判
+6. **日志卫生（D6 延续 + OH-2）**：nginx 对 `/s/` `access_log off`（短码即 bearer 凭据，不落 access log）；sidecar 自身日志只记脱敏摘要 `s/ hit code=Ab3*** status=200 latency=1.2s`（code 前 3 位 + 状态 + 耗时，不记完整码、不记订阅 URL）
 
 ### 管理端点（GET /api/links、DELETE /api/links/{code}）
 

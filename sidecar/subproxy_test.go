@@ -154,6 +154,76 @@ func TestShortLinkUpstream5xx(t *testing.T) {
 	}
 }
 
+// v1.3.1 错误内容协商（契约「GET /s/{code}」第 5 条）：
+// Accept: text/html（浏览器直开）→ 同状态码人话 HTML；客户端/程序化（*/json）→ JSON 不变
+func TestShortLinkErrorHTMLNegotiation(t *testing.T) {
+	ext := stubExtended(t, 400, "unresolved target", 0) // 模拟 UA 未识别 → 引擎 400
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	code := newLink(t, s, "https://sub.example.com/l", "auto", "default", "https://example.com/preset.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+
+	getWithAccept := func(path, accept string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+		if accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// 浏览器直开（上游 400 → 502）：人话 HTML，状态码与 JSON 形态一致
+	resp := getWithAccept("/s/"+code, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("Accept html → 状态码 %d，应 502", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("Content-Type = %q，应 text/html", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	for _, want := range []string{"订阅链接", "客户端"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("人话页应含 %q：\n%s", want, body)
+		}
+	}
+
+	// 程序化消费（无 Accept，Go 默认不发）：JSON 不变
+	resp2 := get(t, ts.URL+"/s/"+code)
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	if strings.TrimSpace(string(body2)) != `{"error":"upstream_unavailable"}` {
+		t.Errorf("无 Accept → body = %s，应 JSON", body2)
+	}
+
+	// 明确 json 优先：JSON 不变
+	resp3 := getWithAccept("/s/"+code, "application/json")
+	defer resp3.Body.Close()
+	body3, _ := io.ReadAll(resp3.Body)
+	if strings.TrimSpace(string(body3)) != `{"error":"upstream_unavailable"}` {
+		t.Errorf("Accept json → body = %s，应 JSON", body3)
+	}
+
+	// 浏览器直开不存在的短码（404）：人话 404
+	resp4 := getWithAccept("/s/zzzzzzzz", "text/html")
+	defer resp4.Body.Close()
+	if resp4.StatusCode != http.StatusNotFound {
+		t.Fatalf("miss + html → 状态码 %d，应 404", resp4.StatusCode)
+	}
+	if ct := resp4.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("miss + html Content-Type = %q，应 text/html", ct)
+	}
+	body4, _ := io.ReadAll(resp4.Body)
+	if !strings.Contains(string(body4), "不存在或已被撤销") {
+		t.Errorf("miss 人话页应含撤销说明：\n%s", body4)
+	}
+}
+
 // 上游连不上 → 502
 func TestShortLinkUpstreamDown(t *testing.T) {
 	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))

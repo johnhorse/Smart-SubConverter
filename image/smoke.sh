@@ -467,6 +467,39 @@ print(d['link'])
                     rc=1
                     ;;
             esac
+            # v1.3.1 错误内容协商：浏览器直开（Accept html + 引擎不识的 UA）→ 人话 HTML 而非冷 JSON。
+            # 必须用 auto 链（target=explicit 时引擎不做 UA 识别，任何 UA 都 200）
+            LINK4=$(curl -s -m 60 -X POST "$BASE3/api/preview" \
+                -H 'Content-Type: application/json' \
+                -d "{\"url\":\"$SUB_URL\"}" | python3 -c "
+import json, sys
+print(json.load(sys.stdin)['link'])
+") || LINK4=""
+            if [ -n "$LINK4" ]; then
+                html_body=$(curl -s -m 30 -H "Accept: text/html" -A "Mozilla/5.0" "$LINK4" || true)
+                case "$html_body" in
+                    *"订阅链接"*"客户端"*)
+                        echo "PASS 浏览器直开 /s/ → 人话 HTML（v1.3.1 内容协商）"
+                        ;;
+                    *)
+                        echo "FAIL 浏览器直开 /s/ 应返回人话 HTML：$html_body"
+                        rc=1
+                        ;;
+                esac
+                json_body=$(curl -s -m 30 -A "Mozilla/5.0" "$LINK4" || true)
+                case "$json_body" in
+                    *"upstream_unavailable"*)
+                        echo "PASS 无 Accept 直开 /s/ → JSON error code 不变"
+                        ;;
+                    *)
+                        echo "FAIL 无 Accept 应维持 JSON 错误码：$json_body"
+                        rc=1
+                        ;;
+                esac
+            else
+                echo "FAIL 容器3 /api/preview（auto）未生成 link"
+                rc=1
+            fi
         else
             echo "FAIL 容器3 /api/preview 未生成 link"
             rc=1

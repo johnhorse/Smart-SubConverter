@@ -4,10 +4,12 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -37,7 +39,9 @@ func (s *server) handleShortLink(w http.ResponseWriter, r *http.Request) {
 	}
 	if !found {
 		log.Printf("s/ miss code=%s***", logCode(code))
-		writeJSON(w, http.StatusNotFound, errBody{"not_found"})
+		writeSubError(w, r, http.StatusNotFound, "not_found",
+			"这根链接不存在或已被撤销",
+			"短码不存在，或已被部署者撤销。如果是刚复制的地址，请核对完整后重试。")
 		return
 	}
 
@@ -69,13 +73,13 @@ func (s *server) handleShortLink(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.proxyClient.Do(req)
 	if err != nil {
 		log.Printf("s/ hit code=%s*** status=%d latency=%s (upstream %T)", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
-		writeJSON(w, http.StatusBadGateway, errBody{"upstream_unavailable"})
+		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("s/ hit code=%s*** status=%d latency=%s (upstream %d)", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), resp.StatusCode)
-		writeJSON(w, http.StatusBadGateway, errBody{"upstream_unavailable"})
+		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
 		return
 	}
 
@@ -116,6 +120,34 @@ func streamBody(w http.ResponseWriter, src io.Reader) error {
 
 type linksResponse struct {
 	Links []linkEntry `json:"links"`
+}
+
+// 502 人话页文案（浏览器直开短链最常见的原因：UA 不在 Extended 识别表 → 引擎 400）
+const (
+	subErrTitle  = "这是一根订阅链接，浏览器打不开它"
+	subErrDetail = "请把它添加到 Clash / Surge / Loon / Stash / Shadowrocket 等客户端的订阅里使用。如果你是在客户端里更新订阅时看到此页，说明上游转换服务暂时不可用，稍后再试。"
+)
+
+// writeSubError /s/ 错误响应内容协商（契约「GET /s/{code}」第 5 条，v1.3.1）：
+// Accept 含 text/html（浏览器直开）→ 同状态码人话 HTML 页，消除冷 JSON 被误读为「服务故障」；
+// 其余（客户端 / 程序化消费）→ JSON error code 不变。title/detail 为常量，无注入面。
+func writeSubError(w http.ResponseWriter, r *http.Request, status int, code, title, detail string) {
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(status)
+		fmt.Fprintf(w, `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>%s</title>
+<style>body{font:16px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;max-width:36em;margin:14vh auto;padding:0 1.2em;color:#333;background:#fafafa}h1{font-size:1.35em;margin-bottom:.4em}a{color:#06c}</style>
+</head><body>
+<h1>%s</h1>
+<p>%s</p>
+<p><a href="/">← 返回首页</a></p>
+</body></html>`, title, title, detail)
+		return
+	}
+	writeJSON(w, status, errBody{code})
 }
 
 // requireSubToken：SUB_TOKEN 非空时管理端点必须带 ?token= 且匹配（契约「管理端点」）；
