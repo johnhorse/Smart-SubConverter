@@ -249,6 +249,25 @@ body {
   font-weight: 600;
 }
 
+.preset-hint {
+  margin: 14px 0 8px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.preset-desc {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.preset-note {
+  margin: 0 0 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
 /* ---- 状态③ ---- */
 
 .result h2 {

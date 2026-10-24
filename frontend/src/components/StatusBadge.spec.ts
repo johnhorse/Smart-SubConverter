@@ -11,7 +11,7 @@ function health(overrides: Partial<HealthResponse> = {}): HealthResponse {
     backendVersion: 'v1.10.5',
     presets: [
       {
-        name: 'ACL4SSR Online',
+        name: 'ACL4SSR 默认',
         url: 'https://example.com/ACL4SSR_Online.ini',
         lastModifiedAt: '2026-10-23T15:00:00Z',
         lastSuccessAt: '2026-10-23T15:50:00Z',

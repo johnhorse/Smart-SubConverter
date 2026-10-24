@@ -3,13 +3,14 @@ import { onMounted } from 'vue'
 import { useConverter } from './useConverter'
 import { useHealth } from './useHealth'
 import ClientChips from './components/ClientChips.vue'
+import PresetChips from './components/PresetChips.vue'
 import ResultPanel from './components/ResultPanel.vue'
 import StatusBadge from './components/StatusBadge.vue'
 
 const {
-  phase, inputUrl, selectedTarget, advancedOpen, submitting,
-  convertError, result, clients, loadClients, submit,
-  selectClient, escapeToClash, restart,
+  phase, inputUrl, selectedTarget, selectedPreset, advancedOpen, submitting,
+  convertError, result, clients, presets, loadClients, submit,
+  selectClient, selectPreset, escapeToClash, restart,
 } = useConverter()
 
 const { badge, init: initHealth } = useHealth()
@@ -58,7 +59,7 @@ onMounted(() => {
             :aria-expanded="advancedOpen"
             @click="advancedOpen = !advancedOpen"
           >
-            高级 · 指定客户端
+            高级 · 客户端与规则模板
             <span class="toggle-hint">{{ advancedOpen ? '收起' : '展开' }}</span>
           </button>
           <div v-show="advancedOpen" class="advanced-body">
@@ -67,6 +68,12 @@ onMounted(() => {
               :clients="clients"
               :model-value="selectedTarget"
               @update:model-value="selectClient"
+            />
+            <p class="preset-hint">用哪套规则模板</p>
+            <PresetChips
+              :presets="presets"
+              :model-value="selectedPreset"
+              @update:model-value="selectPreset"
             />
           </div>
         </div>

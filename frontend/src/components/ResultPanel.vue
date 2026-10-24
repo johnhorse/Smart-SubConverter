@@ -50,6 +50,9 @@ onBeforeUnmount(() => clearTimeout(copiedTimer))
       <code class="link-text">{{ result.link }}</code>
     </div>
 
+    <!-- 模板标注用响应回显的 preset.name（bad_preset 时为 null 不标注） -->
+    <p v-if="result.preset" class="preset-note">模板：{{ result.preset.name }}</p>
+
     <div class="copy-row">
       <button type="button" class="primary-btn" @click="doCopy">
         {{ copied ? '已复制 ✓' : '复制' }}

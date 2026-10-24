@@ -10,6 +10,7 @@ vi.mock('qrcode', () => ({
 const okResult: PreviewResponse = {
   ok: true,
   target: 'clash',
+  preset: { id: 'full_multimode', name: '地区分组 + AI 分流' },
   errorCode: null,
   message: '',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=abc',
@@ -18,6 +19,7 @@ const okResult: PreviewResponse = {
 const badResult: PreviewResponse = {
   ok: false,
   target: 'clash',
+  preset: { id: 'default', name: 'ACL4SSR 默认' },
   errorCode: 'upstream_error',
   message: 'Invalid request',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=abc',
@@ -44,6 +46,22 @@ describe('ResultPanel', () => {
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('链接是活的')
     expect(wrapper.text()).toContain('链接含订阅信息，仅自用勿转发')
+  })
+
+  it('link 下方标注「模板：{preset.name}」（ok:true，响应回显）', () => {
+    const wrapper = mountPanel(okResult)
+    expect(wrapper.find('.preset-note').text()).toBe('模板：地区分组 + AI 分流')
+  })
+
+  it('ok:false 但有合法 preset 回显时照样标注模板（非 bad_preset 错误）', () => {
+    const wrapper = mountPanel(badResult)
+    expect(wrapper.find('.preset-note').text()).toBe('模板：ACL4SSR 默认')
+  })
+
+  it('preset 回显为 null 时（bad_preset）不渲染模板标注', () => {
+    const wrapper = mountPanel({ ...okResult, preset: null })
+    expect(wrapper.find('.preset-note').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('模板：')
   })
 
   it('点击复制成功后按钮短暂变「已复制 ✓」', async () => {

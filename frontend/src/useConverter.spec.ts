@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiUnreachableError, fetchPreview } from './api'
-import { ERROR_MESSAGES, FALLBACK_CLIENTS } from './constants'
+import { ApiUnreachableError, fetchClients, fetchPreview } from './api'
+import { ERROR_MESSAGES, FALLBACK_CLIENTS, FALLBACK_PRESETS } from './constants'
 import type { PreviewResponse } from './types'
 import { useConverter } from './useConverter'
 
@@ -15,6 +15,7 @@ vi.mock('./api', () => ({
 const okResponse: PreviewResponse = {
   ok: true,
   target: 'clash',
+  preset: { id: 'default', name: 'ACL4SSR 默认' },
   errorCode: null,
   message: '',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=xx',
@@ -23,6 +24,7 @@ const okResponse: PreviewResponse = {
 const badResponse: PreviewResponse = {
   ok: false,
   target: 'clash',
+  preset: { id: 'default', name: 'ACL4SSR 默认' },
   errorCode: 'upstream_error',
   message: 'Invalid request',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=xx',
@@ -38,12 +40,14 @@ describe('useConverter 状态机', () => {
     vi.mocked(fetchPreview).mockReset()
   })
 
-  it('初始为状态①（idle），chips 默认选中 auto，高级区收起', () => {
+  it('初始为状态①（idle），chips 默认选中 auto，模板默认选中 default，高级区收起', () => {
     const conv = setup()
     expect(conv.phase.value).toBe('idle')
     expect(conv.selectedTarget.value).toBe('auto')
+    expect(conv.selectedPreset.value).toBe('default')
     expect(conv.advancedOpen.value).toBe(false)
     expect(conv.clients.value).toEqual(FALLBACK_CLIENTS)
+    expect(conv.presets.value).toEqual(FALLBACK_PRESETS)
   })
 
   it('三状态流转：idle → converting（submitting 锁死）→ result', async () => {
@@ -119,6 +123,7 @@ describe('useConverter 状态机', () => {
     vi.mocked(fetchPreview).mockResolvedValue({
       ok: false,
       target: 'clash',
+      preset: null,
       errorCode: code,
       message: '',
       link: `http://192.168.1.10:8080/sub?target=auto&url=${encodeURIComponent(url)}`,
@@ -132,6 +137,27 @@ describe('useConverter 状态机', () => {
     expect(conv.advancedOpen.value).toBe(true) // chips 保持展开，可修改后重试
   })
 
+  it('bad_preset 停留状态②：模板文案提示重选，不进结果页', async () => {
+    const conv = setup()
+    conv.inputUrl.value = 'https://example.com/sub'
+    conv.selectPreset('full_multimode')
+    vi.mocked(fetchPreview).mockResolvedValue({
+      ok: false,
+      target: 'clash',
+      preset: null,
+      errorCode: 'bad_preset',
+      message: '',
+      link: 'http://192.168.1.10:8080/sub?target=auto&url=xx',
+    })
+
+    await conv.submit()
+    expect(conv.phase.value).toBe('converting')
+    expect(conv.result.value).toBeNull()
+    expect(conv.convertError.value).toBe(ERROR_MESSAGES.bad_preset)
+    expect(conv.convertError.value).toBe('这个模板不可用，重新选一个试试')
+    expect(conv.advancedOpen.value).toBe(true) // 模板 chips 展开可重选
+  })
+
   it('逃生口：一键改选 target=clash 并自动重新发起请求', async () => {
     const conv = setup()
     conv.inputUrl.value = 'https://example.com/sub'
@@ -143,7 +169,7 @@ describe('useConverter 状态机', () => {
 
     await conv.escapeToClash()
     expect(conv.selectedTarget.value).toBe('clash')
-    expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'clash')
+    expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'clash', 'default')
     expect(conv.phase.value).toBe('result')
   })
 
@@ -162,7 +188,31 @@ describe('useConverter 状态机', () => {
     conv.selectClient('singbox')
     vi.mocked(fetchPreview).mockResolvedValue(okResponse)
     await conv.submit()
-    expect(fetchPreview).toHaveBeenCalledWith('https://example.com/sub', 'singbox')
+    expect(fetchPreview).toHaveBeenCalledWith('https://example.com/sub', 'singbox', 'default')
+  })
+
+  it('模板单选：selectPreset 切换 preset，submit 带该 preset id', async () => {
+    const conv = setup()
+    expect(conv.selectedPreset.value).toBe('default')
+    conv.selectPreset('full_multimode')
+    expect(conv.selectedPreset.value).toBe('full_multimode')
+
+    conv.inputUrl.value = 'https://example.com/sub'
+    vi.mocked(fetchPreview).mockResolvedValue(okResponse)
+    await conv.submit()
+    expect(fetchPreview).toHaveBeenCalledWith('https://example.com/sub', 'auto', 'full_multimode')
+  })
+
+  it('loadClients 拉取 /api/clients 的 presets 数组（不前端硬编码）', async () => {
+    const remotePresets = [
+      { id: 'default', name: '远端默认', url: 'https://example.com/a.ini' },
+      { id: 'full_multimode', name: '远端分组', url: 'https://example.com/b.ini' },
+    ]
+    vi.mocked(fetchClients).mockResolvedValueOnce({ clients: [], presets: remotePresets })
+    const conv = setup()
+    await conv.loadClients()
+    expect(conv.presets.value).toEqual(remotePresets)
+    expect(conv.clients.value).toEqual(FALLBACK_CLIENTS) // clients 空数组时保持降级
   })
 
   it('restart 从状态③回到状态①，保留输入与选择', async () => {

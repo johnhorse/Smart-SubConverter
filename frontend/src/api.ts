@@ -30,13 +30,13 @@ async function fetchJson<T>(path: string, init: RequestInit, timeoutMs: number):
   }
 }
 
-export function fetchPreview(url: string, target: string): Promise<PreviewResponse> {
+export function fetchPreview(url: string, target: string, preset: string): Promise<PreviewResponse> {
   return fetchJson<PreviewResponse>(
     '/api/preview',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, target }),
+      body: JSON.stringify({ url, target, preset }),
     },
     PREVIEW_TIMEOUT_MS,
   )

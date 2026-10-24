@@ -20,6 +20,7 @@ vi.mock('qrcode', () => ({
 const okResponse: PreviewResponse = {
   ok: true,
   target: 'clash',
+  preset: { id: 'default', name: 'ACL4SSR 默认' },
   errorCode: null,
   message: '',
   link: 'http://192.168.1.10:8080/sub?target=auto&url=abc',
@@ -81,6 +82,7 @@ describe('App 状态流转（组件层）', () => {
     vi.mocked(fetchPreview).mockResolvedValue({
       ok: false,
       target: 'clash',
+      preset: null,
       errorCode: 'bad_url_format',
       message: '',
       link: 'http://192.168.1.10:8080/sub?target=auto&url=bad',
@@ -113,11 +115,63 @@ describe('App 状态流转（组件层）', () => {
     expect(escapeBtn).toBeTruthy()
     await escapeBtn!.trigger('click')
     await vi.waitFor(() => {
-      expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'clash')
+      expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'clash', 'default')
     })
     // 改选 clash 后逃生口消失
     await vi.waitFor(() => {
       expect(wrapper.text()).not.toContain('我是 Clash 用户')
     })
+  })
+
+  it('高级区：标题「客户端与规则模板」，展开后渲染三档模板 chips（default 第一且选中）+ 选中档描述', async () => {
+    const wrapper = await mountApp()
+    const toggle = wrapper.find('.advanced-toggle')
+    expect(toggle.text()).toContain('高级 · 客户端与规则模板')
+
+    await toggle.trigger('click')
+    expect(wrapper.find('.advanced-body').isVisible()).toBe(true)
+
+    // 客户端 chips 仍在上方（auto 第一选中）
+    expect(wrapper.find('[aria-label="指定客户端"] .chip.active').text()).toBe('自动识别 ✓')
+
+    const presetChips = wrapper.findAll('[aria-label="规则模板"] .chip')
+    expect(presetChips.map((c) => c.text())).toEqual([
+      'ACL4SSR 默认 ✓',
+      '地区分组 + AI 分流',
+      '全量 + 去广告',
+    ])
+    expect(presetChips[0].attributes('aria-checked')).toBe('true')
+    expect(wrapper.find('.preset-desc').text()).toBe('按用途分组：国外媒体 / 电报 / 微软 / 苹果…最简')
+  })
+
+  it('切换规则模板后点转换：preview 请求带该 preset id，描述随选中切换', async () => {
+    vi.mocked(fetchPreview).mockResolvedValue(okResponse)
+    const wrapper = await mountApp()
+    await wrapper.find('.advanced-toggle').trigger('click')
+
+    const presetChips = wrapper.findAll('[aria-label="规则模板"] .chip')
+    await presetChips[1].trigger('click')
+    expect(presetChips[1].classes('active')).toBe(true)
+    expect(wrapper.find('.preset-desc').text()).toContain('ChatGPT / Claude / Gemini')
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    await wrapper.find('button[type="submit"]').trigger('submit')
+    await vi.waitFor(() => {
+      expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'full_multimode')
+    })
+  })
+
+  it('结果页 link 下方标注「模板：{preset.name}」（用响应回显，不本地猜）', async () => {
+    vi.mocked(fetchPreview).mockResolvedValue({
+      ...okResponse,
+      preset: { id: 'full_multimode', name: '地区分组 + AI 分流' },
+    })
+    const wrapper = await mountApp()
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    await wrapper.find('button[type="submit"]').trigger('submit')
+    await vi.waitFor(() => expect(wrapper.find('.result').exists()).toBe(true))
+
+    expect(wrapper.find('.preset-note').text()).toBe('模板：地区分组 + AI 分流')
   })
 })

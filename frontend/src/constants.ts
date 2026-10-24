@@ -1,10 +1,11 @@
-import type { ClientEntry, HealthPreset, HealthResponse } from './types'
+import type { ClientEntry, HealthPreset, HealthResponse, PresetInfo } from './types'
 
 // 错误码 → 展示文案（api-contract.md 错误映射表，前端硬编码）
 export const ERROR_MESSAGES: Record<string, string> = {
   bad_url_empty: '先粘贴你的订阅链接，再点「转换」',
   bad_url_format: '这不像一个订阅链接——检查一下是不是复制全了？',
   bad_url_private: '这个链接指向内网地址，转换服务够不着它',
+  bad_preset: '这个模板不可用，重新选一个试试',
   upstream_error: '转换没成功——可以试试展开「指定客户端」换一个，或稍后再来',
   upstream_timeout: '等太久没等到结果，再试一次看看？',
   backend_down: '转换引擎暂时没响应，稍后再试',
@@ -18,7 +19,13 @@ export function errorText(code: string | null | undefined): string {
 }
 
 // 预校验类错误（D4 仲裁：给链接无意义）：停留状态②可修改重试，不进结果页
-export const PRECHECK_ERROR_CODES = new Set(['bad_url_empty', 'bad_url_format', 'bad_url_private'])
+// bad_preset 同属预校验（不调上游）：停留状态②换模板重试，与文案「重新选一个试试」呼应
+export const PRECHECK_ERROR_CODES = new Set([
+  'bad_url_empty',
+  'bad_url_format',
+  'bad_url_private',
+  'bad_preset',
+])
 
 // /api/clients 不可用时的降级数据（与契约示例同构，保证页面可用）
 export const FALLBACK_CLIENTS: ClientEntry[] = [
@@ -32,6 +39,32 @@ export const FALLBACK_CLIENTS: ClientEntry[] = [
   { id: 'singbox', label: 'sing-box', target: 'singbox', verified: false },
   { id: 'v2rayn', label: 'v2rayN', target: 'v2rayn', verified: false },
 ]
+
+// /api/clients 不可用时的降级数据（与契约 presets 三档同构）；default 永远第一
+export const FALLBACK_PRESETS: PresetInfo[] = [
+  {
+    id: 'default',
+    name: 'ACL4SSR 默认',
+    url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online.ini',
+  },
+  {
+    id: 'full_multimode',
+    name: '地区分组 + AI 分流',
+    url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_MultiMode.ini',
+  },
+  {
+    id: 'full_adblockplus',
+    name: '全量 + 去广告',
+    url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_AdblockPlus.ini',
+  },
+]
+
+// 选中档下方的描述文案（前端硬编码 id→文案，规划定案第 4 条）
+export const PRESET_DESCRIPTIONS: Record<string, string> = {
+  default: '按用途分组：国外媒体 / 电报 / 微软 / 苹果…最简',
+  full_multimode: '按用途 + 地区（港日美台新韩）分组，含 AI 平台组——ChatGPT / Claude / Gemini 可定向走指定地区',
+  full_adblockplus: '规则最全，附带广告拦截',
+}
 
 // 相对时间描述：fresh/stale 文案里的 {X}
 export function relativeDuration(fromIso: string, now: number = Date.now()): string {

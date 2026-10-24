@@ -18,9 +18,16 @@ export interface ClientsResponse {
   presets: PresetInfo[]
 }
 
+// preview 响应回显的生效档位（bad_preset 时为 null）
+export interface AppliedPreset {
+  id: string
+  name: string
+}
+
 export interface PreviewResponse {
   ok: boolean
   target: string
+  preset: AppliedPreset | null
   errorCode: string | null
   message: string
   link: string
