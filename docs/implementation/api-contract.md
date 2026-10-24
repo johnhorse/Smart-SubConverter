@@ -165,5 +165,5 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 
 ### 契约未定义场景的既定处理（S2 实现既成语义）
 
-- `target` 非注册表值：探测按 clash 进行，link 原样透传该 target，由 Extended 自然拒绝（不发明新错误码）
+- `target` 非注册表值：探测按 clash 进行，link 原样透传该 target，由 Extended 自然拒绝（不发明新错误码）；deepLink 为 `null`（无 scheme 可拼，同透传口径）
 - POST body 非法 JSON / 缺 url 字段：按 `bad_url_empty` 处理（响应恒 200 原则不变）
