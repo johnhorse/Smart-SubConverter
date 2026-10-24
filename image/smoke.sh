@@ -2,9 +2,12 @@
 # 三步冒烟（发布门禁，make smoke-local 与 CI 共用），整个流程不依赖外网：
 #   第一步  基础可用：/ 200、/version 200、/api/health 200 且 JSON 结构正确（含 PRESET_URL 覆盖生效断言）
 #   第二步  fixture 转换：本地 python http.server 提供 fixture.ini + 内联 ss 节点，
-#           经 /sub 以 Clash UA 与 Surge UA 直接转换，断言输出格式
-#   第三步  端到端：POST /api/preview 取返回 link → 分别以 Clash/Surge UA 经 nginx 入口拉取该 link，
-#           断言格式同上——证明「生成的链接可用」而不只是「/sub 能转」
+#           经 /sub（deprecated 遗留直通路由）以 Clash UA 与 Surge UA 直接转换，断言输出格式
+#   第三步  端到端（短链，v1.2.0）：POST /api/preview 取返回短链（断言 /s/ + 8 字符 base62 码）
+#           → 分别以 Clash/Surge UA 经 nginx 入口拉取该短链，断言格式同上；
+#           另断言：同参数二次 preview → link 相同（指纹幂等）、docker restart 后同一短链
+#           仍可用（state.db 持久化）、管理端点 GET /api/links 含码 → DELETE 204 幂等 →
+#           删后拉取 404（SUB_TOKEN 未配 → 端点开放）
 # fixture 全本地（订阅节点为 RFC 5737 测试地址，无需真实出网）
 # 用法: smoke.sh <image> [host-port]（默认 18080）
 set -eu
@@ -49,19 +52,23 @@ docker run -d --name "$NAME" -p "127.0.0.1:${PORT}:80" \
     $ADD_HOST_ARG \
     "$IMAGE" >/dev/null
 
-# 等待 /healthz 就绪（Extended 初始化 pref + nginx 起监听）
-i=0
-while [ "$i" -lt 30 ]; do
-    code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "$BASE/healthz" || true)
-    [ "$code" = "200" ] && break
-    i=$((i + 1))
-    sleep 1
-done
-if [ "$i" -ge 30 ]; then
+# 等待 /healthz 就绪（Extended 初始化 pref + nginx 起监听；重启后复用）
+wait_healthz() {
+    i=0
+    while [ "$i" -lt 30 ]; do
+        code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "$BASE/healthz" || true)
+        [ "$code" = "200" ] && return 0
+        i=$((i + 1))
+        sleep 1
+    done
+    return 1
+}
+if wait_healthz; then
+    echo "PASS 容器就绪（/healthz）"
+else
     echo "FAIL /healthz 30s 内未就绪"
     exit 1
 fi
-echo "PASS 容器就绪（/healthz ${i}s）"
 
 # ============ 第一步：基础可用 ============
 assert_code() {
@@ -156,18 +163,21 @@ assert_sub_output "Surge 直转（surge UA）" "$SURGE_UA" surge "[General]"
 LINK=$(curl -s -m 30 -X POST "$BASE/api/preview" \
     -H 'Content-Type: application/json' \
     -d "{\"url\":\"$SUB_URL\",\"target\":\"auto\"}" | python3 -c "
-import json, sys
+import json, re, sys
 d = json.load(sys.stdin)
 assert d['ok'] is True, 'ok=%s code=%s msg=%s' % (d['ok'], d['errorCode'], d['message'])
 assert d['errorCode'] is None, 'errorCode=%s' % d['errorCode']
 assert d['target'] == 'clash', 'target=%s' % d['target']
-assert d['link'].startswith(sys.argv[1] + '/sub?'), 'link=%s' % d['link']
-print(d['link'])
+link = d['link']
+assert link.startswith(sys.argv[1] + '/s/'), 'link=%s' % link
+assert re.fullmatch('[0-9A-Za-z]{8}', link.rsplit('/', 1)[1]), '短码非 8 字符 base62: %s' % link
+print(link)
 " "$BASE") || LINK=""
+CODE=${LINK##*/}
 if [ -n "$LINK" ]; then
-    echo "PASS /api/preview ok:true（auto→clash 探测通过，link 已生成）"
+    echo "PASS /api/preview ok:true（auto→clash 探测通过，短链 /s/$CODE 已生成）"
 else
-    echo "FAIL /api/preview 未通过或 link 未生成"
+    echo "FAIL /api/preview 未通过或短链未生成"
     rc=1
 fi
 
@@ -189,21 +199,41 @@ assert_fetch_link() {
     esac
 }
 
-assert_fetch_link "经 nginx 以 clash UA 拉取 link" "$CLASH_UA" "proxies:"
-assert_fetch_link "经 nginx 以 surge UA 拉取 link（auto 按 UA 适配）" "$SURGE_UA" "[General]"
+assert_fetch_link "经 nginx 以 clash UA 拉取短链" "$CLASH_UA" "proxies:"
+assert_fetch_link "经 nginx 以 surge UA 拉取短链（auto 按 UA 适配）" "$SURGE_UA" "[General]"
 
-# ---- preset 档位链路：full_multimode → preset 回显 + link 的 config= 为 Full_MultiMode 内置 URL
-# （PRESET_URL 只覆盖 default 档；不断言 ok——离线环境 Extended 拉不到 GitHub config，探测失败属预期）
-FM_ENC=$(python3 -c 'import urllib.parse; print(urllib.parse.quote("https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_MultiMode.ini", safe=""))')
+# ---- 同参数幂等：同 url+target+preset 二次 preview → link 完全相同（指纹命中复用既有码）
+if [ -n "$LINK" ]; then
+    if curl -s -m 30 -X POST "$BASE/api/preview" \
+        -H 'Content-Type: application/json' \
+        -d "{\"url\":\"$SUB_URL\",\"target\":\"auto\"}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['link'] == sys.argv[1], 'link=%s 与首次 %s 不一致' % (d['link'], sys.argv[1])
+" "$LINK"; then
+        echo "PASS 同参数二次 preview → link 完全相同（指纹幂等）"
+    else
+        echo "FAIL 同参数二次 preview link 漂移"
+        rc=1
+    fi
+else
+    echo "SKIP 同参数幂等（无 link）"
+fi
+
+# ---- preset 档位链路：full_multimode → preset 回显 + link 为短链形态
+# （v1.2.0 起短链不内嵌 config=，档位烙进服务端存储；PRESET_URL 只覆盖 default 档；
+#   不断言 ok——离线环境 Extended 拉不到 GitHub config，探测失败属预期）
 if curl -s -m 30 -X POST "$BASE/api/preview" \
     -H 'Content-Type: application/json' \
     -d "{\"url\":\"$SUB_URL\",\"target\":\"auto\",\"preset\":\"full_multimode\"}" | python3 -c "
-import json, sys
+import json, re, sys
 d = json.load(sys.stdin)
 assert d['preset'] == {'id': 'full_multimode', 'name': '地区分组 + AI 分流'}, 'preset=%s' % d['preset']
-assert 'config=' + sys.argv[1] in d['link'], 'link=%s' % d['link']
-" "$FM_ENC"; then
-    echo "PASS /api/preview preset=full_multimode（preset 回显 + link config= 为 Full_MultiMode URL）"
+link = d['link']
+assert link.startswith(sys.argv[1] + '/s/'), 'link=%s' % link
+assert re.fullmatch('[0-9A-Za-z]{8}', link.rsplit('/', 1)[1]), '短码非 8 字符 base62: %s' % link
+" "$BASE"; then
+    echo "PASS /api/preview preset=full_multimode（preset 回显 + link 为短链）"
 else
     echo "FAIL /api/preview preset=full_multimode"
     rc=1
@@ -246,6 +276,59 @@ assert d["deepLink"] is None, "deepLink=%s 应为 null" % d["deepLink"]
 
 assert_deep_link_null "/api/preview target=clash deepLink" "{\"url\":\"$SUB_URL\",\"target\":\"clash\"}"
 assert_deep_link_null "/api/preview 缺省 target（auto）deepLink" "{\"url\":\"$SUB_URL\"}"
+
+# ---- 重启持久化：docker restart 后同一短链仍可用（state.db 在容器 /data，随容器层存活）
+if [ -n "$CODE" ]; then
+    docker restart "$NAME" >/dev/null
+    if wait_healthz; then
+        body=$(curl -s -m 30 -A "$CLASH_UA" "$LINK" || true)
+        case "$body" in
+            *"proxies:"*)
+                echo "PASS docker restart 后同一短链仍可用（state.db 持久化）"
+                ;;
+            *)
+                echo "FAIL docker restart 后短链拉取异常"
+                rc=1
+                ;;
+        esac
+    else
+        echo "FAIL docker restart 后 /healthz 30s 内未就绪"
+        rc=1
+    fi
+else
+    echo "SKIP 重启持久化（无短码）"
+fi
+
+# ---- 管理端点（SUB_TOKEN 未配 → 开放）：列表含本次码 → 删除幂等 204 → 删后拉取 404
+if [ -n "$CODE" ]; then
+    if curl -s -m 10 "$BASE/api/links" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+codes = [l['code'] for l in d['links']]
+assert sys.argv[1] in codes, 'links 未含 %s: %s' % (sys.argv[1], codes)
+" "$CODE"; then
+        echo "PASS GET /api/links 200 且含本次短码（SUB_TOKEN 未配 → 开放）"
+    else
+        echo "FAIL GET /api/links 未含本次短码"
+        rc=1
+    fi
+
+    n=1
+    while [ "$n" -le 2 ]; do
+        got=$(curl -s -m 10 -X DELETE -o /dev/null -w '%{http_code}' "$BASE/api/links/$CODE" || echo 000)
+        if [ "$got" = "204" ]; then
+            echo "PASS DELETE /api/links/{code} 第 $n 次 → 204（幂等）"
+        else
+            echo "FAIL DELETE /api/links/{code} 第 $n 次 → $got（期望 204）"
+            rc=1
+        fi
+        n=$((n + 1))
+    done
+
+    assert_code "删码后拉取同一短链" "/s/$CODE" 404
+else
+    echo "SKIP 管理端点用例（无短码）"
+fi
 
 if [ "$rc" -eq 0 ]; then
     echo "== 冒烟三步全部 PASS =="
