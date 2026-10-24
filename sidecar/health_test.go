@@ -121,8 +121,9 @@ func TestPollPresetStateTransitions(t *testing.T) {
 }
 
 func TestSnapshotShape(t *testing.T) {
-	lm := time.Date(2026, 10, 23, 15, 0, 0, 0, time.UTC)
-	ls := time.Date(2026, 10, 23, 16, 0, 0, 0, time.UTC)
+	// 相对时间：断言含「距今 <24h → fresh」滑动窗口，固定日期会在跨日时炸
+	lm := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	ls := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Second)
 	m := newMonitor(config{presetURL: "https://example.com/p.ini"})
 	m.backendVersion = "v1.10.5"
 	m.presets[0] = presetState{lastModifiedAt: &lm, lastSuccessAt: &ls}
@@ -136,8 +137,8 @@ func TestSnapshotShape(t *testing.T) {
 		`"backendVersion":"v1.10.5"`,
 		`"name":"ACL4SSR 默认"`,
 		`"url":"https://example.com/p.ini"`,
-		`"lastModifiedAt":"2026-10-23T15:00:00Z"`,
-		`"lastSuccessAt":"2026-10-23T16:00:00Z"`,
+		`"lastModifiedAt":"` + lm.Format(time.RFC3339) + `"`,
+		`"lastSuccessAt":"` + ls.Format(time.RFC3339) + `"`,
 		`"status":"fresh"`,
 	} {
 		if !strings.Contains(s, want) {

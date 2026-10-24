@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -409,5 +410,110 @@ func TestAdminTokenAuth(t *testing.T) {
 		if resp.StatusCode != c.want {
 			t.Errorf("%s %s → %d, want %d", c.method, c.path, resp.StatusCode, c.want)
 		}
+	}
+}
+
+// v1.3.3 QX 两段式：mixed 代拉机场 → 明文节点列表 → quanx（server_local）；
+// 判定 = 显式 quanx 或 auto+UA 宽匹配 quantumult
+func TestShortLinkQuanxTwoStage(t *testing.T) {
+	uriA := "ss://YWJjLTEyOjEubTIuMy40OjQ0Mw==#a"
+	uriB := "vmess://eyJ2IjoiMiJ9"
+	mixedB64 := base64.StdEncoding.EncodeToString([]byte(uriA + "\n" + uriB))
+	var gotTargets, gotURLs, gotConfigs []string
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTargets = append(gotTargets, r.URL.Query().Get("target"))
+		gotURLs = append(gotURLs, r.URL.Query().Get("url"))
+		gotConfigs = append(gotConfigs, r.URL.Query().Get("config"))
+		switch r.URL.Query().Get("target") {
+		case "mixed":
+			_, _ = w.Write([]byte(mixedB64))
+		case "quanx":
+			_, _ = w.Write([]byte("[server_local]\nvmess = 5.6.7.8:443, tag=b\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	code := newLink(t, s, "https://sub.example.com/l", "quanx", "default", "https://example.com/preset.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+
+	resp := get(t, ts.URL+"/s/"+code)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "vmess = 5.6.7.8") {
+		t.Fatalf("两段式输出异常: %d %s", resp.StatusCode, body)
+	}
+	if len(gotTargets) != 2 || gotTargets[0] != "mixed" || gotTargets[1] != "quanx" {
+		t.Errorf("应两段调用 mixed→quanx，实际 %v", gotTargets)
+	}
+	if gotURLs[0] != "https://sub.example.com/l" {
+		t.Errorf("第一段 url 应为原始订阅: %q", gotURLs[0])
+	}
+	if gotURLs[1] != uriA+"|"+uriB {
+		t.Errorf("第二段 url 应为 | 连接的节点列表: %q", gotURLs[1])
+	}
+	if gotConfigs[0] != "" || gotConfigs[1] == "" {
+		t.Errorf("config 只应出现在第二段: %v", gotConfigs)
+	}
+}
+
+// auto 链：UA 宽匹配 quantumult → 两段式；其他 UA → 单段原路径
+func TestShortLinkAutoUA(t *testing.T) {
+	var targets []string
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targets = append(targets, r.URL.Query().Get("target"))
+		if r.URL.Query().Get("target") == "mixed" {
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString([]byte("vmess://x"))))
+			return
+		}
+		_, _ = w.Write([]byte("proxies: ok"))
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	code := newLink(t, s, "https://sub.example.com/l", "auto", "default", "https://example.com/preset.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+
+	targets = nil
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/s/"+code, nil)
+	req.Header.Set("User-Agent", "Quantumult%20X%20v1.4.1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(targets) != 2 || targets[0] != "mixed" || targets[1] != "quanx" {
+		t.Errorf("QX UA + auto 应走两段式，实际 %v", targets)
+	}
+
+	targets = nil
+	req2, _ := http.NewRequest(http.MethodGet, ts.URL+"/s/"+code, nil)
+	req2.Header.Set("User-Agent", "clash-verge/1.0")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if len(targets) != 1 || targets[0] != "auto" {
+		t.Errorf("clash UA + auto 应走单段原路径，实际 %v", targets)
+	}
+}
+
+// 两段式第一段出空列表 → 502
+func TestShortLinkQuanxTwoStageEmptyNodes(t *testing.T) {
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("garbage-no-uri"))
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	code := newLink(t, s, "https://sub.example.com/l", "quanx", "default", "https://example.com/preset.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	resp := get(t, ts.URL+"/s/"+code)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("空节点列表应 502，实际 %d", resp.StatusCode)
 	}
 }

@@ -4,6 +4,8 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -52,6 +54,16 @@ func (s *server) handleShortLink(w http.ResponseWriter, r *http.Request) {
 		if mapped, ok := s.snap.mapFrozenConfig(configURL); ok {
 			configURL = mapped
 		}
+	}
+
+	// v1.3.3 QX 两段式服务端代取：Extended 对 quanx + http 订阅默认走 native server_remote
+	// （把机场原始 URL 塞给 QX 自拉），而「机场输出 QX 解析不了、必须转换」正是本服务存在的
+	// 意义——改为两段式：mixed 先转通用 URI 列表（服务端代拉机场），再以节点列表转 quanx，
+	// 输出 [server_local] 明文节点。判定：显式 quanx 档，或 auto 且 UA 宽匹配 quantumult
+	// （宽匹配仅为路由决策，权威识别仍在引擎）。
+	if lnk.Target == "quanx" || (lnk.Target == "auto" && strings.Contains(strings.ToLower(r.Header.Get("User-Agent")), "quantumult")) {
+		s.proxyQuanxTwoStage(w, r, lnk, configURL, code, start)
+		return
 	}
 
 	q := url.Values{}
@@ -116,6 +128,108 @@ func streamBody(w http.ResponseWriter, src io.Reader) error {
 			return rerr
 		}
 	}
+}
+
+// proxyQuanxTwoStage v1.3.3 QX 两段式：第一段 target=mixed 让引擎代拉机场并转通用
+// URI 列表（整体 base64，解码后按空白分），第二段以「URI|URI」明文节点列表转 quanx
+// （非 http 形态 → 引擎必然服务端解析 → [server_local] 明文节点，QX 零二次拉取）。
+// 两段各自分得 SUB_PROXY_TIMEOUT 的一半（context 截止）。
+func (s *server) proxyQuanxTwoStage(w http.ResponseWriter, r *http.Request, lnk storedLink, configURL, code string, start time.Time) {
+	ua := r.Header.Get("User-Agent")
+	stageTimeout := s.cfg.subProxyTimeout / 2
+	if stageTimeout <= 0 { // 防零值（生产 env 解析保证 >0；直接构造 config 的路径兜底）
+		stageTimeout = 15 * time.Second
+	}
+
+	// 第一段：机场 → mixed 通用节点列表
+	q1 := url.Values{}
+	q1.Set("target", "mixed")
+	q1.Set("url", lnk.SourceURL)
+	if s.cfg.subToken != "" {
+		q1.Set("token", s.cfg.subToken)
+	}
+	req1, err := http.NewRequest(http.MethodGet, s.cfg.extendedBase+"/sub?"+q1.Encode(), nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody{"internal"})
+		return
+	}
+	req1.Header.Set("User-Agent", ua)
+	ctx1, cancel1 := context.WithTimeout(r.Context(), stageTimeout)
+	defer cancel1()
+	resp1, err := s.proxyClient.Do(req1.WithContext(ctx1))
+	if err != nil {
+		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=1/2 err=%T", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
+		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
+		return
+	}
+	body1, _ := io.ReadAll(io.LimitReader(resp1.Body, 8<<20))
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=1/2 upstream=%d", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), resp1.StatusCode)
+		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
+		return
+	}
+	uris := parseNodeURIList(body1)
+	if len(uris) == 0 {
+		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=1/2 nodes=0", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond))
+		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
+		return
+	}
+
+	// 第二段：节点列表 → quanx 完整配置（server_local 明文节点）
+	q2 := url.Values{}
+	q2.Set("target", "quanx")
+	q2.Set("url", strings.Join(uris, "|"))
+	q2.Set("config", configURL)
+	if s.cfg.subToken != "" {
+		q2.Set("token", s.cfg.subToken)
+	}
+	req2, err := http.NewRequest(http.MethodGet, s.cfg.extendedBase+"/sub?"+q2.Encode(), nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errBody{"internal"})
+		return
+	}
+	req2.Header.Set("User-Agent", ua)
+	ctx2, cancel2 := context.WithTimeout(r.Context(), stageTimeout)
+	defer cancel2()
+	resp2, err := s.proxyClient.Do(req2.WithContext(ctx2))
+	if err != nil {
+		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=2/2 err=%T", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
+		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
+		return
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=2/2 upstream=%d", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), resp2.StatusCode)
+		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
+		return
+	}
+
+	if ct := resp2.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(http.StatusOK)
+	copyErr := streamBody(w, resp2.Body)
+	log.Printf("s/ hit code=%s*** status=%d latency=%s twostage nodes=%d", logCode(code), http.StatusOK, time.Since(start).Round(time.Millisecond), len(uris))
+	if copyErr != nil {
+		log.Printf("s/ 透传中断 code=%s*** copyErr=%T", logCode(code), copyErr)
+	}
+}
+
+// parseNodeURIList 解 mixed 输出为节点 URI 列表：整体 base64（解码后含 :// 用解码值），
+// 按空白分割；非 base64 形态（明文列表）直接分割。过滤非 URI 行。
+func parseNodeURIList(body []byte) []string {
+	raw := strings.TrimSpace(string(body))
+	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && strings.Contains(string(decoded), "://") {
+		raw = string(decoded)
+	}
+	var uris []string
+	for _, f := range strings.Fields(raw) {
+		if i := strings.Index(f, "://"); i > 0 && i < 16 {
+			uris = append(uris, f)
+		}
+	}
+	return uris
 }
 
 type linksResponse struct {

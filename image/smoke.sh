@@ -454,6 +454,14 @@ print(json.load(sys.stdin)['link'])
             echo "FAIL QX 输出应含 filter_remote 且 getruleset 前缀为 PUBLIC_BASE_URL：$RULE_URL"
             rc=1
         fi
+        # v1.3.3 两段式：QX 输出应为 [server_local] 明文节点（服务端代取），不再让 QX 自拉机场
+        if printf '%s' "$QX_OUT" | grep -q "\[server_local\]" \
+            && printf '%s' "$QX_OUT" | grep -q "^shadowsocks = \| vmess = "; then
+            echo "PASS QX 两段式 server_local 明文节点（服务端代取）"
+        else
+            echo "FAIL QX 输出应含 [server_local] 明文节点：$(printf '%s' "$QX_OUT" | head -c 120)"
+            rc=1
+        fi
         if [ -n "$RULE_URL" ]; then
             RULE_BODY=$(curl -s -m 30 "$RULE_URL" || true)
             case "$RULE_BODY" in
