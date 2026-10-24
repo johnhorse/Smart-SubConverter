@@ -17,6 +17,9 @@ const defaultPresetURL = "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/mast
 // 探测转换的 sidecar→Extended 超时（契约钉死 10s；测试注入短值）
 const defaultProbeTimeout = 10 * time.Second
 
+// /s/ 订阅代理的 sidecar→Extended 超时（订阅生成慢于 preview，默认 30s；env SUB_PROXY_TIMEOUT 可调）
+const defaultSubProxyTimeout = 30 * time.Second
+
 type clientEntry struct {
 	ID       string `json:"id"`
 	Label    string `json:"label"`
@@ -104,12 +107,14 @@ func resolvePresets(presetURL string) []presetEntry {
 
 // config 汇总 sidecar 全部环境变量（main 启动时读定；变量表见契约「环境变量」节）
 type config struct {
-	extendedBase  string
-	publicBaseURL string
-	subToken      string
-	presetURL     string
-	probeTimeout  time.Duration
-	pollInterval  time.Duration
+	extendedBase    string
+	publicBaseURL   string
+	subToken        string
+	presetURL       string
+	probeTimeout    time.Duration
+	pollInterval    time.Duration
+	dataDir         string // 短链 SQLite state.db 所在目录（volume 挂载点；单测指向 tmp）
+	subProxyTimeout time.Duration
 }
 
 func loadConfigFromEnv() config {
@@ -120,18 +125,27 @@ func loadConfigFromEnv() config {
 		return def
 	}
 	c := config{
-		extendedBase:  getOr("EXTENDED_BASE", "http://127.0.0.1:25500"),
-		publicBaseURL: os.Getenv("PUBLIC_BASE_URL"),
-		subToken:      os.Getenv("SUB_TOKEN"),
-		presetURL:     getOr("PRESET_URL", defaultPresetURL),
-		probeTimeout:  defaultProbeTimeout,
-		pollInterval:  15 * time.Minute,
+		extendedBase:    getOr("EXTENDED_BASE", "http://127.0.0.1:25500"),
+		publicBaseURL:   os.Getenv("PUBLIC_BASE_URL"),
+		subToken:        os.Getenv("SUB_TOKEN"),
+		presetURL:       getOr("PRESET_URL", defaultPresetURL),
+		probeTimeout:    defaultProbeTimeout,
+		pollInterval:    15 * time.Minute,
+		dataDir:         getOr("DATA_DIR", "/data"),
+		subProxyTimeout: defaultSubProxyTimeout,
 	}
 	if raw := os.Getenv("POLL_INTERVAL"); raw != "" {
 		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
 			c.pollInterval = d
 		} else {
 			log.Printf("POLL_INTERVAL %q 解析失败，回退默认 15m", raw)
+		}
+	}
+	if raw := os.Getenv("SUB_PROXY_TIMEOUT"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			c.subProxyTimeout = d
+		} else {
+			log.Printf("SUB_PROXY_TIMEOUT %q 解析失败，回退默认 30s", raw)
 		}
 	}
 	return c
@@ -142,15 +156,24 @@ type server struct {
 	presets     []presetEntry
 	mon         *monitor
 	probeClient *http.Client
+	proxyClient *http.Client // /s/ 订阅代理（超时 SUB_PROXY_TIMEOUT）
+	store       *store       // 短链存储（v1.2.0；openStore 失败则启动失败）
 }
 
-func newServer(cfg config) *server {
+// newServer 打开短链存储（库损坏等失败 → 返回错误，main 拒绝启动）
+func newServer(cfg config) (*server, error) {
+	st, err := openStore(cfg.dataDir)
+	if err != nil {
+		return nil, err
+	}
 	return &server{
 		cfg:         cfg,
 		presets:     resolvePresets(cfg.presetURL),
 		mon:         newMonitor(cfg),
 		probeClient: &http.Client{Timeout: cfg.probeTimeout},
-	}
+		proxyClient: &http.Client{Timeout: cfg.subProxyTimeout},
+		store:       st,
+	}, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -177,6 +200,9 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/clients", s.handleClients)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("POST /api/preview", s.handlePreview)
+	mux.HandleFunc("GET /s/{code}", s.handleShortLink)
+	mux.HandleFunc("GET /api/links", s.handleLinks)
+	mux.HandleFunc("DELETE /api/links/{code}", s.handleDeleteLink)
 	return mux
 }
 
@@ -186,7 +212,11 @@ func main() {
 	if port == "" {
 		port = "8081"
 	}
-	s := newServer(loadConfigFromEnv())
+	s, err := newServer(loadConfigFromEnv())
+	if err != nil {
+		// 库损坏等运维态：拒绝启动，绝不自动清空（契约「存储」节）
+		log.Fatalf("sidecar 启动失败: %v", err)
+	}
 	go s.mon.pollLoop(context.Background(), s.cfg.pollInterval)
 	addr := "127.0.0.1:" + port
 	log.Printf("ssc-sidecar listening on %s", addr)

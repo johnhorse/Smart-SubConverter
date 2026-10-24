@@ -66,7 +66,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 }
 ```
 
-- **`link` 永远非空**（D4 定案）：`ok:false` 时照常返回，前端仍展示并标注「未通过校验，仍可试用」。v1.2.0 起 link 为短链（见「短链」节）；`store_error` 时降级为 `/sub` 长链接（唯一保留长链返回的场景）
+- **`link` 永远非空**（D4 定案）：`ok:false` 时照常返回，前端仍展示并标注「未通过校验，仍可试用」。v1.2.0 起 link 为短链（见「短链」节）；两个降级为 `/sub` 长链的场景：① `store_error`（存储失败）② `bad_url_*`（URL 未过预校验**不落库**——私网 URL 落库后经 `/s/` 持久重放会绕过 D7 准入闸门，OH-13 放大）。`bad_preset` URL 合法，仍走短链（default 档）
 - `preset`：本次生效的档位（id + name）。`bad_preset` 时为 `null`；其余情况（含 `ok:false`）恒回显解析后的合法档位，前端结果页据此标注「模板：{name}」
 - `ok:false` 时 `target` 为探测用的 target（auto → "clash"），`errorCode` 与 `message` 必填
 - `link` 由 sidecar 服务端拼接，前端一律直接使用该字段，不自行拼接
@@ -96,7 +96,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
    - 200 但粗验不过 → `ok:false`，`errorCode:"upstream_error"`
    - 非 200 → `ok:false`，`errorCode:"upstream_error"`，message 由 Extended 响应体映射（见错误码表）
    - 连接失败 → `backend_down`；超时 → `upstream_timeout`
-3. **link 生成（v1.2.0 短链，与探测结果无关，永远执行）**：对规范化参数算指纹 → 查 `links` 表命中则复用既有短码；未命中则生成 8 字符 base62 短码插入（详见「短链（v1.2.0）」节），返回 `${origin}/s/${code}`。存储失败 → `errorCode:"store_error"`，link 降级为 `/sub` 长链接拼接（`${origin}/sub?target=…&url=…&config=…`，`SUB_TOKEN` 非空时追加 `&token=…`），保持非空
+3. **link 生成（v1.2.0 短链，与探测结果无关，永远执行）**：对规范化参数算指纹 → 查 `links` 表命中则复用既有短码；未命中则生成 8 字符 base62 短码插入（详见「短链（v1.2.0）」节），返回 `${origin}/s/${code}`。两处降级为 `/sub` 长链拼接（`${origin}/sub?target=…&url=…&config=…`，`SUB_TOKEN` 非空时追加 `&token=…`），保持非空：① 存储失败 → `errorCode:"store_error"` ② 预校验失败的 `bad_url_*`（见字段说明）。**errorCode 并存优先级（sidecar 实现定案）**：探测失败 + 存储失败 → 探测错误优先；探测成功 + 存储失败 → `store_error` 且 `ok` 仍为 `true`（转换本身成了，前端按「成功 + 短链警示」展示）；`bad_preset` + 存储失败 → `bad_preset` 优先
 4. **origin 推导（R3-1 定案，优先级从高到低）**：
    - env `PUBLIC_BASE_URL`（去尾部 `/`）
    - `${X-Forwarded-Proto 或 "http"}://${Host 头}`（nginx 必须显式 `proxy_set_header Host $host` + `X-Forwarded-Proto $scheme`，否则 sidecar 看到的是内部地址）
@@ -136,8 +136,8 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 
 ### GET /s/{code}（订阅代理端点，nginx 路由到 sidecar）
 
-1. 查表 miss → HTTP 404，body `{"error":"not_found"}`（客户端能展示，朋友侧表现为「订阅更新失败」）
-2. hit → 容器内 GET `${EXTENDED_BASE}/sub?target={存的target}&url={enc source_url}&config={enc config_url}`（`SUB_TOKEN` 非空时追加 `&token=…`——token 只在容器内注入，朋友的短链不带 token），响应**流式透传**给客户端（不整包缓冲）
+1. 查表 miss → HTTP 404，body `{"error":"not_found"}`（客户端能展示，朋友侧表现为「订阅更新失败」）；查表运行时 DB 错误 → HTTP 500，body `{"error":"internal"}`（罕见运维态，不在预定义错误内）
+2. hit → 容器内 GET `${EXTENDED_BASE}/sub?target={存的target}&url={enc source_url}&config={enc config_url}`（`SUB_TOKEN` 非空时追加 `&token=…`——token 只在容器内注入，朋友的短链不带 token），响应**流式透传**给客户端（不整包缓冲；响应头只透传 `Content-Type`，长度类头由 Go 按流自动处理）
 3. **UA 透传**：客户端 UA 原样传给 Extended（`target=auto` 识别依赖它）。UA 显式 Set（空 UA 设为空串——Go Transport 对未设置 UA 会补 `Go-http-client/1.1`，破坏识别）；已知边界：直连 /sub 的「无 UA header」与空串 header 在 Extended 侧行为可能有差异，未知客户端本就 fallback
 4. 超时 `${SUB_PROXY_TIMEOUT}`（默认 30s，订阅生成可能慢于 preview 的 10s）；Extended 非 200 / 连接失败 / 超时 → HTTP 502，body `{"error":"upstream_unavailable"}`
 5. **日志卫生（D6 延续 + OH-2）**：nginx 对 `/s/` `access_log off`（短码即 bearer 凭据，不落 access log）；sidecar 自身日志只记脱敏摘要 `s/ hit code=Ab3*** status=200 latency=1.2s`（code 前 3 位 + 状态 + 耗时，不记完整码、不记订阅 URL）

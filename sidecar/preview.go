@@ -1,4 +1,5 @@
-// POST /api/preview：URL 预校验（D7）→ 探测转换（10s 超时）→ link 服务端拼接（D4：永远返回）。
+// POST /api/preview：URL 预校验（D7）→ 探测转换（10s 超时）→ 短链查/建（store_error 降级
+// /sub 长链；D4：link 永远返回）。
 // 日志卫生（D6）：任何日志不得含订阅 URL、query string、token——失败只记 target 与 errorCode。
 package main
 
@@ -147,7 +148,8 @@ func jsQueryEscape(s string) string {
 	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
 
-// buildLink 服务端拼接最终 /sub 链接（前端一律直接使用，不自行拼接）。
+// buildLink 拼 /sub 旧长链（v1.2.0 起仅作降级输出：store_error，以及 bad_url_* 无效 URL
+// 不落库场景；/sub 已是 deprecated 遗留兼容路由，存量链接不断）。
 // target 用请求原样（auto 或指定值）；SUB_TOKEN 非空时追加。
 func buildLink(origin, target, subURL, presetURL, token string) string {
 	link := origin + "/sub?target=" + jsQueryEscape(target) +
@@ -235,13 +237,30 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	origin := deriveOrigin(s.cfg.publicBaseURL, r.Host, r.Header.Get("X-Forwarded-Proto"))
-	link := buildLink(origin, linkTarget, req.SubURL, linkPresetURL, s.cfg.subToken)
-	deepLink := buildDeepLink(linkTarget, link)
 
-	// 契约预校验判定序：bad_url_* 先于 bad_preset
+	// 短链烙创建时刻的档位（bad_preset 时 link 仍以 default 档生成，契约预校验节）
+	linkPresetID := "default"
+	if presetOK {
+		linkPresetID = sel.ID
+	}
+	// makeLink 查/建短链（契约 sidecar 行为 step 3：与探测结果无关，永远执行）。
+	// 存储失败 → link 降级 /sub 旧长链并置 store_error（唯一保留长链返回的正常场景）
+	makeLink := func() (link string, storeCode string) {
+		code, err := s.store.getOrCreateLink(req.SubURL, linkTarget, linkPresetID, linkPresetURL)
+		if err != nil {
+			log.Printf("preview 短链生成失败: %T (store_error)", err)
+			return buildLink(origin, linkTarget, req.SubURL, linkPresetURL, s.cfg.subToken), "store_error"
+		}
+		return origin + "/s/" + code, ""
+	}
+
+	// 契约预校验判定序：bad_url_* 先于 bad_preset。
+	// 无效 URL 不落库（D7：私网/垃圾 URL 不持久化供 /s/ 重放），link 用 /sub 旧长链维持 D4 非空
 	if code := validateURL(req.SubURL); code != "" {
+		link := buildLink(origin, linkTarget, req.SubURL, linkPresetURL, s.cfg.subToken)
 		writeJSON(w, http.StatusOK, previewResponse{
-			OK: false, Target: probeTarget, Preset: echo, ErrorCode: &code, Message: validateMessages[code], Link: link, DeepLink: deepLink,
+			OK: false, Target: probeTarget, Preset: echo, ErrorCode: &code, Message: validateMessages[code],
+			Link: link, DeepLink: buildDeepLink(linkTarget, link),
 		})
 		return
 	}
@@ -249,16 +268,22 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		// 不静默回落（防「以为选了 A、实际拿到默认模板」的链接流出）；preset 输入值不入日志
 		code := "bad_preset"
 		log.Printf("preview 预校验: code=bad_preset target=%s", probeTarget)
+		link, _ := makeLink() // bad_preset 优先于 store_error；link 仍以 default 档短链生成
 		writeJSON(w, http.StatusOK, previewResponse{
-			OK: false, Target: probeTarget, Preset: nil, ErrorCode: &code, Message: validateMessages[code], Link: link, DeepLink: deepLink,
+			OK: false, Target: probeTarget, Preset: nil, ErrorCode: &code, Message: validateMessages[code],
+			Link: link, DeepLink: buildDeepLink(linkTarget, link),
 		})
 		return
 	}
 
 	pr := s.probeConvert(req.SubURL, probeTarget, sel.URL)
-	resp := previewResponse{OK: pr.ok, Target: probeTarget, Preset: echo, Message: pr.message, Link: link, DeepLink: deepLink}
+	link, storeCode := makeLink()
+	resp := previewResponse{OK: pr.ok, Target: probeTarget, Preset: echo, Message: pr.message, Link: link, DeepLink: buildDeepLink(linkTarget, link)}
 	if !pr.ok {
-		resp.ErrorCode = &pr.errorCode
+		resp.ErrorCode = &pr.errorCode // 探测错误优先；store_error 仅在探测成功时体现
+	} else if storeCode != "" {
+		resp.ErrorCode = &storeCode
+		resp.Message = "短链生成失败，已降级为普通链接（请部署者检查 /data 卷）"
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

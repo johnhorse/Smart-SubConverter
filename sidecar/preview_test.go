@@ -10,12 +10,38 @@ import (
 	"time"
 )
 
-func testConfig(extendedBase string) config {
+func testConfig(t *testing.T, extendedBase string) config {
+	t.Helper()
 	return config{
 		extendedBase: extendedBase,
 		presetURL:    "https://example.com/preset.ini",
 		probeTimeout: 2 * time.Second,
+		dataDir:      t.TempDir(),
 	}
+}
+
+// mustServer 打开带独立 tmp store 的 server（newServer 可能因库损坏失败，测试直接 Fatal）
+func mustServer(t *testing.T, cfg config) *server {
+	t.Helper()
+	s, err := newServer(cfg)
+	if err != nil {
+		t.Fatalf("newServer: %v", err)
+	}
+	return s
+}
+
+// storedFor 从短链 link 提取短码并查库（断言「冻结创建时参数」用）
+func storedFor(t *testing.T, s *server, link string) storedLink {
+	t.Helper()
+	i := strings.LastIndex(link, "/s/")
+	if i < 0 {
+		t.Fatalf("link 不是短链形态: %s", link)
+	}
+	lnk, found, err := s.store.linkByCode(link[i+3:])
+	if err != nil || !found {
+		t.Fatalf("短码查库失败 found=%v err=%v", found, err)
+	}
+	return lnk
 }
 
 func TestValidateURLEmpty(t *testing.T) {
@@ -207,7 +233,7 @@ func TestPreviewOKClashAuto(t *testing.T) {
 		_, _ = w.Write([]byte("proxies:\n  - name: fixture"))
 	}))
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/list"}`, "192.168.1.10:8080", "")
 	if !resp.OK || resp.Target != "clash" || resp.ErrorCode != nil || resp.Message != "" {
 		t.Fatalf("ok 响应 = %+v", resp)
@@ -215,15 +241,29 @@ func TestPreviewOKClashAuto(t *testing.T) {
 	if gotTarget != "clash" || gotUA != "clash-verge/v1.7.7" {
 		t.Errorf("探测请求 target=%s UA=%s，auto 应以 clash + clash UA 探测", gotTarget, gotUA)
 	}
-	if want := "http://192.168.1.10:8080/sub?target=auto&url=https%3A%2F%2Fsub.example.com%2Flist&config=https%3A%2F%2Fexample.com%2Fpreset.ini"; resp.Link != want {
-		t.Errorf("link = %s\nwant %s", resp.Link, want)
+	// v1.2.0：link 为短链 ${origin}/s/{8 字符码}，冻结创建时参数
+	if !strings.HasPrefix(resp.Link, "http://192.168.1.10:8080/s/") {
+		t.Fatalf("link = %s，应为短链", resp.Link)
+	}
+	if code := strings.TrimPrefix(resp.Link, "http://192.168.1.10:8080/s/"); len(code) != 8 {
+		t.Errorf("短码 %q 应为 8 字符", code)
+	}
+	if lnk := storedFor(t, s, resp.Link); lnk.Target != "auto" ||
+		lnk.SourceURL != "https://sub.example.com/list" ||
+		lnk.ConfigURL != "https://example.com/preset.ini" {
+		t.Errorf("冻结参数 = %+v", lnk)
+	}
+	// 幂等：同参数复用既有短码
+	resp2, _ := postPreview(t, s, `{"url":"https://sub.example.com/list"}`, "192.168.1.10:8080", "")
+	if resp2.Link != resp.Link {
+		t.Errorf("同参数应复用同码: %s vs %s", resp.Link, resp2.Link)
 	}
 }
 
 func TestPreviewOKSurgeExplicit(t *testing.T) {
 	ext := stubExtended(t, 200, "[General]\nloglevel = notify", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s","target":"surge"}`, "h:1", "")
 	if !resp.OK || resp.Target != "surge" {
 		t.Fatalf("显式 surge 响应 = %+v", resp)
@@ -233,7 +273,7 @@ func TestPreviewOKSurgeExplicit(t *testing.T) {
 func TestPreviewFormatFailUpstreamError(t *testing.T) {
 	ext := stubExtended(t, 200, "hello not a config", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s"}`, "h:1", "")
 	if resp.OK || *resp.ErrorCode != "upstream_error" {
 		t.Fatalf("格式粗验不过应为 upstream_error: %+v", resp)
@@ -243,7 +283,7 @@ func TestPreviewFormatFailUpstreamError(t *testing.T) {
 func TestPreviewUnsupportedTargetBody(t *testing.T) {
 	ext := stubExtended(t, 400, "Invalid request: unsupported target value. 无效请求：不支持的 target 参数值。", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s"}`, "h:1", "")
 	if resp.OK || *resp.ErrorCode != "upstream_error" || !strings.Contains(resp.Message, "指定客户端") {
 		t.Fatalf("unsupported target 响应 = %+v", resp)
@@ -253,7 +293,7 @@ func TestPreviewUnsupportedTargetBody(t *testing.T) {
 func TestPreviewOtherHTTPError(t *testing.T) {
 	ext := stubExtended(t, 500, "boom", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s"}`, "h:1", "")
 	if resp.OK || *resp.ErrorCode != "upstream_error" || !strings.Contains(resp.Message, "500") {
 		t.Fatalf("500 响应 = %+v", resp)
@@ -264,7 +304,7 @@ func TestPreviewBackendDown(t *testing.T) {
 	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	url := ext.URL
 	ext.Close() // 立即关闭 → 连接拒绝
-	s := newServer(testConfig(url))
+	s := mustServer(t, testConfig(t, url))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s"}`, "h:1", "")
 	if resp.OK || *resp.ErrorCode != "backend_down" {
 		t.Fatalf("连接拒绝应 backend_down: %+v", resp)
@@ -274,9 +314,9 @@ func TestPreviewBackendDown(t *testing.T) {
 func TestPreviewTimeout(t *testing.T) {
 	ext := stubExtended(t, 200, "proxies:", 3*time.Second)
 	defer ext.Close()
-	cfg := testConfig(ext.URL)
+	cfg := testConfig(t, ext.URL)
 	cfg.probeTimeout = 200 * time.Millisecond
-	s := newServer(cfg)
+	s := mustServer(t, cfg)
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s"}`, "h:1", "")
 	if resp.OK || *resp.ErrorCode != "upstream_timeout" {
 		t.Fatalf("超时应 upstream_timeout: %+v", resp)
@@ -290,7 +330,7 @@ func TestPreviewBadURLStopsBeforeUpstream(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	// D4 语义核心：ok:false 时 link 照常返回且可用
 	cases := []struct {
 		body string
@@ -321,7 +361,7 @@ func TestPreviewBadURLStopsBeforeUpstream(t *testing.T) {
 func TestPreviewOriginDerivation(t *testing.T) {
 	ext := stubExtended(t, 200, "proxies: x", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 
 	// X-Forwarded-Proto + Host 推导
 	resp, _ := postPreview(t, s, `{"url":"https://s.example/l"}`, "dep.lan:8080", "https")
@@ -330,7 +370,7 @@ func TestPreviewOriginDerivation(t *testing.T) {
 	}
 
 	// PUBLIC_BASE_URL 覆盖一切
-	s2 := newServer(func() config { c := testConfig(ext.URL); c.publicBaseURL = "https://sub.pub.example/"; return c }())
+	s2 := mustServer(t, func() config { c := testConfig(t, ext.URL); c.publicBaseURL = "https://sub.pub.example/"; return c }())
 	resp, _ = postPreview(t, s2, `{"url":"https://s.example/l"}`, "ignored:1", "")
 	if !strings.HasPrefix(resp.Link, "https://sub.pub.example/") {
 		t.Errorf("PUBLIC_BASE_URL 覆盖失败（含去尾斜杠）: %s", resp.Link)
@@ -340,24 +380,30 @@ func TestPreviewOriginDerivation(t *testing.T) {
 func TestPreviewUnknownTargetFallsBackToClash(t *testing.T) {
 	ext := stubExtended(t, 200, "proxies: x", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
-	// 未注册 target：契约未定义错误码，按「探测用 clash、link 原样」处理（报告列偏差）
+	s := mustServer(t, testConfig(t, ext.URL))
+	// 未注册 target：契约未定义错误码，按「探测用 clash、target 原样冻结进短链」处理（报告列偏差）
 	resp, _ := postPreview(t, s, `{"url":"https://s.example/l","target":"garbage"}`, "h:1", "")
-	if !resp.OK || resp.Target != "clash" || !strings.Contains(resp.Link, "target=garbage") {
+	if !resp.OK || resp.Target != "clash" {
 		t.Fatalf("未知 target 响应 = %+v", resp)
+	}
+	if lnk := storedFor(t, s, resp.Link); lnk.Target != "garbage" {
+		t.Errorf("冻结的 target = %s，应为请求原样 garbage", lnk.Target)
 	}
 }
 
-// 深链：target=surge 的 ok 响应带精确深链（与 link 同源派生，期望串为手写完整值）
+// 深链：target=surge 的 ok 响应带精确深链（与 link 同源派生，嵌 /s/ 短链）
 func TestPreviewDeepLinkSurgeOK(t *testing.T) {
 	ext := stubExtended(t, 200, "[General]\nloglevel = notify", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s","target":"surge"}`, "192.168.1.10:8080", "")
 	if !resp.OK {
 		t.Fatalf("surge ok 响应 = %+v", resp)
 	}
-	want := "surge://install-config?url=http%3A%2F%2F192.168.1.10%3A8080%2Fsub%3Ftarget%3Dsurge%26url%3Dhttps%253A%252F%252Fsub.example.com%252Fs%26config%3Dhttps%253A%252F%252Fexample.com%252Fpreset.ini"
+	if !strings.Contains(resp.Link, "/s/") {
+		t.Fatalf("link = %s，应为短链", resp.Link)
+	}
+	want := "surge://install-config?url=" + url.QueryEscape(resp.Link)
 	if resp.DeepLink == nil || *resp.DeepLink != want {
 		t.Errorf("deepLink =\n%v\nwant\n%s", resp.DeepLink, want)
 	}
@@ -367,7 +413,7 @@ func TestPreviewDeepLinkSurgeOK(t *testing.T) {
 func TestPreviewDeepLinkGivenOnFailure(t *testing.T) {
 	ext := stubExtended(t, 500, "boom", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s","target":"surge"}`, "h:1", "")
 	if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "upstream_error" {
 		t.Fatalf("500 响应 = %+v", resp)
@@ -381,7 +427,7 @@ func TestPreviewDeepLinkGivenOnFailure(t *testing.T) {
 func TestPreviewDeepLinkBadPresetStillGiven(t *testing.T) {
 	ext := stubExtended(t, 200, "proxies: x", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/l","preset":"nope","target":"loon"}`, "h:1", "")
 	if resp.ErrorCode == nil || *resp.ErrorCode != "bad_preset" {
 		t.Fatalf("bad_preset 响应 = %+v", resp)
@@ -395,7 +441,7 @@ func TestPreviewDeepLinkBadPresetStillGiven(t *testing.T) {
 func TestPreviewDeepLinkNullTargets(t *testing.T) {
 	ext := stubExtended(t, 200, "proxies: x", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	for _, body := range []string{
 		`{"url":"https://sub.example.com/l"}`,
 		`{"url":"https://sub.example.com/l","target":"auto"}`,
@@ -424,7 +470,8 @@ func TestPreviewPresetDefaultVariants(t *testing.T) {
 		_, _ = w.Write([]byte("proxies: x"))
 	}))
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
+	var firstLink string
 	for _, body := range []string{
 		`{"url":"https://sub.example.com/l"}`,
 		`{"url":"https://sub.example.com/l","preset":""}`,
@@ -437,8 +484,16 @@ func TestPreviewPresetDefaultVariants(t *testing.T) {
 		if gotConfig != "https://example.com/preset.ini" {
 			t.Errorf("body %s → 探测 config=%s，default 档应用 PRESET_URL 覆盖值", body, gotConfig)
 		}
-		if !strings.Contains(resp.Link, "config="+jsQueryEscape("https://example.com/preset.ini")) {
-			t.Errorf("body %s → link 未烙 default 档 config: %s", body, resp.Link)
+		if !strings.Contains(resp.Link, "/s/") {
+			t.Errorf("body %s → link 应为短链: %s", body, resp.Link)
+		}
+		if lnk := storedFor(t, s, resp.Link); lnk.ConfigURL != "https://example.com/preset.ini" {
+			t.Errorf("body %s → 冻结的 config_url = %s，应 default 档", body, lnk.ConfigURL)
+		}
+		if firstLink == "" {
+			firstLink = resp.Link
+		} else if resp.Link != firstLink {
+			t.Errorf("body %s → 同指纹（default 档）应复用同码: %s vs %s", body, resp.Link, firstLink)
 		}
 	}
 }
@@ -452,7 +507,7 @@ func TestPreviewPresetFullMultiMode(t *testing.T) {
 		_, _ = w.Write([]byte("proxies: x"))
 	}))
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/l","preset":"full_multimode"}`, "h:1", "")
 	if !resp.OK || resp.Preset == nil || resp.Preset.ID != "full_multimode" || resp.Preset.Name != "地区分组 + AI 分流" {
 		t.Fatalf("preset 回显 = %+v", resp.Preset)
@@ -460,8 +515,13 @@ func TestPreviewPresetFullMultiMode(t *testing.T) {
 	if gotConfig != fullMultiModeURL {
 		t.Errorf("探测 config=%s，应用 Full_MultiMode URL（PRESET_URL 不得覆盖该档）", gotConfig)
 	}
-	if !strings.Contains(resp.Link, "config="+jsQueryEscape(fullMultiModeURL)) {
-		t.Errorf("link 未烙 full_multimode 档 config: %s", resp.Link)
+	if lnk := storedFor(t, s, resp.Link); lnk.ConfigURL != fullMultiModeURL {
+		t.Errorf("冻结的 config_url = %s，应 full_multimode 档 URL", lnk.ConfigURL)
+	}
+	// 不同档位（不同 config_url）→ 不同指纹 → 不同短码
+	respDef, _ := postPreview(t, s, `{"url":"https://sub.example.com/l"}`, "h:1", "")
+	if respDef.Link == resp.Link {
+		t.Errorf("不同档位应得不同短码: %s", resp.Link)
 	}
 }
 
@@ -472,7 +532,7 @@ func TestPreviewBadPreset(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/l","preset":"nope"}`, "h:1", "")
 	if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "bad_preset" {
@@ -490,9 +550,14 @@ func TestPreviewBadPreset(t *testing.T) {
 	if called {
 		t.Error("bad_preset 不应触达上游")
 	}
-	// link 仍以 default 档生成（此处为 testConfig 覆盖后的 default url），维持「link 永远非空」
-	if !strings.Contains(resp.Link, "config="+jsQueryEscape("https://example.com/preset.ini")) {
-		t.Errorf("bad_preset 的 link 应以 default 档生成: %s", resp.Link)
+	// link 仍以 default 档短链生成（此处为 testConfig 覆盖后的 default url），维持「link 永远非空」
+	if lnk := storedFor(t, s, resp.Link); lnk.ConfigURL != "https://example.com/preset.ini" {
+		t.Errorf("bad_preset 的 link 应以 default 档生成: %+v", lnk)
+	}
+	var storedPresetID string
+	if err := s.store.db.QueryRow("SELECT preset_id FROM links WHERE code = ?",
+		resp.Link[strings.LastIndex(resp.Link, "/s/")+3:]).Scan(&storedPresetID); err != nil || storedPresetID != "default" {
+		t.Errorf("冻结的 preset_id = %q (err %v)，应 default", storedPresetID, err)
 	}
 
 	// 契约预校验判定序：bad_url_* 先于 bad_preset
@@ -514,7 +579,7 @@ func TestPreviewBadPreset(t *testing.T) {
 func TestPreviewPresetEchoOnFailure(t *testing.T) {
 	ext := stubExtended(t, 500, "boom", 0)
 	defer ext.Close()
-	s := newServer(testConfig(ext.URL))
+	s := mustServer(t, testConfig(t, ext.URL))
 	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/l","preset":"full_adblockplus"}`, "h:1", "")
 	if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "upstream_error" {
 		t.Fatalf("响应 = %+v", resp)
@@ -522,15 +587,18 @@ func TestPreviewPresetEchoOnFailure(t *testing.T) {
 	if resp.Preset == nil || resp.Preset.ID != "full_adblockplus" || resp.Preset.Name != "全量 + 去广告" {
 		t.Errorf("ok:false 时 preset 应回显生效档位: %+v", resp.Preset)
 	}
-	if !strings.Contains(resp.Link, "config="+jsQueryEscape(fullAdblockPlusURL)) {
-		t.Errorf("link 应烙 full_adblockplus 档 config: %s", resp.Link)
+	if !strings.Contains(resp.Link, "/s/") {
+		t.Errorf("ok:false 时 link 仍应为短链: %s", resp.Link)
+	}
+	if lnk := storedFor(t, s, resp.Link); lnk.ConfigURL != fullAdblockPlusURL {
+		t.Errorf("冻结的 config_url = %s，应 full_adblockplus 档 URL", lnk.ConfigURL)
 	}
 }
 
 // /api/clients：三档顺序与精确值；PRESET_URL 只覆盖 default 档 url，id/name 不变
 func TestHandleClientsPresets(t *testing.T) {
 	w := httptest.NewRecorder()
-	newServer(testConfig("http://unused")).handleClients(w, httptest.NewRequest(http.MethodGet, "/api/clients", nil))
+	mustServer(t, testConfig(t, "http://unused")).handleClients(w, httptest.NewRequest(http.MethodGet, "/api/clients", nil))
 	var resp clientsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
@@ -550,15 +618,39 @@ func TestHandleClientsPresets(t *testing.T) {
 	}
 
 	// 无 PRESET_URL 覆盖时 default 档用内置 url
-	cfg := testConfig("http://unused")
+	cfg := testConfig(t, "http://unused")
 	cfg.presetURL = ""
 	w2 := httptest.NewRecorder()
-	newServer(cfg).handleClients(w2, httptest.NewRequest(http.MethodGet, "/api/clients", nil))
+	mustServer(t, cfg).handleClients(w2, httptest.NewRequest(http.MethodGet, "/api/clients", nil))
 	var resp2 clientsResponse
 	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
 		t.Fatal(err)
 	}
 	if resp2.Presets[0].URL != defaultPresetURL {
 		t.Errorf("无覆盖时 default url = %s, want %s", resp2.Presets[0].URL, defaultPresetURL)
+	}
+}
+
+// store_error：存储失败 → link 降级 /sub 旧长链（唯一保留长链返回的正常场景）、
+// errorCode=store_error；探测成功时 ok 仍为 true（探测结果不被存储故障覆盖）
+func TestPreviewStoreError(t *testing.T) {
+	ext := stubExtended(t, 200, "proxies: x", 0)
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	if err := s.store.close(); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/l","target":"clash"}`, "h:1", "")
+	if resp.ErrorCode == nil || *resp.ErrorCode != "store_error" {
+		t.Fatalf("errorCode = %v，应 store_error", resp.ErrorCode)
+	}
+	if !resp.OK {
+		t.Errorf("探测成功的 ok 不应被 store_error 覆盖: %+v", resp)
+	}
+	if !strings.HasPrefix(resp.Link, "http://h:1/sub?target=clash&url=") {
+		t.Errorf("store_error 的 link 应降级 /sub 长链: %s", resp.Link)
+	}
+	if resp.Message == "" {
+		t.Error("store_error 时 message 必填")
 	}
 }
