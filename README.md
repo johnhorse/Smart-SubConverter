@@ -209,4 +209,4 @@ make stop-local      # 停掉本地容器
 - [ACL4SSR](https://github.com/ACL4SSR/ACL4SSR) —— 规则模板，仅作远程引用（不镜像、不拷贝）
 - [s6-overlay](https://github.com/just-containers/s6-overlay)、[nginx](https://nginx.org/)、[Vue 3](https://vuejs.org/)
 
-本仓库尚未选定许可证（上游 GPL-3.0 血统意味着选择需审慎，见仓库 issue/后续讨论）。
+本项目许可证延用上游：**GPL-3.0**（全文见 [LICENSE](LICENSE)）；镜像包含 GPL-3.0 的 SubConverter-Extended，分发的镜像整体按 GPL-3.0 提供。
