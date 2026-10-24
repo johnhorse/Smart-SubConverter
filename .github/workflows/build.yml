@@ -92,7 +92,7 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
-            echo "::notice::DOCKEHRUB secrets 未配置，跳过 Docker Hub 发布"
+            echo "::notice::DOCKERHUB secrets 未配置，跳过 Docker Hub 发布"
             exit 0
           fi
           echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin

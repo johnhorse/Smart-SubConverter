@@ -60,6 +60,10 @@ COPY image/nginx.conf /etc/nginx/nginx.conf
 # 前端静态产物：构建发生在 docker build 之前（Makefile / CI 先跑 npm build）
 COPY frontend/dist /usr/share/nginx/html
 
+# 出厂规则快照（v1.3.0）：三档 .ini + 规则集 + SNAPSHOT_META，只读兜底层、不被 volume 遮蔽；
+# sidecar 启动时复制到 {DATA_DIR}/rules/ 并改写 .ini 后供引擎本地读取（api-contract.md「规则快照」节）
+COPY image/rules-snapshot/ /base/rules-snapshot/
+
 # s6 服务树（nginx / sidecar / subconverter 三个 longrun + managed-config oneshot）+ user bundle
 # 注意：s6-rc oneshot 的 up 文件是 execline 脚本（shebang 不生效），故只放一行指向 sh 脚本
 COPY image/s6/ /etc/s6-overlay/

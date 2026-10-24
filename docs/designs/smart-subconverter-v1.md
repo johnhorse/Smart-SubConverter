@@ -776,7 +776,7 @@ NO UNRESOLVED DECISIONS
 | 2 | 规则集深度本地化（乙） | .ini 引用的全部规则集文件同入快照；sidecar 统一改写 .ini（规则集 GitHub URL → 本地路径，CI/vendor 不改写）；引擎对 GitHub 依赖清零，**预热机制取消**（不再需要保热引擎缓存）；仅剩网络依赖 = sidecar 后台刷快照 + 引擎拉订阅源 |
 | 3 | `PRESET_URL` 去留 | 保留（仅 default 档），语义 =「覆盖即豁免本地化」：sidecar 原样透传部署者 URL，自担网络；冒烟 fixture 注入沿用此口 |
 | 4 | 刷新节奏与新鲜度呈现 | `PRESET_REFRESH_INTERVAL` 默认 24h + 启动先刷一轮；health 加 `lastRefreshedAt`，本地化档 `status` 改快照刷新驱动（fresh = 2× 间隔，默认 48h 阈值；不冒充 fresh 原则延续）；前端徽章相对时间「规则快照 · {X} 前更新」；README 三披露 → 四披露（+CC-BY-SA-4.0 署名与快照兜底机制） |
-| 5 | 出厂快照供给 | 规则文件 vendor 入库 `image/rules-snapshot/`（原始未改写 + `SNAPSHOT_META` 时间戳），Dockerfile COPY 进 `/opt/rules-snapshot/`；upstream-watch 加 ACL4SSR 内容 hash 漂移检测自动开 PR（复用 base digest bump 模式）；**发版仍人工打 tag**；发版可复现（同 tag 同内容）、CI 构建零网络拉规则 |
+| 5 | 出厂快照供给 | 规则文件 vendor 入库 `image/rules-snapshot/`（原始未改写 + `SNAPSHOT_META` 时间戳与逐文件 sha256），Dockerfile COPY 进 `/base/rules-snapshot/`（闸门实测引擎本地读取硬限 /base 树，故非 /opt）；upstream-watch 加 ACL4SSR master HEAD 漂移检测自动开 PR（复用 base digest bump 模式，fetch.sh 与人工刷新共用）；**发版仍人工打 tag**；发版可复现（同 tag 同内容）、CI 构建零网络拉规则 |
 | 6 | 存量短链迁移 | `/s/` 代理运行时映射：冻结 config 为内置三档 GitHub URL → 本地改写后 .ini 路径（库不动，旧短码原地升级，朋友零动作） |
 
 顺带处理：`SUB_PROXY_TIMEOUT` 默认 30s→120s；preview 探测 10s 硬编码超时 env 化（`PROBE_TIMEOUT`，默认 30s）；build.yml notice 文案 typo「DOCKEHRUB」顺手修。幂等指纹影响：本地化档 config 解析结果变化，升级后同指纹首建生成新短码（一次性，旧码仍有效，属预期）。

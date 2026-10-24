@@ -1,7 +1,10 @@
 name: upstream-watch
 
-# 每日比对上游 aethersailor/subconverter-extended:latest 的 digest 与 image/base.lock，
-# 漂移则更新 lock 并开 PR；PR 合并后由 build workflow 的冒烟门禁把关（D3 更新策略）
+# 每日两路漂移检测，任一漂移则更新对应文件并开同一个 PR（branch bot/upstream-bump）；
+# PR 合并后由 build workflow 的冒烟门禁把关（D3 更新策略）
+#   ① base 镜像：比对 aethersailor/subconverter-extended:latest digest 与 image/base.lock
+#   ② 规则快照：比对 ACL4SSR master HEAD sha 与 image/rules-snapshot/SNAPSHOT_META，
+#      漂移则跑 image/rules-snapshot/fetch.sh 重拉 vendor 文件（脚本与人工刷新共用）
 on:
   schedule:
     - cron: '30 18 * * *'
@@ -18,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 比对上游 latest digest 与 base.lock
-        id: check
+        id: base
         run: |
           LATEST=$(docker buildx imagetools inspect aethersailor/subconverter-extended:latest --format '{{.Manifest.Digest}}')
           CURRENT=$(grep -m1 '^aethersailor' image/base.lock | sed 's/.*@//')
@@ -29,15 +32,32 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 开 PR 更新 base 镜像 pin
-        if: steps.check.outputs.changed == 'true'
+      - name: 比对 ACL4SSR master HEAD 与规则快照 META
+        id: rules
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HEAD_SHA=$(gh api repos/ACL4SSR/ACL4SSR/commits/master --jq .sha)
+          SNAP_SHA=$(jq -r '.upstream.commit' image/rules-snapshot/SNAPSHOT_META)
+          echo "head=$HEAD_SHA"
+          echo "snap=$SNAP_SHA"
+          if [ "$HEAD_SHA" != "$SNAP_SHA" ]; then
+            sh image/rules-snapshot/fetch.sh
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 开 PR 更新上游 pin
+        if: steps.base.outputs.changed == 'true' || steps.rules.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: 'chore(image): bump base 镜像 digest 至上游 latest'
-          title: 'base 镜像上游更新（digest bump）'
+          commit-message: 'chore(upstream): 跟随上游（base 镜像 digest / ACL4SSR 规则快照）'
+          title: '上游更新（base 镜像 / 规则快照）'
           body: |
-            上游 `aethersailor/subconverter-extended:latest` digest 漂移，已更新 `image/base.lock`。
+            上游漂移检测触发，本次变更见 diff：
 
-            合并前请确认 build workflow 的冒烟门禁通过（新 digest 会走完整 build + smoke）。
-          branch: bot/base-image-bump
+            - base 镜像 digest bump（`image/base.lock`，若包含）
+            - ACL4SSR 规则快照重拉（`image/rules-snapshot/`，若包含；由 `fetch.sh` 产出）
+
+            合并前请确认 build workflow 的冒烟门禁通过（变更会走完整 build + smoke）。
+          branch: bot/upstream-bump
           delete-branch: true
