@@ -12,14 +12,14 @@ V1 的官方部署路径是**局域网**（见下节）；公网 HTTPS 是非官
 
 ### 前置条件
 
-- Docker（构建 amd64 / arm64 双架构镜像均受支持，arm64 已实证）
+- Docker（amd64 / arm64 双架构镜像均受支持，arm64 已实证）
 - **容器需能直连订阅源与规则上游**（如 `raw.githubusercontent.com`）。转换是服务端抓取：朋友粘贴什么订阅 URL、规则模板从哪拉，容器就要能访问到哪。浏览器里能打开 ≠ 容器能抓到；网络受限环境请先确认容器出网正常
 - 宿主机能被局域网内朋友的设备访问到（同一个 Wi-Fi / 内网）
 
 ### 构建并运行
 
 ```bash
-git clone <本仓库地址> && cd Smart-SubConverter
+git clone https://github.com/johnhorse/Smart-SubConverter.git && cd Smart-SubConverter
 make build-image        # 构建本地镜像 smart-subconverter:dev
 
 docker run -d --name smart-subconverter \
@@ -30,7 +30,7 @@ docker run -d --name smart-subconverter \
 
 把 `192.168.1.100` 换成**部署机的局域网 IP**（`ip addr` / `ipconfig getifaddr en0` 查看），`8080` 换成你想用的宿主机端口。然后浏览器打开 `http://192.168.1.100:8080`，把地址发给朋友即可。
 
-镜像发布后（push tag `v*` 触发 CI 冒烟门禁，通过后推送 GHCR / Docker Hub，tag 形如 `ghcr.io/<owner>/smart-subconverter:latest`）可直接 `docker run` 对应镜像名，跳过本地构建。
+镜像已发布在 GHCR（amd64 / arm64，CI 冒烟门禁通过后推送）：把上面 `docker run` 的镜像名换成 `ghcr.io/johnhorse/smart-subconverter:latest` 即可跳过本地构建；需固定版本时用不可变版本 tag（如 `ghcr.io/johnhorse/smart-converter:v1.0.0`）。
 
 ### PUBLIC_BASE_URL 为什么必设
 
@@ -46,7 +46,7 @@ docker run -d --name smart-subconverter \
 ```yaml
 services:
   smart-subconverter:
-    build: .                     # 或 image: ghcr.io/<owner>/smart-subconverter:latest
+    build: .                     # 或 image: ghcr.io/johnhorse/smart-subconverter:latest
     container_name: smart-subconverter
     ports:
       - "8080:80"
@@ -124,7 +124,7 @@ docker run -d --name smart-subconverter \
   -e PUBLIC_BASE_URL=https://sub.example.com \
   -e SUB_TOKEN=CHANGE_ME_TO_A_LONG_RANDOM_SECRET \
   -e SUBCONVERTER_SECURITY_PROFILE=public \
-  smart-subconverter:dev
+  ghcr.io/johnhorse/smart-subconverter:latest
 ```
 
 Caddy 侧（`Caddyfile`，自动 HTTPS 由 Caddy ACME 处理）：
