@@ -745,3 +745,22 @@ finding above. Run with Claude Code or Codex; checkbox as you ship.
 
 NO UNRESOLVED DECISIONS
 
+---
+
+# v1.2.0 短链定案（2026-10-24，独立设计评审轮）
+
+兑现前提 4「根治 = V2 短链（服务端映射）」与 D8「短链承接撤销/轮换」。首次引入服务端状态（SQLite），契约见 api-contract.md「短链（v1.2.0）」节。经主会话 grill 八问 + codex outside review（13 findings：2H/6M/5L）全部处置后收口。
+
+| # | 决策 | 定案 |
+|---|---|---|
+| 1 | 输出形态 | 短链**唯一**输出；deepLink/二维码嵌短链；披露改写为「短链即凭据」不退役（OH-3） |
+| 2 | `/sub` 旧路由 | 保留为 deprecated 遗留兼容路由，存量链接不断 |
+| 3 | 拉取方式 | sidecar 容器内代理（UA 透传保 auto，流式透传，超时 30s env 可调——OH-7） |
+| 4 | 存储 | SQLite（modernc.org/sqlite 纯 Go），`/data/state.db` 0600，volume 挂 `/data`，`PRAGMA user_version` 迁移（OH-4），损坏拒启动不清空 |
+| 5 | 生成粒度 | 幂等：指纹（规范化 URL + target + 解析后 config URL）唯一索引复用；删除重建 = 新码（轮换）；指纹规范化契约级钉死（OH-8） |
+| 6 | 撤销/管理 | GET /api/links + DELETE /api/links/{code}；`SUB_TOKEN` 非空强制 token（局域网档开放+信任边界写明）；码即授权（OH-5/6） |
+| 7 | 公网档 | 短链不带 token（短码即逐链接凭据，可单条撤销）；token 容器内注入；Caddyfile 校验 scope 到 /sub*，豁免 /s/ /api/（OH-1 修订前提 6 落点） |
+| 8 | 日志 | `/s/` access_log off——短码即 bearer 凭据（OH-2 修正原「短码不含凭据」判断）；sidecar 只记脱敏摘要（前 3 位+状态+耗时） |
+
+技术参数：短码 8 字符 base62 crypto/rand；码碰撞重试 ≤5 次与指纹冲突分类处理（OH-9）；`store_error` 时 link 降级长链保 D4 非空；空 UA 显式 Set 空串（OH-12，Go Transport 补默认 UA 陷阱）；`/data` 卷 = 凭据库，README 备份/物理安全提示（OH-10）；生命周期披露重写为短链语义、GC/TTL 不做（OH-11）；SSRF 持久重放提示（OH-13）。
+

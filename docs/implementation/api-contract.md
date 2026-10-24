@@ -6,6 +6,8 @@
 
 > 增量修订（2026-10-24，导入深链）：`POST /api/preview` 响应新增 `deepLink`（string | null，sidecar 拼装的一键导入深链，拼装规则见该节）；`GET /api/clients` 形状不变。其余形状不变。
 
+> 增量修订（2026-10-24，v1.2.0 短链）：`POST /api/preview` 响应 `link` 从 `/sub` 长链接改为 `/s/{code}` 短链（deepLink 与二维码自动随嵌）；新增 `GET /s/{code}` 订阅代理端点、管理端点 `GET /api/links` + `DELETE /api/links/{code}`（`SUB_TOKEN` 非空时强制鉴权）；`/sub` 直通路由降级为 **deprecated 遗留兼容路由**（存量链接不断）；新增错误码 `store_error`；新增 env `DATA_DIR` / `SUB_PROXY_TIMEOUT`；`SUB_TOKEN` 用途扩展。详见「短链（v1.2.0）」节。
+
 Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081，仅容器内回环）。注意：**不能用 `PORT`**——该 env 已被 Extended（subconverter）占用。
 
 ## GET /api/clients
@@ -59,12 +61,12 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
   "preset": { "id": "full_multimode", "name": "地区分组 + AI 分流" },
   "errorCode": null,
   "message": "",
-  "link": "http://192.168.1.10:8080/sub?target=auto&url=…&config=…",
+  "link": "http://192.168.1.10:8080/s/Ab3xY9qZ",
   "deepLink": null
 }
 ```
 
-- **`link` 永远非空**（D4 定案）：`ok:false` 时照常返回，前端仍展示并标注「未通过校验，仍可试用」
+- **`link` 永远非空**（D4 定案）：`ok:false` 时照常返回，前端仍展示并标注「未通过校验，仍可试用」。v1.2.0 起 link 为短链（见「短链」节）；`store_error` 时降级为 `/sub` 长链接（唯一保留长链返回的场景）
 - `preset`：本次生效的档位（id + name）。`bad_preset` 时为 `null`；其余情况（含 `ok:false`）恒回显解析后的合法档位，前端结果页据此标注「模板：{name}」
 - `ok:false` 时 `target` 为探测用的 target（auto → "clash"），`errorCode` 与 `message` 必填
 - `link` 由 sidecar 服务端拼接，前端一律直接使用该字段，不自行拼接
@@ -94,11 +96,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
    - 200 但粗验不过 → `ok:false`，`errorCode:"upstream_error"`
    - 非 200 → `ok:false`，`errorCode:"upstream_error"`，message 由 Extended 响应体映射（见错误码表）
    - 连接失败 → `backend_down`；超时 → `upstream_timeout`
-3. **link 拼接**（与探测结果无关，永远执行）：
-   ```
-   ${origin}/sub?target=${请求target原样：auto或指定值}&url=${encodeURIComponent(用户url)}&config=${encodeURIComponent(所选档位url)}
-   ```
-   `SUB_TOKEN` env 非空时追加 `&token=${encodeURIComponent(SUB_TOKEN)}`
+3. **link 生成（v1.2.0 短链，与探测结果无关，永远执行）**：对规范化参数算指纹 → 查 `links` 表命中则复用既有短码；未命中则生成 8 字符 base62 短码插入（详见「短链（v1.2.0）」节），返回 `${origin}/s/${code}`。存储失败 → `errorCode:"store_error"`，link 降级为 `/sub` 长链接拼接（`${origin}/sub?target=…&url=…&config=…`，`SUB_TOKEN` 非空时追加 `&token=…`），保持非空
 4. **origin 推导（R3-1 定案，优先级从高到低）**：
    - env `PUBLIC_BASE_URL`（去尾部 `/`）
    - `${X-Forwarded-Proto 或 "http"}://${Host 头}`（nginx 必须显式 `proxy_set_header Host $host` + `X-Forwarded-Proto $scheme`，否则 sidecar 看到的是内部地址）
@@ -114,9 +112,42 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 | `upstream_error` | Extended 返回错误/格式不对 | 转换没成功——可以试试展开「指定客户端」换一个，或稍后再来 |
 | `upstream_timeout` | sidecar→Extended 10s 超时 | 等太久没等到结果，再试一次看看？ |
 | `backend_down` | Extended 连不上 | 转换引擎暂时没响应，稍后再试 |
+| `store_error` | 短链写入存储失败（磁盘满/库损坏等运维态） | 短链生成失败了——这次给的是普通链接（含订阅信息，注意别转发）；请部署者检查 /data 卷 |
 | `api_unreachable` | **前端侧专用**：fetch /api/preview 失败/超时（15s AbortController）/非 200 | 服务暂时够不着，稍后再试 |
 
 Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤ 实测）：未知 UA + `target=auto` → 400 + body「Invalid request: unsupported target value. 无效请求：不支持的 target 参数值。」——该文案出现时前端提示优先给「展开指定客户端」指引。
+
+## 短链（v1.2.0）
+
+短链唯一输出：preview 生成的 `link` 为 `${origin}/s/{code}`，凭据只存在容器内 SQLite；`/sub` 降级为 deprecated 遗留兼容路由（nginx 照旧直通，存量长链接不断，契约不再为其新增行为）。
+
+### 存储
+
+- SQLite，`modernc.org/sqlite`（纯 Go 无 cgo）；文件 `${DATA_DIR}/state.db`，权限 0600；首次启动自动建目录建库
+- `links` 表：`code TEXT PRIMARY KEY`、`fingerprint TEXT UNIQUE`、`source_url TEXT`、`target TEXT`、`preset_id TEXT`、`config_url TEXT`、`created_at INTEGER`（unix 秒）
+- schema 版本用 `PRAGMA user_version`（初值 1），启动时按序幂等迁移；**同码冻结创建时参数**：`source_url` / `target` / `config_url` 存的是创建时刻的解析结果，代理时永远用存的值，不重新解析（防 env 改 `PRESET_URL` 后同码内容漂移）
+- **库损坏（打不开/校验失败，非「文件不存在」）→ sidecar 拒绝启动**，错误信息指引「先备份 /data/state.db 再排查，勿直接删除」；绝不自动清空
+
+### 幂等与指纹
+
+- 指纹 = SHA-256 of `v1|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}`，其中订阅 URL 规范化规则：两端 trim、scheme/host 转小写、去默认端口（http:80 / https:443）、path 为空补 `/`、query 原样保留、fragment 丢弃；`target` 为请求原样值（auto 或指定）；`config_url` 为**解析后的档位 URL**（不用 preset id——同 id 被 `PRESET_URL` 覆盖时指纹自然区分）
+- 同指纹 → 永远复用既有短码；删除后同参数重建 → 指纹相同但插入新随机码（即轮换语义）
+- 短码：8 字符 base62（大小写字母+数字），`crypto/rand`；插入的两类唯一约束失败分开处理：**指纹冲突 → 重查返回既有码**；**码碰撞 → 重新生成码再插**（上限 5 次）；单测覆盖两类
+
+### GET /s/{code}（订阅代理端点，nginx 路由到 sidecar）
+
+1. 查表 miss → HTTP 404，body `{"error":"not_found"}`（客户端能展示，朋友侧表现为「订阅更新失败」）
+2. hit → 容器内 GET `${EXTENDED_BASE}/sub?target={存的target}&url={enc source_url}&config={enc config_url}`（`SUB_TOKEN` 非空时追加 `&token=…`——token 只在容器内注入，朋友的短链不带 token），响应**流式透传**给客户端（不整包缓冲）
+3. **UA 透传**：客户端 UA 原样传给 Extended（`target=auto` 识别依赖它）。UA 显式 Set（空 UA 设为空串——Go Transport 对未设置 UA 会补 `Go-http-client/1.1`，破坏识别）；已知边界：直连 /sub 的「无 UA header」与空串 header 在 Extended 侧行为可能有差异，未知客户端本就 fallback
+4. 超时 `${SUB_PROXY_TIMEOUT}`（默认 30s，订阅生成可能慢于 preview 的 10s）；Extended 非 200 / 连接失败 / 超时 → HTTP 502，body `{"error":"upstream_unavailable"}`
+5. **日志卫生（D6 延续 + OH-2）**：nginx 对 `/s/` `access_log off`（短码即 bearer 凭据，不落 access log）；sidecar 自身日志只记脱敏摘要 `s/ hit code=Ab3*** status=200 latency=1.2s`（code 前 3 位 + 状态 + 耗时，不记完整码、不记订阅 URL）
+
+### 管理端点（GET /api/links、DELETE /api/links/{code}）
+
+- `GET /api/links` → HTTP 200 `{ "links": [ { "code": "Ab3xY9qZ", "target": "surge", "preset": "full_multimode", "sourceUrl": "https://…含凭据…", "createdAt": 1761300000 } ] }`，按 createdAt 降序；**响应即凭据库**，仅部署者自用
+- `DELETE /api/links/{code}` → 删除成功 204（幂等：码不存在也 204）；删除后该短链立即 404
+- **鉴权**：`SUB_TOKEN` 非空时两者必须带 `?token=${SUB_TOKEN}`（与 /sub 的 Caddy 校验同值同带法），缺失/不符 → HTTP 401；`SUB_TOKEN` 为空（局域网档）→ 开放，信任边界 = 局域网，README 写明「码即授权：持有码者可拉订阅亦可删码，删码可由同参数重建恢复」
+- 公网档 Caddyfile（README 附录 A）同步修订：token 校验 scope 到 `path /sub*`，显式豁免 `/`、`/api/`、`/s/`（OH-1——原全局 matcher 会把不带 token 的短链 403）
 
 ## GET /api/health
 
@@ -153,15 +184,17 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 | `SIDECAR_PORT` | `8081` | 监听端口（勿用 `PORT`，被 Extended 占用） |
 | `EXTENDED_BASE` | `http://127.0.0.1:25500` | Extended 内部地址 |
 | `PUBLIC_BASE_URL` | 无 | link origin 覆盖 + 镜像层转 `MANAGED_CONFIG_PREFIX`（见 assignment-findings ⑤） |
-| `SUB_TOKEN` | 空 | 非空时注入生成链接 |
+| `SUB_TOKEN` | 空 | 非空时：① 注入 `/s/` 代理与 `store_error` 降级长链的容器内 `/sub` 调用（朋友无感知）② 管理端点（GET /api/links、DELETE）强制鉴权；公网档必配（README 附录） |
 | `PRESET_URL` | ACL4SSR_Online.ini | 仅覆盖 `default` 档 url（冒烟用；其余档不受影响） |
 | `POLL_INTERVAL` | `15m` | 健康轮询周期 |
+| `DATA_DIR` | `/data` | SQLite `state.db` 所在目录（volume 挂载点；单测指向 tmp） |
+| `SUB_PROXY_TIMEOUT` | `30s` | `/s/` 代理 sidecar→Extended 超时（订阅生成慢于 preview，勿低于 10s） |
 
 ## nginx 路由（镜像层，与契约相关部分）
 
-- `/` → 前端静态文件；`/api/` → sidecar；`/sub`、`/version`、`/healthz` → Extended(25500)
+- `/` → 前端静态文件；`/api/` → sidecar；`/s/` → sidecar（短链代理端点）；`/sub`、`/version`、`/healthz` → Extended(25500)。`/sub` 为 **deprecated 遗留兼容路由**（v1.2.0 起契约不再为其新增行为）
 - 对 sidecar 的反代：`proxy_set_header Host $http_host; proxy_set_header X-Forwarded-Proto $scheme;`（**注意用 `$http_host` 而非 `$host`**：nginx 的 `$host` 永远去掉端口，非 80 端口部署时 sidecar 推导的 link 会丢端口不可用——S2 三步冒烟实测抓出后修正）
-- `/sub`、`/api/` 关闭 access_log（D6 日志卫生；nginx 默认 access_log 含 query string）
+- `/sub`、`/api/`、`/s/` 关闭 access_log（D6 日志卫生 + OH-2：短码即 bearer 凭据，与订阅 URL 同级对待）
 
 ### 契约未定义场景的既定处理（S2 实现既成语义）
 
