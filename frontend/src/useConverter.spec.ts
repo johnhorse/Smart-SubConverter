@@ -18,7 +18,7 @@ const okResponse: PreviewResponse = {
   preset: { id: 'default', name: 'ACL4SSR 默认' },
   errorCode: null,
   message: '',
-  link: 'http://192.168.1.10:8080/sub?target=auto&url=xx',
+  link: 'http://192.168.1.10:8080/s/Ab3xY9qZ',
   deepLink: null,
 }
 
@@ -28,7 +28,7 @@ const badResponse: PreviewResponse = {
   preset: { id: 'default', name: 'ACL4SSR 默认' },
   errorCode: 'upstream_error',
   message: 'Invalid request',
-  link: 'http://192.168.1.10:8080/sub?target=auto&url=xx',
+  link: 'http://192.168.1.10:8080/s/Ab3xY9qZ',
   deepLink: null,
 }
 
@@ -112,7 +112,7 @@ describe('useConverter 状态机', () => {
     expect(conv.phase.value).toBe('result')
     expect(conv.result.value?.ok).toBe(false)
     expect(conv.result.value?.errorCode).toBe('upstream_error')
-    expect(conv.result.value?.link).toContain('/sub?') // 链接照常展示（D4）
+    expect(conv.result.value?.link).toContain('/s/') // 链接照常展示（D4）
   })
 
   it.each([
@@ -128,7 +128,7 @@ describe('useConverter 状态机', () => {
       preset: null,
       errorCode: code,
       message: '',
-      link: `http://192.168.1.10:8080/sub?target=auto&url=${encodeURIComponent(url)}`,
+      link: 'http://192.168.1.10:8080/s/xK9badQm',
       deepLink: null,
     })
 
@@ -150,7 +150,7 @@ describe('useConverter 状态机', () => {
       preset: null,
       errorCode: 'bad_preset',
       message: '',
-      link: 'http://192.168.1.10:8080/sub?target=auto&url=xx',
+      link: 'http://192.168.1.10:8080/s/xK9badQm',
       deepLink: null,
     })
 

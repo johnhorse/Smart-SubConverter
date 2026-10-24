@@ -65,7 +65,7 @@ onBeforeUnmount(() => clearTimeout(copiedTimer))
       <button v-if="result.deepLink" type="button" class="secondary-btn" @click="openInClient">
         在 {{ clientLabel }} 中打开
       </button>
-      <span class="copy-hint">链接含订阅信息，仅自用勿转发</span>
+      <span class="copy-hint">这条短链就是你的订阅钥匙——转发给谁，谁就能用你的订阅；泄露了找部署者撤销，换一条新的</span>
     </div>
 
     <div v-if="qrDataUrl" class="qr-box">

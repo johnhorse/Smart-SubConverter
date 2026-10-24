@@ -30,7 +30,7 @@ describe('fetchPreview', () => {
       preset: { id: 'full_multimode', name: '地区分组 + AI 分流' },
       errorCode: null,
       message: '',
-      link: 'http://x/sub?target=auto',
+      link: 'http://x/s/Ab3xY9qZ',
     }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 })))
     const res = await fetchPreview('https://example.com/sub', 'auto', 'full_multimode')
@@ -66,7 +66,7 @@ describe('fetchPreview', () => {
   })
 
   it('成功后不再保留 abort 定时器（14.9s 内完成不触发 abort）', async () => {
-    const body = { ok: true, target: 'clash', preset: null, errorCode: null, message: '', link: 'http://x/sub' }
+    const body = { ok: true, target: 'clash', preset: null, errorCode: null, message: '', link: 'http://x/s/Ab3xY9qZ' }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 })))
     const res = await fetchPreview('https://example.com/sub', 'auto', 'default')
     expect(res.ok).toBe(true)
@@ -83,6 +83,7 @@ describe('错误码 → 前端文案映射（契约全表）', () => {
     ['upstream_error', '转换没成功——可以试试展开「指定客户端」换一个，或稍后再来'],
     ['upstream_timeout', '等太久没等到结果，再试一次看看？'],
     ['backend_down', '转换引擎暂时没响应，稍后再试'],
+    ['store_error', '短链生成失败了——这次给的是普通链接（含订阅信息，注意别转发）；请部署者检查 /data 卷'],
     ['api_unreachable', '服务暂时够不着，稍后再试'],
   ])('%s → %s', (code, text) => {
     expect(ERROR_MESSAGES[code]).toBe(text)

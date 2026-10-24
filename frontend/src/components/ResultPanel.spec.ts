@@ -13,7 +13,7 @@ const okResult: PreviewResponse = {
   preset: { id: 'full_multimode', name: '地区分组 + AI 分流' },
   errorCode: null,
   message: '',
-  link: 'http://192.168.1.10:8080/sub?target=auto&url=abc',
+  link: 'http://192.168.1.10:8080/s/Ab3xY9qZ',
   deepLink: null,
 }
 
@@ -23,7 +23,18 @@ const badResult: PreviewResponse = {
   preset: { id: 'default', name: 'ACL4SSR 默认' },
   errorCode: 'upstream_error',
   message: 'Invalid request',
-  link: 'http://192.168.1.10:8080/sub?target=auto&url=abc',
+  link: 'http://192.168.1.10:8080/s/Ab3xY9qZ',
+  deepLink: null,
+}
+
+// store_error：短链写入失败，link 降级为 /sub 长链（契约唯一保留长链返回的场景）
+const storeErrorResult: PreviewResponse = {
+  ok: false,
+  target: 'clash',
+  preset: { id: 'default', name: 'ACL4SSR 默认' },
+  errorCode: 'store_error',
+  message: 'sqlite: database or disk is full',
+  link: 'http://192.168.1.10:8080/sub?target=clash&url=abc',
   deepLink: null,
 }
 
@@ -43,11 +54,21 @@ describe('ResultPanel', () => {
     expect(wrapper.text()).toContain('导入你的 App 时会自动适配格式')
   })
 
+  it('store_error：警示条用降级长链文案，链接照常展示（v1.2.0）', () => {
+    const wrapper = mountPanel(storeErrorResult)
+    const banner = wrapper.find('[role="alert"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain(
+      '短链生成失败了——这次给的是普通链接（含订阅信息，注意别转发）；请部署者检查 /data 卷',
+    )
+    expect(wrapper.text()).toContain(storeErrorResult.link)
+  })
+
   it('ok:true 时无警示条，含「链接是活的」说明与复制小字（D6）', () => {
     const wrapper = mountPanel(okResult)
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('链接是活的')
-    expect(wrapper.text()).toContain('链接含订阅信息，仅自用勿转发')
+    expect(wrapper.text()).toContain('这条短链就是你的订阅钥匙——转发给谁，谁就能用你的订阅；泄露了找部署者撤销，换一条新的')
   })
 
   it('link 下方标注「模板：{preset.name}」（ok:true，响应回显）', () => {
@@ -115,7 +136,7 @@ describe('ResultPanel', () => {
     const copyRow = wrapper.find('.copy-row')
     expect(copyRow.findAll('button')).toHaveLength(1)
     expect(copyRow.text()).not.toContain('中打开')
-    expect(copyRow.text()).toContain('链接含订阅信息，仅自用勿转发')
+    expect(copyRow.text()).toContain('这条短链就是你的订阅钥匙——转发给谁，谁就能用你的订阅；泄露了找部署者撤销，换一条新的')
   })
 
   it('二维码渲染（qrcode.toDataURL）', async () => {

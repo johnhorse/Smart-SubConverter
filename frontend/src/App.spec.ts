@@ -23,7 +23,7 @@ const okResponse: PreviewResponse = {
   preset: { id: 'default', name: 'ACL4SSR 默认' },
   errorCode: null,
   message: '',
-  link: 'http://192.168.1.10:8080/sub?target=auto&url=abc',
+  link: 'http://192.168.1.10:8080/s/Ab3xY9qZ',
   deepLink: null,
 }
 
@@ -86,7 +86,7 @@ describe('App 状态流转（组件层）', () => {
       preset: null,
       errorCode: 'bad_url_format',
       message: '',
-      link: 'http://192.168.1.10:8080/sub?target=auto&url=bad',
+      link: 'http://192.168.1.10:8080/s/xK9badQm',
       deepLink: null,
     })
     const wrapper = await mountApp()
@@ -100,7 +100,7 @@ describe('App 状态流转（组件层）', () => {
     // 停留状态②：主输入区仍在、无结果页、无链接文本、按钮恢复可点
     expect(wrapper.find('.result').exists()).toBe(false)
     expect(wrapper.find('input[aria-label="订阅链接"]').exists()).toBe(true)
-    expect(wrapper.text()).not.toContain('192.168.1.10:8080/sub')
+    expect(wrapper.text()).not.toContain('192.168.1.10:8080/s/')
     const btn = wrapper.find('button[type="submit"]')
     expect(btn.attributes('disabled')).toBeUndefined()
   })

@@ -9,6 +9,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   upstream_error: '转换没成功——可以试试展开「指定客户端」换一个，或稍后再来',
   upstream_timeout: '等太久没等到结果，再试一次看看？',
   backend_down: '转换引擎暂时没响应，稍后再试',
+  store_error: '短链生成失败了——这次给的是普通链接（含订阅信息，注意别转发）；请部署者检查 /data 卷',
   api_unreachable: '服务暂时够不着，稍后再试',
 }
 
