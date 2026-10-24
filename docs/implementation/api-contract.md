@@ -195,12 +195,16 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 
 - `backendVersion`：解析 `${EXTENDED_BASE}/version` 的 **HTML**（正则 `info-value[^>]*>\s*(v[\d.]+)`，Assignment ② 实测返回页面非纯文本）；失败 → `"unknown"`
 - **本地化档（v1.3.0 起默认三档）**：数据源 = 快照刷新循环
+  - `source: "snapshot"`（档位标识：豁免档为 `"remote"`；字段缺席 = v1.3.0 前的 sidecar，前端按 remote 旧文案回退）
   - `lastRefreshedAt`：当前所用快照的获得时间——出厂快照 = vendor 时间戳（`SNAPSHOT_META`）；运行时刷新成功 = 刷新时刻
   - `lastModifiedAt`：最近一次刷新成功时上游响应的 Last-Modified 头，缺头为 `null`（信息保真：内容本身多旧）；ETag 仅内部变更检测，不进契约
   - `lastSuccessAt`：同 `lastRefreshedAt`（保留字段名兼容前端）
   - **status 按序判定**：① `lastRefreshedAt` 距今 < 2×`PRESET_REFRESH_INTERVAL`（默认 48h）→ `fresh`；② ≥ → `stale`。「不冒充 fresh」原则延续：从未刷新成功且无出厂时间戳 → `unknown`
 - **豁免档（`PRESET_URL` 覆盖的 default 档）**：维持 v1.0 远端 HEAD 自采语义（每 15 min、`POLL_INTERVAL` 可调），status 判定沿用：① 从未成功抓取 → `unknown` ② 最近一次抓取失败 → `stale` ③ `lastModifiedAt == null` → `unknown` ④ < 24h → `fresh` ⑤ ≥ 24h → `stale`
-- 前端文案：fresh → 「规则快照 · {X} 前更新」；stale → 「规则快照已 {X} 未刷新」；unknown → 「规则库状态未知」（豁免档沿用「规则源暂时够不着」）；`backendVersion == "unknown"` → 后端版本显示 unknown
+- 前端文案（按 `source` 选文案集；缺席按 remote）：
+  - **snapshot**：fresh → 「规则快照 · {X} 前更新」；stale → 「规则快照已 {X} 未刷新」；unknown → 「规则库状态未知」
+  - **remote**（豁免档，沿用 v1.0 文案）：fresh → 「规则内容 {X} 前更新」；stale → 「规则库可能过期（{X} 未更新）」/最近抓取失败时「规则源暂时够不着」；unknown → 「规则库状态未知」
+  - `backendVersion == "unknown"` → 后端版本显示 unknown
 
 ## 环境变量（sidecar）
 

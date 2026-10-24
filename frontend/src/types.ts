@@ -36,11 +36,18 @@ export interface PreviewResponse {
 
 export type PresetStatus = 'fresh' | 'stale' | 'unknown'
 
+export type PresetSource = 'snapshot' | 'remote'
+
 export interface HealthPreset {
   name: string
   url: string
+  // 档位标识：本地化档 snapshot / 豁免档 remote；字段缺席 = v1.3.0 前旧 sidecar，按 remote 处理
+  source?: PresetSource
   lastModifiedAt: string | null
-  lastSuccessAt: string
+  // v1.3.0 快照刷新时刻；豁免档（PRESET_URL 覆盖）与未实装 sidecar 的响应里无此字段
+  lastRefreshedAt?: string | null
+  // 从未成功抓取/刷新时为 null（sidecar 实测输出形态）
+  lastSuccessAt: string | null
   status: PresetStatus
 }
 

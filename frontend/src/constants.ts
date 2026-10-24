@@ -94,14 +94,27 @@ export function badgeInfo(health: HealthResponse, now: number = Date.now()): Bad
   if (!preset || preset.status === 'unknown') {
     return { tone: 'unknown', text: `规则库状态未知${backend}` }
   }
+  // 快照档：新鲜度由快照刷新时间驱动；lastRefreshedAt 未实装前回退 lastSuccessAt（本地化档两字段同义）
+  if (preset.source === 'snapshot') {
+    const refreshedAt = preset.lastRefreshedAt ?? preset.lastSuccessAt
+    if (preset.status === 'fresh') {
+      const x = refreshedAt ? relativeDuration(refreshedAt, now) : '刚刚'
+      return { tone: 'fresh', text: `规则快照 · ${x}前更新${backend}` }
+    }
+    if (refreshedAt) {
+      return { tone: 'stale', text: `规则快照已 ${relativeDuration(refreshedAt, now)}未刷新${backend}` }
+    }
+    return { tone: 'stale', text: `规则源暂时够不着${backend}` }
+  }
+  // 豁免档（source: remote；字段缺席 = v1.3.0 前旧 sidecar 同样落此分支）：沿用 v1.0 远端文案，
+  // {X} 取 lastModifiedAt——豁免档 status 判定本就以它为准
   if (preset.status === 'fresh') {
     const x = preset.lastModifiedAt ? relativeDuration(preset.lastModifiedAt, now) : '刚刚'
     return { tone: 'fresh', text: `规则内容 ${x}前更新${backend}` }
   }
   // stale：能给出「X 未更新」就说过期；拿不到 lastModifiedAt 视为抓取失败
   if (preset.lastModifiedAt) {
-    const x = relativeDuration(preset.lastModifiedAt, now)
-    return { tone: 'stale', text: `规则库可能过期（${x}未更新）${backend}` }
+    return { tone: 'stale', text: `规则库可能过期（${relativeDuration(preset.lastModifiedAt, now)}未更新）${backend}` }
   }
   return { tone: 'stale', text: `规则源暂时够不着${backend}` }
 }
