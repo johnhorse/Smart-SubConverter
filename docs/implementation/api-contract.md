@@ -8,6 +8,8 @@
 
 > 增量修订（2026-10-24，v1.2.0 短链）：`POST /api/preview` 响应 `link` 从 `/sub` 长链接改为 `/s/{code}` 短链（deepLink 与二维码自动随嵌）；新增 `GET /s/{code}` 订阅代理端点、管理端点 `GET /api/links` + `DELETE /api/links/{code}`（`SUB_TOKEN` 非空时强制鉴权）；`/sub` 直通路由降级为 **deprecated 遗留兼容路由**（存量链接不断）；新增错误码 `store_error`；新增 env `DATA_DIR` / `SUB_PROXY_TIMEOUT`；`SUB_TOKEN` 用途扩展。详见「短链（v1.2.0）」节。
 
+> 增量修订（2026-10-24，v1.3.0 规则快照）：三档预设默认**快照本地化**（引擎读本地文件，对 GitHub 零网络依赖；`presets[].url` 仍为上游原始 URL 作来源披露，形状不变）；`GET /api/health` presets 新增 `lastRefreshedAt`、`status` 本地化档改快照刷新驱动（豁免档维持远端 HEAD 语义）；`PRESET_URL` 语义改为「覆盖即豁免本地化」；`/s/` 代理对存量短链的冻结 config 做内置 URL → 本地路径运行时映射；新增 env `PRESET_REFRESH_INTERVAL` / `PROBE_TIMEOUT`；`SUB_PROXY_TIMEOUT` 默认 30s→120s。详见「规则快照（v1.3.0）」节。
+
 Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081，仅容器内回环）。注意：**不能用 `PORT`**——该 env 已被 Extended（subconverter）占用。
 
 ## GET /api/clients
@@ -149,6 +151,30 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 - **鉴权**：`SUB_TOKEN` 非空时两者必须带 `?token=${SUB_TOKEN}`（与 /sub 的 Caddy 校验同值同带法），缺失/不符 → HTTP 401；`SUB_TOKEN` 为空（局域网档）→ 开放，信任边界 = 局域网，README 写明「码即授权：持有码者可拉订阅亦可删码，删码可由同参数重建恢复」
 - 公网档 Caddyfile（README 附录 A）同步修订：token 校验 scope 到 `path /sub*`，显式豁免 `/`、`/api/`、`/s/`（OH-1——原全局 matcher 会把不带 token 的短链 403）
 
+## 规则快照（v1.3.0）
+
+国内服务器直连 GitHub raw 慢/超时是常态（实测：规则集 6h 缓存 TTL 过期后现场重拉超 30s → `upstream_unavailable`）。v1.3.0 起三档预设的 .ini 模板与其引用的全部规则集文件走「快照本地化」，引擎读本地文件，对 GitHub 零网络依赖；系统仅剩网络依赖 = sidecar 后台刷新快照 + 引擎拉订阅源（机场，本来就要实时）。
+
+### 快照分层与刷新
+
+- **出厂快照**：vendor 于仓库 `image/rules-snapshot/`（原始未改写文件，含拉取时间戳 `SNAPSHOT_META`），构建时 COPY 进镜像 `/opt/rules-snapshot/`（只读兜底层）
+- **运行时快照**：`{DATA_DIR}/rules/`（volume 持久层）。sidecar 启动时确保该目录有一套可用快照（无则从出厂层复制并改写），此后按 `PRESET_REFRESH_INTERVAL`（默认 24h，启动时也先刷一轮）从上游逐文件刷新：**单文件成功即覆盖**（逐文件 last-known-good），失败保留旧文件；每轮刷新后重做 .ini 改写
+- **.ini 改写**：sidecar 将 .ini 中引用的规则集 GitHub URL 替换为运行时快照目录内的本地路径，改写产物落 `{DATA_DIR}/rules/`；引擎 `config=` 收到的是改写后 .ini 的本地路径。改写仅在 sidecar 侧发生（CI/vendor 不改写）
+- **引擎指向**：三档预设默认解析到「运行时快照改写后 .ini」；`PRESET_URL` 覆盖的档（仅 default）**豁免本地化**，sidecar 原样透传部署者 URL 给引擎（部署者自担网络）
+
+### 对既有契约面的影响
+
+- `GET /api/clients`：**形状零变化**。`presets[].url` 仍为上游原始 GitHub URL（来源披露；豁免档为部署者 URL）
+- 建链冻结与幂等指纹：本地化档建链冻结的 config = 本地改写后 .ini 路径。升级后同指纹首建会生成**新短码**（config 解析结果变化，旧码仍有效），属预期一次性影响
+- **存量短链兼容**：`/s/` 代理发现冻结 config 为内置三档 GitHub URL 时，运行时映射为本地改写后 .ini 路径（库不动、存量短码原地升级为快照直读）
+- `POLL_INTERVAL` 健康轮询对本地化档不再发远端 HEAD（改为读快照刷新状态）；豁免档维持远端 HEAD 自采
+
+### 实施闸门（实现前实测，未过则回审）
+
+1. 引擎 `config=` 接受本地文件路径（绝对路径）；.ini 内 ruleset 本地路径的解析基准
+2. 三档 .ini 引用的规则集全集清单与总体积；总量 > 10MB 则 vendor 策略回审
+3. 引擎磁盘缓存目录位置（本地化后 config/ruleset 不再依赖，订阅源缓存仍走引擎内置行为，不进契约承诺）
+
 ## GET /api/health
 
 ```json
@@ -159,23 +185,22 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
       "name": "ACL4SSR 默认",
       "url": "https://raw.githubusercontent.com/…/ACL4SSR_Online.ini",
       "lastModifiedAt": null,
-      "lastSuccessAt": "2026-10-23T15:00:00Z",
-      "status": "unknown"
+      "lastRefreshedAt": "2026-10-24T08:41:37Z",
+      "lastSuccessAt": "2026-10-24T08:41:37Z",
+      "status": "fresh"
     }
   ]
 }
 ```
 
 - `backendVersion`：解析 `${EXTENDED_BASE}/version` 的 **HTML**（正则 `info-value[^>]*>\s*(v[\d.]+)`，Assignment ② 实测返回页面非纯文本）；失败 → `"unknown"`
-- 数据由 sidecar **周期自采**：每 15 min（env `POLL_INTERVAL` 可调）对每个预设 url 发 HEAD，读 `etag` + `last-modified`（Assignment ③：GitHub raw 有 etag 无 last-modified）
-- `lastModifiedAt`：远端 Last-Modified 头，缺头为 `null`；ETag 仅内部做变更检测，不进契约
-- **status 三态语义（Success Criteria 定案，按序判定）**：
-  1. 从未成功抓取 → `unknown`
-  2. 最近一次抓取失败 → `stale`
-  3. `lastModifiedAt == null` → `unknown`（头缺失不冒充 fresh）
-  4. `lastModifiedAt` 距今 < 24h → `fresh`
-  5. ≥ 24h → `stale`
-- 前端文案：fresh → 「规则内容 {X} 前更新」；stale → 「规则库可能过期（{X} 未更新）」或最近抓取失败时「规则源暂时够不着」；unknown → 「规则库状态未知」；`backendVersion == "unknown"` → 后端版本显示 unknown
+- **本地化档（v1.3.0 起默认三档）**：数据源 = 快照刷新循环
+  - `lastRefreshedAt`：当前所用快照的获得时间——出厂快照 = vendor 时间戳（`SNAPSHOT_META`）；运行时刷新成功 = 刷新时刻
+  - `lastModifiedAt`：最近一次刷新成功时上游响应的 Last-Modified 头，缺头为 `null`（信息保真：内容本身多旧）；ETag 仅内部变更检测，不进契约
+  - `lastSuccessAt`：同 `lastRefreshedAt`（保留字段名兼容前端）
+  - **status 按序判定**：① `lastRefreshedAt` 距今 < 2×`PRESET_REFRESH_INTERVAL`（默认 48h）→ `fresh`；② ≥ → `stale`。「不冒充 fresh」原则延续：从未刷新成功且无出厂时间戳 → `unknown`
+- **豁免档（`PRESET_URL` 覆盖的 default 档）**：维持 v1.0 远端 HEAD 自采语义（每 15 min、`POLL_INTERVAL` 可调），status 判定沿用：① 从未成功抓取 → `unknown` ② 最近一次抓取失败 → `stale` ③ `lastModifiedAt == null` → `unknown` ④ < 24h → `fresh` ⑤ ≥ 24h → `stale`
+- 前端文案：fresh → 「规则快照 · {X} 前更新」；stale → 「规则快照已 {X} 未刷新」；unknown → 「规则库状态未知」（豁免档沿用「规则源暂时够不着」）；`backendVersion == "unknown"` → 后端版本显示 unknown
 
 ## 环境变量（sidecar）
 
@@ -185,10 +210,12 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 | `EXTENDED_BASE` | `http://127.0.0.1:25500` | Extended 内部地址 |
 | `PUBLIC_BASE_URL` | 无 | link origin 覆盖 + 镜像层转 `MANAGED_CONFIG_PREFIX`（见 assignment-findings ⑤） |
 | `SUB_TOKEN` | 空 | 非空时：① 注入 `/s/` 代理与 `store_error` 降级长链的容器内 `/sub` 调用（朋友无感知）② 管理端点（GET /api/links、DELETE）强制鉴权；公网档必配（README 附录） |
-| `PRESET_URL` | ACL4SSR_Online.ini | 仅覆盖 `default` 档 url（冒烟用；其余档不受影响） |
-| `POLL_INTERVAL` | `15m` | 健康轮询周期 |
-| `DATA_DIR` | `/data` | SQLite `state.db` 所在目录（volume 挂载点；单测指向 tmp） |
-| `SUB_PROXY_TIMEOUT` | `30s` | `/s/` 代理 sidecar→Extended 超时（订阅生成慢于 preview，勿低于 10s） |
+| `PRESET_URL` | ACL4SSR_Online.ini 的 GitHub URL | 仅覆盖 `default` 档：**覆盖即豁免本地化**——该档 sidecar 原样透传此 URL 给引擎（部署者自担网络；冒烟 fixture 注入沿用此口） |
+| `POLL_INTERVAL` | `15m` | 健康轮询周期（仅豁免档远端 HEAD；本地化档由快照刷新循环驱动） |
+| `PRESET_REFRESH_INTERVAL` | `24h` | 快照刷新周期（启动时先刷一轮；本地化档 `status` fresh 阈值 = 2× 此值） |
+| `PROBE_TIMEOUT` | `30s` | preview 探测 sidecar→Extended 超时（v1.3.0 前硬编码 10s；慢网络下预检不再 10 秒判死） |
+| `DATA_DIR` | `/data` | SQLite `state.db` 所在目录（volume 挂载点；单测指向 tmp）；运行时快照在 `{DATA_DIR}/rules/` |
+| `SUB_PROXY_TIMEOUT` | `120s` | `/s/` 代理 sidecar→Extended 超时（v1.2.0 默认 30s；国内慢网络实测不够。快照本地化后常规请求应快，此值兜订阅源慢的情况） |
 
 ## nginx 路由（镜像层，与契约相关部分）
 
