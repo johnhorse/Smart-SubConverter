@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,36 @@ func TestBuildLinkWithToken(t *testing.T) {
 	noTok := buildLink("http://h", "clash", "https://s.example/a", "https://c.example/i", "")
 	if strings.Contains(noTok, "token=") {
 		t.Errorf("SUB_TOKEN 为空时不应有 token 参数: %s", noTok)
+	}
+}
+
+// 五家深链拼装精确断言（契约「导入深链」节拼装表；期望串为 urlencode/base64 后的手写完整值）
+func TestBuildDeepLinkFiveSchemes(t *testing.T) {
+	link := "http://192.168.1.10:8080/sub?target=surge&url=https%3A%2F%2Fsub.example.com%2Fl&config=https%3A%2F%2Fexample.com%2Fpreset.ini"
+	qe := "http%3A%2F%2F192.168.1.10%3A8080%2Fsub%3Ftarget%3Dsurge%26url%3Dhttps%253A%252F%252Fsub.example.com%252Fl%26config%3Dhttps%253A%252F%252Fexample.com%252Fpreset.ini"
+	cases := []struct{ target, want string }{
+		{"surge", "surge://install-config?url=" + qe},
+		{"loon", "loon://import?sub=" + qe},
+		{"stash", "stash://install-profile?url=" + qe},
+		{"quanx", "quantumult-x:///add-resource?remote-resource=" +
+			"%7B%22server_remote%22%3A%5B%22" + qe + "%2C+tag%3DSmart+SubConverter%22%5D%7D"},
+		{"shadowrocket", "shadowrocket://add/sub://" +
+			"aHR0cDovLzE5Mi4xNjguMS4xMDo4MDgwL3N1Yj90YXJnZXQ9c3VyZ2UmdXJsPWh0dHBzJTNBJTJGJTJGc3ViLmV4YW1wbGUuY29tJTJGbCZjb25maWc9aHR0cHMlM0ElMkYlMkZleGFtcGxlLmNvbSUyRnByZXNldC5pbmk="},
+	}
+	for _, c := range cases {
+		got := buildDeepLink(c.target, link)
+		if got == nil || *got != c.want {
+			t.Errorf("buildDeepLink(%s) =\n%v\nwant\n%s", c.target, got, c.want)
+		}
+	}
+}
+
+// 无深链模板的 target：auto/clash/singbox/v2rayn（及未注册值，同「link 原样透传由上游拒绝」口径）→ nil
+func TestBuildDeepLinkNoTemplate(t *testing.T) {
+	for _, target := range []string{"auto", "clash", "singbox", "v2rayn", "garbage"} {
+		if got := buildDeepLink(target, "http://h/sub?x=1"); got != nil {
+			t.Errorf("buildDeepLink(%s) = %q, want nil", target, *got)
+		}
 	}
 }
 
@@ -314,6 +345,68 @@ func TestPreviewUnknownTargetFallsBackToClash(t *testing.T) {
 	resp, _ := postPreview(t, s, `{"url":"https://s.example/l","target":"garbage"}`, "h:1", "")
 	if !resp.OK || resp.Target != "clash" || !strings.Contains(resp.Link, "target=garbage") {
 		t.Fatalf("未知 target 响应 = %+v", resp)
+	}
+}
+
+// 深链：target=surge 的 ok 响应带精确深链（与 link 同源派生，期望串为手写完整值）
+func TestPreviewDeepLinkSurgeOK(t *testing.T) {
+	ext := stubExtended(t, 200, "[General]\nloglevel = notify", 0)
+	defer ext.Close()
+	s := newServer(testConfig(ext.URL))
+	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s","target":"surge"}`, "192.168.1.10:8080", "")
+	if !resp.OK {
+		t.Fatalf("surge ok 响应 = %+v", resp)
+	}
+	want := "surge://install-config?url=http%3A%2F%2F192.168.1.10%3A8080%2Fsub%3Ftarget%3Dsurge%26url%3Dhttps%253A%252F%252Fsub.example.com%252Fs%26config%3Dhttps%253A%252F%252Fexample.com%252Fpreset.ini"
+	if resp.DeepLink == nil || *resp.DeepLink != want {
+		t.Errorf("deepLink =\n%v\nwant\n%s", resp.DeepLink, want)
+	}
+}
+
+// 深链与 link 同源：ok:false（上游失败）时 deepLink 照给
+func TestPreviewDeepLinkGivenOnFailure(t *testing.T) {
+	ext := stubExtended(t, 500, "boom", 0)
+	defer ext.Close()
+	s := newServer(testConfig(ext.URL))
+	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s","target":"surge"}`, "h:1", "")
+	if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "upstream_error" {
+		t.Fatalf("500 响应 = %+v", resp)
+	}
+	if resp.DeepLink == nil || *resp.DeepLink != "surge://install-config?url="+url.QueryEscape(resp.Link) {
+		t.Errorf("ok:false 时 deepLink 应照给: %v", resp.DeepLink)
+	}
+}
+
+// bad_preset 时 deepLink 同样照给（loon 前缀，link 以 default 档生成）
+func TestPreviewDeepLinkBadPresetStillGiven(t *testing.T) {
+	ext := stubExtended(t, 200, "proxies: x", 0)
+	defer ext.Close()
+	s := newServer(testConfig(ext.URL))
+	resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/l","preset":"nope","target":"loon"}`, "h:1", "")
+	if resp.ErrorCode == nil || *resp.ErrorCode != "bad_preset" {
+		t.Fatalf("bad_preset 响应 = %+v", resp)
+	}
+	if resp.DeepLink == nil || *resp.DeepLink != "loon://import?sub="+url.QueryEscape(resp.Link) {
+		t.Errorf("bad_preset 时 deepLink 应照给: %v", resp.DeepLink)
+	}
+}
+
+// 无深链 target 的 handler 级断言：缺省/auto/clash/singbox/v2rayn → null
+func TestPreviewDeepLinkNullTargets(t *testing.T) {
+	ext := stubExtended(t, 200, "proxies: x", 0)
+	defer ext.Close()
+	s := newServer(testConfig(ext.URL))
+	for _, body := range []string{
+		`{"url":"https://sub.example.com/l"}`,
+		`{"url":"https://sub.example.com/l","target":"auto"}`,
+		`{"url":"https://sub.example.com/l","target":"clash"}`,
+		`{"url":"https://sub.example.com/l","target":"singbox"}`,
+		`{"url":"https://sub.example.com/l","target":"v2rayn"}`,
+	} {
+		resp, _ := postPreview(t, s, body, "h:1", "")
+		if resp.DeepLink != nil {
+			t.Errorf("body %s → deepLink %q, want null", body, *resp.DeepLink)
+		}
 	}
 }
 

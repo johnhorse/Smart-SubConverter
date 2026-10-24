@@ -60,6 +60,7 @@ type previewResponse struct {
 	ErrorCode *string    `json:"errorCode"`
 	Message   string     `json:"message"`
 	Link      string     `json:"link"`
+	DeepLink  *string    `json:"deepLink"`
 }
 
 // 客户端注册表（契约冻结：顺序即 chips 顺序，auto 永远第一；verified 随真机实测置 true）

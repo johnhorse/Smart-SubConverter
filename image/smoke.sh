@@ -209,6 +209,44 @@ else
     rc=1
 fi
 
+# ---- 导入深链：target=surge → deepLink 以 surge://install-config?url= 开头且 unescape 后等于
+# ---- link；target=clash 与缺省（auto）→ null（契约「导入深链」节；不断言 ok——深链与探测结果无关）
+if curl -s -m 30 -X POST "$BASE/api/preview" \
+    -H 'Content-Type: application/json' \
+    -d "{\"url\":\"$SUB_URL\",\"target\":\"surge\"}" | python3 -c "
+import json, sys, urllib.parse
+d = json.load(sys.stdin)
+dl = d['deepLink']
+assert dl is not None, 'deepLink 为 null'
+assert dl.startswith('surge://install-config?url='), 'deepLink=%s' % dl
+dec = urllib.parse.unquote_plus(dl[len('surge://install-config?url='):])
+assert dec == d['link'], 'unescape(deepLink)=%s link=%s' % (dec, d['link'])
+"; then
+    echo "PASS /api/preview target=surge deepLink（surge 前缀 + unescape 后等于 link）"
+else
+    echo "FAIL /api/preview target=surge deepLink"
+    rc=1
+fi
+
+assert_deep_link_null() {
+    # $1 描述 $2 请求 JSON
+    if curl -s -m 30 -X POST "$BASE/api/preview" \
+        -H 'Content-Type: application/json' \
+        -d "$2" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["deepLink"] is None, "deepLink=%s 应为 null" % d["deepLink"]
+'; then
+        echo "PASS $1（deepLink=null）"
+    else
+        echo "FAIL $1（deepLink 应为 null）"
+        rc=1
+    fi
+}
+
+assert_deep_link_null "/api/preview target=clash deepLink" "{\"url\":\"$SUB_URL\",\"target\":\"clash\"}"
+assert_deep_link_null "/api/preview 缺省 target（auto）deepLink" "{\"url\":\"$SUB_URL\"}"
+
 if [ "$rc" -eq 0 ]; then
     echo "== 冒烟三步全部 PASS =="
 fi

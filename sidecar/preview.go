@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -158,6 +159,29 @@ func buildLink(origin, target, subURL, presetURL, token string) string {
 	return link
 }
 
+// buildDeepLink 拼装选中客户端的一键导入深链（契约「导入深链」节拼装表，仅五家有模板）。
+// 与 link 同源派生：ok:false、bad_preset 时同样照给；urlencode 按契约用 url.QueryEscape。
+// target 为 auto/clash/singbox/v2rayn（及未注册值）时无深链，返回 nil。
+func buildDeepLink(target, link string) *string {
+	var dl string
+	switch target {
+	case "surge":
+		dl = "surge://install-config?url=" + url.QueryEscape(link)
+	case "loon":
+		dl = "loon://import?sub=" + url.QueryEscape(link)
+	case "stash":
+		dl = "stash://install-profile?url=" + url.QueryEscape(link)
+	case "quanx":
+		payload := `{"server_remote":["` + link + `, tag=Smart SubConverter"]}`
+		dl = "quantumult-x:///add-resource?remote-resource=" + url.QueryEscape(payload)
+	case "shadowrocket":
+		dl = "shadowrocket://add/sub://" + base64.StdEncoding.EncodeToString([]byte(link))
+	default:
+		return nil
+	}
+	return &dl
+}
+
 // 预校验失败的服务端 message（最终文案前端按 errorCode 硬编码，此处为兜底）
 var validateMessages = map[string]string{
 	"bad_url_empty":   "未提供订阅链接",
@@ -212,11 +236,12 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 
 	origin := deriveOrigin(s.cfg.publicBaseURL, r.Host, r.Header.Get("X-Forwarded-Proto"))
 	link := buildLink(origin, linkTarget, req.SubURL, linkPresetURL, s.cfg.subToken)
+	deepLink := buildDeepLink(linkTarget, link)
 
 	// 契约预校验判定序：bad_url_* 先于 bad_preset
 	if code := validateURL(req.SubURL); code != "" {
 		writeJSON(w, http.StatusOK, previewResponse{
-			OK: false, Target: probeTarget, Preset: echo, ErrorCode: &code, Message: validateMessages[code], Link: link,
+			OK: false, Target: probeTarget, Preset: echo, ErrorCode: &code, Message: validateMessages[code], Link: link, DeepLink: deepLink,
 		})
 		return
 	}
@@ -225,13 +250,13 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		code := "bad_preset"
 		log.Printf("preview 预校验: code=bad_preset target=%s", probeTarget)
 		writeJSON(w, http.StatusOK, previewResponse{
-			OK: false, Target: probeTarget, Preset: nil, ErrorCode: &code, Message: validateMessages[code], Link: link,
+			OK: false, Target: probeTarget, Preset: nil, ErrorCode: &code, Message: validateMessages[code], Link: link, DeepLink: deepLink,
 		})
 		return
 	}
 
 	pr := s.probeConvert(req.SubURL, probeTarget, sel.URL)
-	resp := previewResponse{OK: pr.ok, Target: probeTarget, Preset: echo, Message: pr.message, Link: link}
+	resp := previewResponse{OK: pr.ok, Target: probeTarget, Preset: echo, Message: pr.message, Link: link, DeepLink: deepLink}
 	if !pr.ok {
 		resp.ErrorCode = &pr.errorCode
 	}
