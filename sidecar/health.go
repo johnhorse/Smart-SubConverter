@@ -25,14 +25,21 @@ type presetState struct {
 type monitor struct {
 	mu             sync.Mutex
 	backendVersion string
-	presets        []presetState // 与 defs 下标对齐
+	presets        []presetState // 与 defs 下标对齐（仅豁免/remote 档使用）
 	defs           []presetEntry // 解析后的三档（default 档 url 已按 PRESET_URL 覆盖）
 	extendedBase   string
 	client         *http.Client
-	retryInterval  time.Duration // 未就绪时的重试间隔（默认 5s；测试注入短值）
+	retryInterval  time.Duration          // 未就绪时的重试间隔（默认 5s；测试注入短值）
+	snap           *snapshotManager       // v1.3.0：nil = 快照本地化禁用，全档 remote 语义
+	exempt         func(presetEntry) bool // 豁免档判定（与 server.presetExempt 同源）
+	freshWindow    time.Duration          // 本地化档 fresh 阈值 = 2× PRESET_REFRESH_INTERVAL
 }
 
 func newMonitor(cfg config) *monitor {
+	interval := cfg.presetRefreshInterval
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
 	return &monitor{
 		backendVersion: "unknown",
 		presets:        make([]presetState, len(presetTable)),
@@ -40,7 +47,13 @@ func newMonitor(cfg config) *monitor {
 		extendedBase:   cfg.extendedBase,
 		client:         &http.Client{Timeout: 10 * time.Second},
 		retryInterval:  5 * time.Second,
+		freshWindow:    2 * interval,
 	}
+}
+
+// isLocalPreset 该档是否快照本地化档（本地化档不发远端 HEAD，status 由快照刷新驱动）
+func (m *monitor) isLocalPreset(def presetEntry) bool {
+	return m.snap != nil && (m.exempt == nil || !m.exempt(def))
 }
 
 func (m *monitor) pollLoop(ctx context.Context, interval time.Duration) {
@@ -55,6 +68,14 @@ func (m *monitor) pollLoop(ctx context.Context, interval time.Duration) {
 			if m.presets[i].lastSuccessAt != nil {
 				presetReady = true
 				break
+			}
+		}
+		if !presetReady {
+			for _, def := range m.defs {
+				if m.isLocalPreset(def) && m.snap.stateOf(def.ID).lastRefreshedAt != nil {
+					presetReady = true
+					break
+				}
 			}
 		}
 		ready := presetReady && m.backendVersion != "unknown"
@@ -91,10 +112,13 @@ func (m *monitor) pollBackendVersion() {
 	m.mu.Unlock()
 }
 
-// pollPresets 对每个预设档位 url 发 HEAD，读 etag + last-modified。
+// pollPresets 仅对豁免/remote 档发远端 HEAD（v1.3.0 契约：本地化档由快照刷新循环驱动）。
 // 抓取失败保留旧 lastModifiedAt/lastSuccessAt（上次成功的时间不因本次失败失效）。
 func (m *monitor) pollPresets() {
 	for i, def := range m.defs {
+		if m.isLocalPreset(def) {
+			continue
+		}
 		m.pollPresetAt(i, def.URL)
 	}
 }
@@ -163,18 +187,48 @@ func rfc3339Ptr(t *time.Time) *string {
 	return &s
 }
 
+// snapshotStatusOf 本地化档 status（契约「GET /api/health」）：lastRefreshedAt 距今
+// < 2×PRESET_REFRESH_INTERVAL → fresh；≥ → stale；无时间戳 → unknown（不冒充 fresh）
+func snapshotStatusOf(at *time.Time, freshWindow time.Duration, now time.Time) string {
+	if at == nil {
+		return "unknown"
+	}
+	if now.Sub(*at) < freshWindow {
+		return "fresh"
+	}
+	return "stale"
+}
+
 func (m *monitor) snapshot() healthResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := time.Now()
 	out := make([]presetStatus, len(m.defs))
 	for i, def := range m.defs {
+		if m.isLocalPreset(def) {
+			// 本地化档：数据源 = 快照刷新循环；lastSuccessAt 同 lastRefreshedAt（兼容前端字段名）
+			st := m.snap.stateOf(def.ID)
+			refreshed := rfc3339Ptr(st.lastRefreshedAt)
+			out[i] = presetStatus{
+				Name:            def.Name,
+				URL:             def.URL,
+				Source:          "snapshot",
+				LastModifiedAt:  rfc3339Ptr(st.lastModifiedAt),
+				LastRefreshedAt: refreshed,
+				LastSuccessAt:   refreshed,
+				Status:          snapshotStatusOf(st.lastRefreshedAt, m.freshWindow, now),
+			}
+			continue
+		}
 		st := m.presets[i]
 		out[i] = presetStatus{
-			Name:           def.Name,
-			URL:            def.URL,
-			LastModifiedAt: rfc3339Ptr(st.lastModifiedAt),
-			LastSuccessAt:  rfc3339Ptr(st.lastSuccessAt),
-			Status:         st.statusOf(time.Now()),
+			Name:            def.Name,
+			URL:             def.URL,
+			Source:          "remote",
+			LastModifiedAt:  rfc3339Ptr(st.lastModifiedAt),
+			LastRefreshedAt: nil,
+			LastSuccessAt:   rfc3339Ptr(st.lastSuccessAt),
+			Status:          st.statusOf(now),
 		}
 	}
 	return healthResponse{BackendVersion: m.backendVersion, Presets: out}

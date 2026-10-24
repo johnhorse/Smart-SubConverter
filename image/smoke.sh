@@ -1,5 +1,5 @@
 #!/bin/sh
-# 三步冒烟（发布门禁，make smoke-local 与 CI 共用），整个流程不依赖外网：
+# 四步冒烟（发布门禁，make smoke-local 与 CI 共用），整个流程不依赖外网：
 #   第一步  基础可用：/ 200、/version 200、/api/health 200 且 JSON 结构正确（含 PRESET_URL 覆盖生效断言）
 #   第二步  fixture 转换：本地 python http.server 提供 fixture.ini + 内联 ss 节点，
 #           经 /sub（deprecated 遗留直通路由）以 Clash UA 与 Surge UA 直接转换，断言输出格式
@@ -8,6 +8,11 @@
 #           另断言：同参数二次 preview → link 相同（指纹幂等）、docker restart 后同一短链
 #           仍可用（state.db 持久化）、管理端点 GET /api/links 含码 → DELETE 204 幂等 →
 #           删后拉取 404（SUB_TOKEN 未配 → 端点开放）
+#   第四步  快照本地化（v1.3.0）：快照 fixture 注入挂载的 DATA_DIR（不依赖镜像内
+#           /base/rules-snapshot 出厂层）；断言 health source=snapshot、default 档走快照
+#           路径输出 DOMAIN=94/GEOIP=1（闸门实测基线，静默丢规则防护）、存量短链
+#           GitHub config URL → /s/ 运行时映射本地产物；数据源 image/rules-snapshot/
+#           缺失时整段 SKIP（vendor 出厂层落地后自动生效）
 # fixture 全本地（订阅节点为 RFC 5737 测试地址，无需真实出网）
 # 用法: smoke.sh <image> [host-port]（默认 18080）
 set -eu
@@ -15,6 +20,8 @@ set -eu
 IMAGE="${1:?用法: smoke.sh <image> [host-port]}"
 PORT="${2:-18080}"
 NAME=ssc-smoke
+NAME2=ssc-smoke-snap
+NAME3=ssc-smoke-map
 FIXTURES="$(cd "$(dirname "$0")/smoke-fixtures" && pwd)"
 BASE="http://127.0.0.1:${PORT}"
 SUB_NODE='ss://YWVzLTI1Ni1nY206dGVzdHBhc3N3b3Jk@192.0.2.1:8388#fixture'
@@ -39,7 +46,7 @@ if [ "$(uname -s)" = "Linux" ]; then
 fi
 
 cleanup() {
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    docker rm -f "$NAME" "$NAME2" "$NAME3" >/dev/null 2>&1 || true
     kill "$FIXTURE_PID" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
@@ -54,9 +61,10 @@ docker run -d --name "$NAME" -p "127.0.0.1:${PORT}:80" \
 
 # 等待 /healthz 就绪（Extended 初始化 pref + nginx 起监听；重启后复用）
 wait_healthz() {
+    base="${1:-$BASE}"
     i=0
     while [ "$i" -lt 30 ]; do
-        code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "$BASE/healthz" || true)
+        code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "$base/healthz" || true)
         [ "$code" = "200" ] && return 0
         i=$((i + 1))
         sleep 1
@@ -330,7 +338,148 @@ else
     echo "SKIP 管理端点用例（无短码）"
 fi
 
+# ============ 第四步：快照本地化（v1.3.0） ============
+# 快照 fixture 注入「挂载的 DATA_DIR」（-v hostdir:/base/data），不依赖镜像内
+# /base/rules-snapshot 出厂层（开发期镜像可无 vendor）。数据源默认本仓库
+# image/rules-snapshot/（vendor 入库产物），SNAPSHOT_SRC 可覆盖；缺失整段 SKIP
+SNAPSHOT_SRC="${SNAPSHOT_SRC:-$(cd "$(dirname "$0")" && pwd)/rules-snapshot}"
+if [ -f "$SNAPSHOT_SRC/ACL4SSR_Online.ini" ]; then
+    MULTI_URL="https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Full_MultiMode.ini"
+
+    # 容器2：不带 PRESET_URL（default 档本地化）+ 注入快照的 DATA_DIR
+    SNAP_DIR=$(mktemp -d)
+    mkdir -p "$SNAP_DIR/rules"
+    cp "$SNAPSHOT_SRC"/*.ini "$SNAPSHOT_SRC"/*.list "$SNAP_DIR/rules/" 2>/dev/null || true
+    docker rm -f "$NAME2" >/dev/null 2>&1 || true
+    # shellcheck disable=SC2086
+    docker run -d --name "$NAME2" -p "127.0.0.1:$((PORT+1)):80" \
+        -v "$SNAP_DIR":/base/data \
+        $ADD_HOST_ARG \
+        "$IMAGE" >/dev/null
+    BASE2="http://127.0.0.1:$((PORT+1))"
+    if wait_healthz "$BASE2"; then
+        echo "PASS 快照容器就绪（/healthz）"
+    else
+        echo "FAIL 快照容器 /healthz 30s 内未就绪"
+        rc=1
+    fi
+
+    # health：default 档 source=snapshot（快照刷新循环驱动，不再远端 HEAD）
+    if python3 - "$BASE2" <<'EOF'
+import json, sys, time, urllib.request
+base = sys.argv[1]
+for _ in range(60):
+    try:
+        d = json.load(urllib.request.urlopen(base + "/api/health", timeout=5))
+    except Exception:
+        time.sleep(0.5)
+        continue
+    p = (d.get("presets") or [{}])[0]
+    if p.get("source") == "snapshot":
+        sys.exit(0)
+    time.sleep(0.5)
+sys.exit("30s 内 health 未出现 source=snapshot")
+EOF
+    then
+        echo "PASS /api/health source=snapshot（default 档快照本地化生效）"
+    else
+        echo "FAIL /api/health source=snapshot"
+        rc=1
+    fi
+
+    # default 档走快照路径出完整配置：preview → /s/ 短链拉取 → rules 数 == GitHub 基线
+    # （DOMAIN 94 / GEOIP 1，闸门实测值——改写丢规则时此处数字缩水即抓出）
+    LINK2=$(curl -s -m 60 -X POST "$BASE2/api/preview" \
+        -H 'Content-Type: application/json' \
+        -d "{\"url\":\"$SUB_URL\",\"target\":\"clash\"}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['ok'] is True, 'ok=%s code=%s msg=%s' % (d['ok'], d['errorCode'], d['message'])
+assert '/s/' in d['link'], 'link=%s' % d['link']
+print(d['link'])
+") || LINK2=""
+    if [ -n "$LINK2" ]; then
+        if curl -s -m 60 -A "$CLASH_UA" "$LINK2" | python3 -c '
+import re, sys
+text = sys.stdin.read()
+in_rules = False
+dom = geo = 0
+for line in text.splitlines():
+    if re.match(r"^rules:\s*$", line):
+        in_rules = True
+        continue
+    if not in_rules:
+        continue
+    m = re.match(r"^\s*-\s+([A-Z0-9-]+),", line)
+    if not m:
+        if line and not line[0].isspace():
+            break
+        continue
+    k = m.group(1)
+    if k.startswith("DOMAIN"):
+        dom += 1
+    elif k.startswith("GEOIP"):
+        geo += 1
+assert "proxies:" in text, "输出无 proxies:"
+assert dom == 94, "DOMAIN 行 = %d, want 94（静默丢规则防护基线）" % dom
+assert geo == 1, "GEOIP 行 = %d, want 1" % geo
+'; then
+            echo "PASS 本地化档经 /s/ 输出 DOMAIN=94 GEOIP=1（== GitHub 基线）"
+        else
+            echo "FAIL 本地化档输出规则数 != GitHub 基线（DOMAIN 94 / GEOIP 1）"
+            rc=1
+        fi
+    else
+        echo "FAIL 快照容器 /api/preview 未通过（ok 应为 true——引擎读本地快照不出网）"
+        rc=1
+    fi
+
+    # 容器3：PRESET_URL=multimode GitHub URL（default 档豁免、建链冻结该内置 URL）
+    # → /s/ 运行时映射本地改写产物：离线仍出完整配置（存量短链原地升级）
+    SNAP_DIR2=$(mktemp -d)
+    mkdir -p "$SNAP_DIR2/rules"
+    cp "$SNAPSHOT_SRC"/*.ini "$SNAPSHOT_SRC"/*.list "$SNAP_DIR2/rules/" 2>/dev/null || true
+    docker rm -f "$NAME3" >/dev/null 2>&1 || true
+    # shellcheck disable=SC2086
+    docker run -d --name "$NAME3" -p "127.0.0.1:$((PORT+2)):80" \
+        -v "$SNAP_DIR2":/base/data \
+        -e "PRESET_URL=$MULTI_URL" \
+        $ADD_HOST_ARG \
+        "$IMAGE" >/dev/null
+    BASE3="http://127.0.0.1:$((PORT+2))"
+    if wait_healthz "$BASE3"; then
+        LINK3=$(curl -s -m 60 -X POST "$BASE3/api/preview" \
+            -H 'Content-Type: application/json' \
+            -d "{\"url\":\"$SUB_URL\",\"target\":\"clash\"}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+# 豁免档探测 config=GitHub URL，离线探测失败属预期（ok:false 不拦 link 生成——D4）
+print(d['link'])
+") || LINK3=""
+        if [ -n "$LINK3" ]; then
+            body=$(curl -s -m 60 -A "$CLASH_UA" "$LINK3" || true)
+            case "$body" in
+                *"proxies:"*)
+                    echo "PASS 存量短链 GitHub config URL → /s/ 运行时映射本地产物（离线仍 200）"
+                    ;;
+                *)
+                    echo "FAIL 存量短链映射后拉取异常（应映射本地改写 .ini 出完整配置）"
+                    rc=1
+                    ;;
+            esac
+        else
+            echo "FAIL 容器3 /api/preview 未生成 link"
+            rc=1
+        fi
+    else
+        echo "FAIL 容器3 /healthz 30s 内未就绪"
+        rc=1
+    fi
+else
+    echo "SKIP 第四步快照本地化（$SNAPSHOT_SRC 缺 ACL4SSR_Online.ini——vendor 出厂层未落地，落地后自动生效）"
+fi
+
 if [ "$rc" -eq 0 ]; then
-    echo "== 冒烟三步全部 PASS =="
+    echo "== 冒烟四步全部 PASS =="
 fi
 exit "$rc"

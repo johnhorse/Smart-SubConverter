@@ -1,5 +1,5 @@
-// POST /api/preview：URL 预校验（D7）→ 探测转换（10s 超时）→ 短链查/建（store_error 降级
-// /sub 长链；D4：link 永远返回）。
+// POST /api/preview：URL 预校验（D7）→ 探测转换（PROBE_TIMEOUT 超时）→ 短链查/建
+// （store_error 降级 /sub 长链；D4：link 永远返回）。
 // 日志卫生（D6）：任何日志不得含订阅 URL、query string、token——失败只记 target 与 errorCode。
 package main
 
@@ -124,7 +124,7 @@ func (s *server) probeConvert(subURL, target, presetURL string) probeResult {
 	if err != nil {
 		if isTimeoutErr(err) {
 			log.Printf("preview probe: target=%s code=upstream_timeout", target)
-			return probeResult{false, "upstream_timeout", "上游转换超时（10s）"}
+			return probeResult{false, "upstream_timeout", fmt.Sprintf("上游转换超时（%s）", s.cfg.probeTimeout)}
 		}
 		log.Printf("preview probe: target=%s code=backend_down (%T)", target, err)
 		return probeResult{false, "backend_down", "上游转换引擎连接失败"}
@@ -223,12 +223,13 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		probeTarget = "clash"
 	}
 
-	// 生效档位烙进探测请求与 link 的 config=（契约「选中的档位烙进」）；
+	// 生效档位烙进探测请求与 link 的 config=（契约「选中的档位烙进」）；config 值走
+	// engineConfig：本地化档 = 快照改写后 .ini 本地路径（v1.3.0），豁免档透传原 URL；
 	// bad_preset 时 link 仍以 default 档生成，维持「link 永远非空」
 	sel, presetOK := resolvePreset(s.presets, req.Preset)
-	linkPresetURL := sel.URL
-	if !presetOK {
-		linkPresetURL = s.presets[0].URL
+	linkPresetURL := s.engineConfig(s.presets[0])
+	if presetOK {
+		linkPresetURL = s.engineConfig(sel)
 	}
 	// preset 回显：bad_preset 时 null，其余情况（含 ok:false）恒回显解析后的合法档
 	var echo *presetRef
@@ -276,7 +277,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pr := s.probeConvert(req.SubURL, probeTarget, sel.URL)
+	pr := s.probeConvert(req.SubURL, probeTarget, s.engineConfig(sel))
 	link, storeCode := makeLink()
 	resp := previewResponse{OK: pr.ok, Target: probeTarget, Preset: echo, Message: pr.message, Link: link, DeepLink: buildDeepLink(linkTarget, link)}
 	if !pr.ok {

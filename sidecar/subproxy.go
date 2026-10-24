@@ -41,10 +41,19 @@ func (s *server) handleShortLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// v1.3.0 存量短链兼容（契约「存量短链兼容」）：冻结 config 为内置三档 GitHub
+	// URL → 运行时映射为本地改写后 .ini 路径（库不动，旧短码原地升级为快照直读）
+	configURL := lnk.ConfigURL
+	if s.snap != nil {
+		if mapped, ok := s.snap.mapFrozenConfig(configURL); ok {
+			configURL = mapped
+		}
+	}
+
 	q := url.Values{}
 	q.Set("target", lnk.Target)
 	q.Set("url", lnk.SourceURL)
-	q.Set("config", lnk.ConfigURL)
+	q.Set("config", configURL)
 	if s.cfg.subToken != "" {
 		q.Set("token", s.cfg.subToken)
 	}
