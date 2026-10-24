@@ -4,6 +4,8 @@
 
 > 增量修订（2026-10-24，规则模板切换）：`presets` 内置三档；`POST /api/preview` 增可选 `preset` 请求字段与响应 `preset` 回显；新增错误码 `bad_preset`；`PRESET_URL` 语义收窄为仅覆盖 default 档。其余形状不变。
 
+> 增量修订（2026-10-24，导入深链）：`POST /api/preview` 响应新增 `deepLink`（string | null，sidecar 拼装的一键导入深链，拼装规则见该节）；`GET /api/clients` 形状不变。其余形状不变。
+
 Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081，仅容器内回环）。注意：**不能用 `PORT`**——该 env 已被 Extended（subconverter）占用。
 
 ## GET /api/clients
@@ -57,7 +59,8 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
   "preset": { "id": "full_multimode", "name": "地区分组 + AI 分流" },
   "errorCode": null,
   "message": "",
-  "link": "http://192.168.1.10:8080/sub?target=auto&url=…&config=…"
+  "link": "http://192.168.1.10:8080/sub?target=auto&url=…&config=…",
+  "deepLink": null
 }
 ```
 
@@ -65,6 +68,17 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 - `preset`：本次生效的档位（id + name）。`bad_preset` 时为 `null`；其余情况（含 `ok:false`）恒回显解析后的合法档位，前端结果页据此标注「模板：{name}」
 - `ok:false` 时 `target` 为探测用的 target（auto → "clash"），`errorCode` 与 `message` 必填
 - `link` 由 sidecar 服务端拼接，前端一律直接使用该字段，不自行拼接
+- `deepLink`：选中客户端的一键导入深链（sidecar 拼装，前端一律直接使用）。`target` 为 `auto`、`clash`、`singbox`、`v2rayn` 时为 `null`；其余五家按下表拼装。与 `link` 同源派生：`link` 非空且客户端有模板时恒非空（`ok:false`、`bad_preset` 场景同样照给）
+
+| target | deepLink 拼装 |
+|---|---|
+| `surge` | `surge://install-config?url=` + `urlencode(link)` |
+| `loon` | `loon://import?sub=` + `urlencode(link)` |
+| `stash` | `stash://install-profile?url=` + `urlencode(link)` |
+| `quanx` | `quantumult-x:///add-resource?remote-resource=` + `urlencode(JSON)`，JSON = `{"server_remote":["<link>, tag=Smart SubConverter"]}` |
+| `shadowrocket` | `shadowrocket://add/sub://` + `base64_std(link)` |
+
+口径来源：Surge / Loon / Quantumult X 官方文档，Stash 官方跳链 `link.stash.ws` 模板推断，Shadowrocket 社区口径（机场面板通用）；真机验证状态随 README 兼容矩阵「深链」列回填
 
 ### sidecar 行为
 

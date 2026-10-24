@@ -149,19 +149,21 @@ sub.example.com {
 
 按「客户端 × 协议 × 模板」实测标注，**未实测 = 未验证**——本表不承诺「同一链接总能返回正确格式」（UA 被改写、未知客户端、同名不同内核是已知限制）。真机实测随时间回填。
 
-| 客户端 | target | 状态 | 实测记录 |
-|---|---|---|---|
-| 自动识别（按客户端 UA） | auto | 未验证 | — |
-| Clash / Mihomo | clash | 未验证 | — |
-| Surge | surge | 未验证 | — |
-| Quantumult X | quanx | 未验证 | — |
-| Loon | loon | 未验证 | — |
-| Stash | stash | 未验证 | — |
-| Shadowrocket | shadowrocket | 未验证 | — |
-| sing-box | singbox | 未验证 | — |
-| v2rayN | v2rayn | 未验证 | — |
+| 客户端 | target | 状态 | 深链 | 实测记录 |
+|---|---|---|---|---|
+| 自动识别（按客户端 UA） | auto | 未验证 | — | — |
+| Clash / Mihomo | clash | 未验证 | — | — |
+| Surge | surge | 未验证 | 未验证 | — |
+| Quantumult X | quanx | 未验证 | 未验证 | — |
+| Loon | loon | 未验证 | 未验证 | — |
+| Stash | stash | 未验证 | 未验证 | — |
+| Shadowrocket | shadowrocket | 未验证 | 未验证 | — |
+| sing-box | singbox | 未验证 | — | — |
+| v2rayN | v2rayn | 未验证 | — | — |
 
-回填格式示例：`| Clash Verge | clash | 已验证 | 2026-10-24 · Clash Verge v1.7.7 · ACL4SSR_Online.ini · amd64 |`
+「深链」列 = 结果页「在 XX 中打开」按钮（唤起对应 App 导入），仅 iOS 五家提供，拼装口径见 `docs/implementation/api-contract.md`；真机实测后回填。
+
+回填格式示例：`| Clash Verge | clash | 已验证 | — | 2026-10-24 · Clash Verge v1.7.7 · ACL4SSR_Online.ini · amd64 |`
 
 ## 规则新鲜度徽章
 

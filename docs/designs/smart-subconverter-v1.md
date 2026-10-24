@@ -92,6 +92,7 @@ Codex（gpt-6.1-sol）冷读结论，已交叉比对并采纳：
 - ~~前端组件化~~ 已定案（2026-10-23 实施启动）：**Vue 3**（三状态即状态机，响应式对口；T5 组件测试走 vitest + @vue/test-utils）
 - ~~auto 识别失败时的 fallback target 顺序策略~~ 实测收口（Assignment ⑤）：Extended 对未知 UA 直接返回 400「不支持的 target 参数值」，无 fallback 序列；V1 不引入 fallback，错误映射 + 「指定客户端」逃生口承接
 - ~~三档预设 V1 先落哪一档~~ 已定案：**ACL4SSR_Online.ini**（Assignment ③ 实测唯一 200 的候选；倾向的 MultiMode URL 已 404，另两档落 V1.5）
+- ~~导入深链 + 服务端二维码~~ 已定案（2026-10-24，v1.1.0 实作）：「服务端二维码」条目关闭——二维码已于 V1 实现为前端方案（结果态 qrcode 库渲染 /sub 链接，见状态③），无需服务端化。导入深链：iOS 五家（surge / loon / quanx / stash / shadowrocket）提供，target=auto 与 clash / singbox / v2rayn 不提供；sidecar 于 /api/preview 响应拼装 deepLink（前端不自行拼链接），结果页 [复制][在 XX 中打开] 并排、null 时布局同现状；口径来源 Surge / Loon / Quantumult X 官方文档、Stash 官方跳链 link.stash.ws 模板推断、Shadowrocket 社区口径（机场面板通用）——真机验证前 README 兼容矩阵「深链」列一律标未验证
 - ~~三档预设补齐~~ 已定案（2026-10-24，下一版本实作）：内置三档 = Online（default）/ Full_MultiMode（full_multimode，地区分组 + AI 分流）/ Full_AdblockPlus（full_adblockplus，全量 + 去广告），暴露于「高级」折叠区；三个 URL 均实测 200（MultiMode 正确路径为 `ACL4SSR_Online_Full_MultiMode.ini`，此前 404 的是不带 Full 的路径；Ai平台组候选含全部地区组，AI 应用可定向指定地区）
 - （进程托管已定案：s6-overlay，见工程评审 Decision ledger R1 / D2）
 
@@ -127,7 +128,7 @@ Codex（gpt-6.1-sol）冷读结论，已交叉比对并采纳：
 3. 前端三状态页落地（以线框图为验收基准）+ sidecar `/api/health`、`/api/clients`
 4. 客户端 chips 交互 + 使用 sidecar `/api/preview` 返回的 `link`（服务端拼接、含 token 注入路径，前端不自行拼链接）+ 错误文案翻译
 5. 用 Assignment 数据回填 README 兼容矩阵表；两档部署文档
-6. V1.5 候选池：短链、导入深链、服务端二维码（三档预设补齐已于 2026-10-24 提前定案实作，见 Open Questions）
+6. V1.5 候选池：短链（「服务端二维码」已被 V1 前端二维码消化、条目关闭；「导入深链」已于 2026-10-24 定案实作，见 Open Questions）
 
 ## What I noticed about how you think
 
