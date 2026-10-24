@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 )
@@ -122,6 +123,7 @@ type config struct {
 	dataDir               string // state.db 与运行时快照 rules/ 所在目录（volume 挂载点；单测指向 tmp）
 	subProxyTimeout       time.Duration
 	presetRefreshInterval time.Duration // 快照刷新周期（启动先刷一轮）
+	snapshotProxy         *url.URL      // 规则/模板上游访问代理（SNAPSHOT_PROXY，v1.3.1）；订阅拉取不经它（引擎 proxy_subscription=NONE 直连）
 }
 
 func loadConfigFromEnv() config {
@@ -155,7 +157,29 @@ func loadConfigFromEnv() config {
 	parseDur("SUB_PROXY_TIMEOUT", "120s", &c.subProxyTimeout)
 	parseDur("PROBE_TIMEOUT", "30s", &c.probeTimeout)
 	parseDur("PRESET_REFRESH_INTERVAL", "24h", &c.presetRefreshInterval)
+	if raw := os.Getenv("SNAPSHOT_PROXY"); raw != "" {
+		if u, err := url.Parse(raw); err == nil && (u.Scheme == "http" || u.Scheme == "https" || u.Scheme == "socks5") && u.Host != "" {
+			c.snapshotProxy = u
+		} else {
+			log.Printf("SNAPSHOT_PROXY %q 非法（需 http:// 或 socks5:// 且带 host），回退直连", raw)
+		}
+	}
+	if c.publicBaseURL == "" {
+		log.Printf("警告：PUBLIC_BASE_URL 未设置——输出的规则集引用（getruleset/MANAGED-CONFIG）将回指 127.0.0.1，外部客户端拉不到规则，严格校验的客户端（Quantumult X 等）导入会失败")
+	}
 	return c
+}
+
+// upstreamClient 规则/模板上游访问专用 client（快照刷新 + 豁免档远端 HEAD）：
+// SNAPSHOT_PROXY 非空时全走代理；订阅拉取不共用（引擎侧 proxy_subscription=NONE 直连）
+func upstreamClient(cfg config, timeout time.Duration) *http.Client {
+	if cfg.snapshotProxy == nil {
+		return &http.Client{Timeout: timeout}
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: &http.Transport{Proxy: http.ProxyURL(cfg.snapshotProxy)},
+	}
 }
 
 type server struct {

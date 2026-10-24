@@ -59,8 +59,9 @@ func newSnapshotManager(cfg config, exempt func(presetEntry) bool) *snapshotMana
 		vendorDir: vendorSnapshotDir,
 		baseDir:   engineBaseDir,
 		interval:  interval,
-		// 单文件最大实测 1.4MB（BanEasyPrivacy），慢网络整轮拉取留足余量
-		client:  &http.Client{Timeout: 2 * time.Minute},
+		// 单文件最大实测 1.4MB（BanEasyPrivacy），慢网络整轮拉取留足余量；
+		// SNAPSHOT_PROXY 非空时走代理（契约「规则快照」env 节）
+		client:  upstreamClient(cfg, 2*time.Minute),
 		presets: table,
 		exempt:  exempt,
 		states:  map[string]*snapshotState{},

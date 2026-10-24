@@ -354,13 +354,14 @@ if [ -f "$SNAPSHOT_SRC/ACL4SSR_Online.ini" ]; then
     # shellcheck disable=SC2086
     docker run -d --name "$NAME2" -p "127.0.0.1:$((PORT+1)):80" \
         -v "$SNAP_DIR":/base/data \
+        -e "PUBLIC_BASE_URL=http://127.0.0.1:$((PORT+1))" \
         $ADD_HOST_ARG \
         "$IMAGE" >/dev/null
     BASE2="http://127.0.0.1:$((PORT+1))"
     if wait_healthz "$BASE2"; then
         echo "PASS 快照容器就绪（/healthz）"
     else
-        echo "FAIL 快照容器 /healthz 30s 内未就绪"
+        echo "FAIL 容器2 /healthz 30s 内未就绪"
         rc=1
     fi
 
@@ -431,6 +432,46 @@ assert geo == 1, "GEOIP 行 = %d, want 1" % geo
         fi
     else
         echo "FAIL 快照容器 /api/preview 未通过（ok 应为 true——引擎读本地快照不出网）"
+        rc=1
+    fi
+
+    # v1.3.1 QX 链路（双跳）：① quanx UA 输出的 filter_remote 引用 getruleset 且前缀 =
+    # PUBLIC_BASE_URL（非 127.0.0.1）；② 该 getruleset URL 经 nginx 真实拉到规则内容（非 HTML）
+    LINKQX=$(curl -s -m 60 -X POST "$BASE2/api/preview" \
+        -H 'Content-Type: application/json' \
+        -d "{\"url\":\"$SUB_URL\",\"target\":\"auto\"}" | python3 -c "
+import json, sys
+print(json.load(sys.stdin)['link'])
+") || LINKQX=""
+    if [ -n "$LINKQX" ]; then
+        QX_OUT=$(curl -s -m 60 -A "Quantumult%20X%20v1.0.30" "$LINKQX" || true)
+        RULE_URL=$(printf '%s' "$QX_OUT" | grep -m 1 "getruleset" | grep -o "http[^,]*" | head -1)
+        if printf '%s' "$QX_OUT" | grep -q "^\[general\|^\[server_remote\|\[filter_remote\]" \
+            && [ -n "$RULE_URL" ] \
+            && case "$RULE_URL" in "http://127.0.0.1:$((PORT+1))"*) true;; *) false;; esac; then
+            echo "PASS QX 输出 getruleset 前缀 == PUBLIC_BASE_URL（不回指 127.0.0.1:25500）"
+        else
+            echo "FAIL QX 输出应含 filter_remote 且 getruleset 前缀为 PUBLIC_BASE_URL：$RULE_URL"
+            rc=1
+        fi
+        if [ -n "$RULE_URL" ]; then
+            RULE_BODY=$(curl -s -m 30 "$RULE_URL" || true)
+            case "$RULE_BODY" in
+                *"<html"*|*"<!"*)
+                    echo "FAIL getruleset 经 nginx 返回 HTML（路由缺失，落入前端静态）"
+                    rc=1
+                    ;;
+                "")
+                    echo "FAIL getruleset 返回空"
+                    rc=1
+                    ;;
+                *)
+                    echo "PASS getruleset 经 nginx 拉到规则内容（QX 双跳闭环）"
+                    ;;
+            esac
+        fi
+    else
+        echo "FAIL 容器2 /api/preview（auto）未生成 link"
         rc=1
     fi
 

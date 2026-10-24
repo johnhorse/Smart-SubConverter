@@ -39,12 +39,13 @@ docker run -d --name smart-subconverter \
 
 ### PUBLIC_BASE_URL 为什么必设
 
-这个环境变量决定「朋友拿到的转换链接以什么地址开头」，一处配置两处生效：
+这个环境变量决定「朋友拿到的转换链接以什么地址开头」，一处配置三处生效：
 
 1. **页面生成的短链**：sidecar 用它拼接短链（`/s/…`）的 origin。不设则按入站请求头推导，容易拼出朋友设备打不开的地址
 2. **客户端自动更新地址**：镜像把它同步导出为转换内核的 `MANAGED_CONFIG_PREFIX`——Surge 等客户端导入订阅后，会按这个地址自动更新。实测不设时该地址回指 `127.0.0.1:25500`（朋友自己的设备），自动更新链路直接断裂
+3. **规则集引用地址**（v1.3.1 修复确认）：Quantumult X / Surge 类客户端的配置里，规则列表引用的是服务的 `getruleset` 端点——不设时同样回指 `127.0.0.1:25500`，**Quantumult X 导入直接报 Response invalid**（严格校验），Clash 系则表现为规则悄悄加载失败
 
-忘设的症状：链接在页面上能复制，但朋友设备上打不开，或客户端「更新订阅」一直失败。**局域网部署建议总是显式设置。**
+忘设的症状：链接在页面上能复制，但朋友设备上打不开；或客户端「更新订阅」一直失败；或 QX 导入报 Response invalid。**局域网部署建议总是显式设置。**
 
 ### docker-compose 等价示例
 
@@ -76,7 +77,8 @@ volumes:
 
 | 变量 | 默认值 | 用途 |
 |---|---|---|
-| `PUBLIC_BASE_URL` | 无 | 转换链接 origin 覆盖 + 客户端自动更新地址（转 `MANAGED_CONFIG_PREFIX`）。**局域网部署必设**，见上文 |
+| `PUBLIC_BASE_URL` | 无 | 转换链接 origin 覆盖 + 客户端自动更新地址 + 规则集引用地址（均转 `MANAGED_CONFIG_PREFIX`）。**局域网部署必设**，见上文 |
+| `SNAPSHOT_PROXY` | 空（直连） | 规则/模板上游（GitHub）访问代理，`http://` 或 `socks5://`：仅作用于快照每日刷新，**朋友的订阅拉取不走它**（始终直连）。国内服务器上 GitHub 直连慢/超时时配置，如 `-e SNAPSHOT_PROXY=http://host.docker.internal:7890`（代理跑在宿主机时） |
 | `SUB_TOKEN` | 空 | 非空时：① sidecar 容器内调用 `/sub` 自动带 token（朋友无感知）② 管理端点 `GET /api/links` / `DELETE /api/links/{code}` 强制 `?token=` 鉴权（缺失/不符 401）。v1.2.0 起短链**不携带** token；公网档必设（附录 A） |
 | `PRESET_URL` | ACL4SSR_Online.ini | 仅覆盖 default 档规则模板，**覆盖即豁免快照本地化**——该档原样透传此 URL 给转换内核（网络自担）。主要为冒烟测试用，日常部署无需设置 |
 | `DATA_DIR` | `/base/data` | 短链 SQLite（`state.db`）与运行时规则快照（`rules/`）所在目录，即 volume 挂载点。**须位于容器内 `/base` 树内**（引擎本地读取硬限），否则规则快照本地化整体禁用（启动告警，不拒启动） |

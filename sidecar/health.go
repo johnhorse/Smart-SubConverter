@@ -45,7 +45,7 @@ func newMonitor(cfg config) *monitor {
 		presets:        make([]presetState, len(presetTable)),
 		defs:           resolvePresets(cfg.presetURL),
 		extendedBase:   cfg.extendedBase,
-		client:         &http.Client{Timeout: 10 * time.Second},
+		client:         upstreamClient(cfg, 10*time.Second), // 豁免档远端 HEAD：与快照刷新同一代理口径
 		retryInterval:  5 * time.Second,
 		freshWindow:    2 * interval,
 	}

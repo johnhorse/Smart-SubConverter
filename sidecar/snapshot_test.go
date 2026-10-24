@@ -5,8 +5,10 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +35,52 @@ func newTestManager(t *testing.T) *snapshotManager {
 	m := newSnapshotManager(cfg, nil)
 	m.baseDir = cfg.dataDir
 	return m
+}
+
+// SNAPSHOT_PROXY（v1.3.1）：快照刷新的上游抓取走代理；订阅链路不经此 client（引擎 proxy_subscription=NONE）
+func TestSnapshotProxyApplied(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/default.ini":
+			_, _ = w.Write([]byte("ruleset=DIRECT,http://" + r.Host + "/a.list\n"))
+		case "/a.list":
+			_, _ = w.Write([]byte("a-content"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer up.Close()
+
+	var proxied int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&proxied, 1)
+		out, err := http.Get(r.URL.String()) // 正向代理收到绝对 URI 形态请求
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer out.Body.Close()
+		w.WriteHeader(out.StatusCode)
+		_, _ = io.Copy(w, out.Body)
+	}))
+	defer proxy.Close()
+
+	pu, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{dataDir: t.TempDir(), presetRefreshInterval: time.Hour, snapshotProxy: pu}
+	m := newSnapshotManager(cfg, nil)
+	m.baseDir = cfg.dataDir
+	m.presets = []presetEntry{{"default", "t", up.URL + "/default.ini"}}
+	m.refreshOnce()
+
+	if atomic.LoadInt32(&proxied) == 0 {
+		t.Error("SNAPSHOT_PROXY 配置后刷新流量应经代理")
+	}
+	if _, err := os.Stat(filepath.Join(m.rulesDir, "default.rewritten.ini")); err != nil {
+		t.Errorf("经代理刷新应产出改写产物: %v", err)
+	}
 }
 
 func TestRewriteINI(t *testing.T) {
@@ -452,6 +500,29 @@ func TestEnvDurationParsing(t *testing.T) {
 	c = loadConfigFromEnv()
 	if c.probeTimeout != 500*time.Millisecond || c.presetRefreshInterval != time.Hour || c.subProxyTimeout != 90*time.Second {
 		t.Errorf("env 覆盖解析错误: probe=%s refresh=%s subProxy=%s", c.probeTimeout, c.presetRefreshInterval, c.subProxyTimeout)
+	}
+}
+
+// SNAPSHOT_PROXY env：合法 http/socks5 注入、非法值回退直连（nil）、缺省 nil
+func TestEnvSnapshotProxyParsing(t *testing.T) {
+	t.Setenv("SNAPSHOT_PROXY", "http://127.0.0.1:7890")
+	c := loadConfigFromEnv()
+	if c.snapshotProxy == nil || c.snapshotProxy.Scheme != "http" || c.snapshotProxy.Host != "127.0.0.1:7890" {
+		t.Errorf("SNAPSHOT_PROXY 合法值解析错误: %+v", c.snapshotProxy)
+	}
+	t.Setenv("SNAPSHOT_PROXY", "socks5://host:1080")
+	if c = loadConfigFromEnv(); c.snapshotProxy == nil || c.snapshotProxy.Scheme != "socks5" {
+		t.Errorf("socks5 值解析错误: %+v", c.snapshotProxy)
+	}
+	for _, bad := range []string{"127.0.0.1:7890", "ftp://x", "not a url"} {
+		t.Setenv("SNAPSHOT_PROXY", bad)
+		if c = loadConfigFromEnv(); c.snapshotProxy != nil {
+			t.Errorf("SNAPSHOT_PROXY %q 应回退直连，得到 %+v", bad, c.snapshotProxy)
+		}
+	}
+	t.Setenv("SNAPSHOT_PROXY", "")
+	if c = loadConfigFromEnv(); c.snapshotProxy != nil {
+		t.Errorf("缺省应直连，得到 %+v", c.snapshotProxy)
 	}
 
 	t.Setenv("PROBE_TIMEOUT", "garbage")

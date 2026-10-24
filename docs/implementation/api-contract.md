@@ -220,7 +220,8 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 |---|---|---|
 | `SIDECAR_PORT` | `8081` | 监听端口（勿用 `PORT`，被 Extended 占用） |
 | `EXTENDED_BASE` | `http://127.0.0.1:25500` | Extended 内部地址 |
-| `PUBLIC_BASE_URL` | 无 | link origin 覆盖 + 镜像层转 `MANAGED_CONFIG_PREFIX`（见 assignment-findings ⑤） |
+| `PUBLIC_BASE_URL` | 无（强烈建议设置） | link origin 覆盖 + 镜像层转 `MANAGED_CONFIG_PREFIX`（见 assignment-findings ⑤）；**同时决定输出中 getruleset/MANAGED-CONFIG 自引用前缀**——不设则回指 127.0.0.1:25500，外部客户端（Quantumult X 等）拉不到规则集导入失败（sidecar 启动打警告） |
+| `SNAPSHOT_PROXY` | 空（直连） | 规则/模板上游访问代理（`http://` 或 `socks5://`）：作用于快照刷新与豁免档远端 HEAD；**订阅拉取不经它**（引擎侧 `proxy_subscription=NONE` 强制直连）。国内服务器 GitHub 直连慢时配置宿主代理（如 `http://host.docker.internal:7890`） |
 | `SUB_TOKEN` | 空 | 非空时：① 注入 `/s/` 代理与 `store_error` 降级长链的容器内 `/sub` 调用（朋友无感知）② 管理端点（GET /api/links、DELETE）强制鉴权；公网档必配（README 附录） |
 | `PRESET_URL` | ACL4SSR_Online.ini 的 GitHub URL | 仅覆盖 `default` 档：**覆盖即豁免本地化**——该档 sidecar 原样透传此 URL 给引擎（部署者自担网络；冒烟 fixture 注入沿用此口） |
 | `POLL_INTERVAL` | `15m` | 健康轮询周期（仅豁免档远端 HEAD；本地化档由快照刷新循环驱动） |
@@ -231,7 +232,8 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 
 ## nginx 路由（镜像层，与契约相关部分）
 
-- `/` → 前端静态文件；`/api/` → sidecar；`/s/` → sidecar（短链代理端点）；`/sub`、`/version`、`/healthz` → Extended(25500)。`/sub` 为 **deprecated 遗留兼容路由**（v1.2.0 起契约不再为其新增行为）
+- `/` → 前端静态文件；`/api/` → sidecar；`/s/` → sidecar（短链代理端点）；`/sub`、`/version`、`/healthz`、**`/getruleset`** → Extended(25500)。`/sub` 为 **deprecated 遗留兼容路由**（v1.2.0 起契约不再为其新增行为）。`/getruleset`（v1.3.1）：surge/quanx 系输出 `[filter_remote]` 与 clash provider url 引用该端点，不路由会落入 `location /` 返回 index.html——严格校验客户端（Quantumult X「Response invalid」）当场失败，宽容客户端（mihomo）静默丢规则；query 仅含规则集来源（无订阅凭据），保留 access_log
+- surge/quanx 类外部可达依赖：输出中 getruleset/MANAGED-CONFIG 自引用前缀 = `MANAGED_CONFIG_PREFIX`（镜像层由 `PUBLIC_BASE_URL` 联动注入）；**`PUBLIC_BASE_URL` 未设时回指 127.0.0.1:25500，外部客户端拉不到规则**——sidecar 启动时为空打警告（v1.3.1）
 - 对 sidecar 的反代：`proxy_set_header Host $http_host; proxy_set_header X-Forwarded-Proto $scheme;`（**注意用 `$http_host` 而非 `$host`**：nginx 的 `$host` 永远去掉端口，非 80 端口部署时 sidecar 推导的 link 会丢端口不可用——S2 三步冒烟实测抓出后修正）
 - `/sub`、`/api/`、`/s/` 关闭 access_log（D6 日志卫生 + OH-2：短码即 bearer 凭据，与订阅 URL 同级对待）
 
