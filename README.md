@@ -96,6 +96,23 @@ volumes:
 - **代理要监听容器够得着的地址**：Clash/mihomo 默认只监听 `127.0.0.1`，容器从网关 IP 连过去是 `connection refused`（日志表现为规则快照一直刷新失败）。把代理的监听地址改为 `0.0.0.0`，或至少包含 Docker 网桥地址（通常 `172.17.0.1`）
 - **`0.0.0.0` 监听会把代理暴露到局域网**：确认代理配置里 `allow-lan` / 绑定地址的取值你是有意为之，或用防火墙把 7890 端口限制为仅 Docker 网段访问
 
+**ShellCrash / TUN 类宿主代理的三个坑（2026-10 实战，每个都踩过）**：
+
+- **端口保护默认不认 docker 自定义网段**：ShellCrash（CrashCore/mihomo TUN 模式）的 nftables 防火墙只放行「本地子网集合」访问代理端口，compose 创建的自定义网络网段（如 `192.168.32.0/24`）不在集合内——容器连代理被 reject，症状是代拉 502 / `fetch_err`。在宿主 iptables 加 ACCEPT **没用**（不同 nft 表、reject 先命中），正确解法是把容器网段加进 ShellCrash 的「虚拟机/容器网段」：编辑 `/etc/ShellCrash/configs/ShellCrash.cfg` 的 `vm_ipv4='... 192.168.32.0/24 '`，`systemctl restart shellcrash`。普通 Clash/mihomo（非 ShellCrash）对应检查 `allow-lan` 与绑定地址
+- **网段会被 compose 重建换掉**：`docker compose down/up` 重建网络时可能分到新网段，上面的放行就悄悄失效（症状复发）。在 compose 顶层把网段钉死：
+
+  ```yaml
+  networks:
+    default:
+      ipam:
+        config:
+          - subnet: 192.168.32.0/24
+  ```
+
+- **先分辨机场拦的是 IP 还是请求形态，再谈对策**：宿主机进程能拉、容器拉不动时，先确认两者**出口 IP 是否相同**——宿主跑着 ShellCrash/WireGuard 等策略路由时，宿主自身流量走隧道出口、docker 转发流量直出机房 IP，机场按 IP 拦（拦机房、放海外/住宅）的症状与「按 TLS 指纹拦」完全一样。分辨：`curl cip.cc` 分别看宿主与容器出口；对齐出口后再下结论。实战案例：机场拦机房 IP，`SUBSCRIPTION_PROXY` 指向宿主 ShellCrash（放行容器网段后）即全链路恢复，无需任何代码改动。注意这类拦截常是**速率/临时型**（实测：停止直连约一小时后封锁自行解除、直连恢复 200）——本服务的代拉重试会不断续期封锁窗口，形成「看起来永久 403」的死循环；所以即使直连暂时通了，也别撤掉代理配置。另外放行后 ShellCrash 的透明代理会同时接管容器全部出站（「直连」也走代理出口），`SUBSCRIPTION_PROXY` 成为代理进程停用时的兜底双保险
+
+> 小注：docker 20.10 的 `host-gateway` 注入的是 docker0 网关（`172.17.0.1`）而非 compose 网络的网关；跨网桥访问宿主没问题，但若你的代理只绑定单一接口，留意这个解析值。
+
 > macOS / Windows（Docker Desktop）不需要 `extra_hosts` 那行——`host.docker.internal` 原生可用。`docker run` 等价写法：`--add-host=host.docker.internal:host-gateway -e SNAPSHOT_PROXY=http://host.docker.internal:7890`。
 
 ### 端口绑定范围警告
