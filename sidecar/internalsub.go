@@ -11,8 +11,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
@@ -38,16 +40,20 @@ type internalSubEntry struct {
 }
 
 func newInternalSubStore(cfg config) *internalSubStore {
-	// 代拉 client：与快照刷新同口径——SUBSCRIPTION_PROXY 非空时走代理（v1.3.5 起该 env
-	// 语义为「sidecar 代拉订阅走代理」；引擎侧 proxy_subscription 的 pref 改写保留兜底）
+	// 代拉 client：仅读 cfg.subscriptionProxy（SUBSCRIPTION_PROXY，v1.3.8 接线），与
+	// SNAPSHOT_PROXY 独立；引擎侧 proxy_subscription 的 pref 改写保留兜底
 	timeout := 2 * time.Minute
 	if cfg.subProxyTimeout > 0 && cfg.subProxyTimeout < timeout {
 		timeout = cfg.subProxyTimeout
 	}
+	client := &http.Client{Timeout: timeout}
+	if cfg.subscriptionProxy != nil {
+		client.Transport = &http.Transport{Proxy: http.ProxyURL(cfg.subscriptionProxy)}
+	}
 	return &internalSubStore{
 		entries:  map[string]internalSubEntry{},
 		bySource: map[string]internalSubEntry{},
-		client:   upstreamClient(cfg, timeout),
+		client:   client,
 		proxyURL: proxyURLString(cfg),
 	}
 }
@@ -105,7 +111,8 @@ func (s *internalSubStore) fetchGo(ua, sourceURL string) (string, error) {
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", err
+		// *url.Error 自带完整订阅 URL（含 token/userinfo），日志脱敏后再往上抛
+		return "", sanitizeURLErr(err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -148,12 +155,22 @@ type errUpstreamStatus struct{ code int }
 
 func (e errUpstreamStatus) Error() string { return "upstream status" }
 
+// sanitizeURLErr 剥掉 *url.Error 的 URL 再进日志/错误链（订阅 URL 与引擎内部 URL 的
+// query 含 token、节点凭据，同 logCode 的脱敏口径；非 url.Error 原样返回）
+func sanitizeURLErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s: %v", ue.Op, ue.Err)
+	}
+	return err
+}
+
 // proxyURLString cfg 里代理的字符串形态（curl -x 用；nil = 空直连）
 func proxyURLString(cfg config) string {
-	if cfg.snapshotProxy == nil {
+	if cfg.subscriptionProxy == nil {
 		return ""
 	}
-	return cfg.snapshotProxy.String()
+	return cfg.subscriptionProxy.String()
 }
 
 // gcLocked 清理过期条目（调用方持锁）

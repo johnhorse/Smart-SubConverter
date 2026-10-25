@@ -85,7 +85,7 @@ func (s *server) handleShortLink(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.proxyClient.Do(req)
 	if err != nil {
-		log.Printf("s/ hit code=%s*** status=%d latency=%s (upstream %T)", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
+		log.Printf("s/ hit code=%s*** status=%d latency=%s (upstream %v)", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), sanitizeURLErr(err))
 		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
 		return
 	}
@@ -143,7 +143,7 @@ func (s *server) proxyQuanxTwoStage(w http.ResponseWriter, r *http.Request, lnk 
 	}
 
 	// v1.3.5：机场 WAF 按 TLS 指纹拦引擎直拉（busybox/libcurl 指纹 403、curl/Go 200，UA 无关——
-	// 实测矩阵），改为 sidecar 代拉（Go 抓取，SUBSCRIPTION_PROXY/SNAPSHOT_PROXY 生效时走代理）
+	// 实测矩阵），改为 sidecar 代拉（Go 抓取，SUBSCRIPTION_PROXY 生效时走代理）
 	// 并注册内部回环 ref，引擎从 127.0.0.1 拉内容（无 WAF）。
 	internalURL, err := s.isub.fetchAndRegister(ua, lnk.SourceURL, s.cfg.sidecarBase)
 	if err != nil {
@@ -151,7 +151,7 @@ func (s *server) proxyQuanxTwoStage(w http.ResponseWriter, r *http.Request, lnk 
 		if ok := errors.As(err, &st); ok {
 			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=0/2 代拉 airport=%d", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), st.code)
 		} else {
-			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=0/2 代拉 err=%T", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
+			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=0/2 代拉 err=%v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
 		}
 		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
 		return
@@ -174,7 +174,7 @@ func (s *server) proxyQuanxTwoStage(w http.ResponseWriter, r *http.Request, lnk 
 	defer cancel1()
 	resp1, err := s.proxyClient.Do(req1.WithContext(ctx1))
 	if err != nil {
-		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=1/2 err=%T", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
+		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=1/2 err=%v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), sanitizeURLErr(err))
 		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
 		return
 	}
@@ -210,7 +210,7 @@ func (s *server) proxyQuanxTwoStage(w http.ResponseWriter, r *http.Request, lnk 
 	defer cancel2()
 	resp2, err := s.proxyClient.Do(req2.WithContext(ctx2))
 	if err != nil {
-		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=2/2 err=%T", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
+		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=2/2 err=%v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), sanitizeURLErr(err))
 		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
 		return
 	}

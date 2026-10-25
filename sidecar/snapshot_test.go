@@ -38,7 +38,7 @@ func newTestManager(t *testing.T) *snapshotManager {
 	return m
 }
 
-// SNAPSHOT_PROXY（v1.3.1）：快照刷新的上游抓取走代理；订阅链路不经此 client（引擎 proxy_subscription=NONE）
+// SNAPSHOT_PROXY（v1.3.1）：快照刷新的上游抓取走代理；订阅链路不经此 client（代拉走 SUBSCRIPTION_PROXY，v1.3.8）
 func TestSnapshotProxyApplied(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -521,6 +521,28 @@ func TestEnvDurationParsing(t *testing.T) {
 	c = loadConfigFromEnv()
 	if c.probeTimeout != 500*time.Millisecond || c.presetRefreshInterval != time.Hour || c.subProxyTimeout != 90*time.Second {
 		t.Errorf("env 覆盖解析错误: probe=%s refresh=%s subProxy=%s", c.probeTimeout, c.presetRefreshInterval, c.subProxyTimeout)
+	}
+}
+
+// SUBSCRIPTION_PROXY env：合法值注入 subscriptionProxy、非法值回退 nil，且不影响 snapshotProxy
+func TestEnvSubscriptionProxyParsing(t *testing.T) {
+	t.Setenv("SUBSCRIPTION_PROXY", "http://127.0.0.1:7890")
+	c := loadConfigFromEnv()
+	if c.subscriptionProxy == nil || c.subscriptionProxy.Scheme != "http" || c.subscriptionProxy.Host != "127.0.0.1:7890" {
+		t.Errorf("SUBSCRIPTION_PROXY 合法值解析错误: %+v", c.subscriptionProxy)
+	}
+	if c.snapshotProxy != nil {
+		t.Errorf("SUBSCRIPTION_PROXY 不应影响 snapshotProxy，得到 %+v", c.snapshotProxy)
+	}
+	for _, bad := range []string{"127.0.0.1:7890", "ftp://x", "not a url"} {
+		t.Setenv("SUBSCRIPTION_PROXY", bad)
+		if c = loadConfigFromEnv(); c.subscriptionProxy != nil {
+			t.Errorf("SUBSCRIPTION_PROXY %q 应回退直连，得到 %+v", bad, c.subscriptionProxy)
+		}
+	}
+	t.Setenv("SUBSCRIPTION_PROXY", "")
+	if c = loadConfigFromEnv(); c.subscriptionProxy != nil {
+		t.Errorf("缺省应直连，得到 %+v", c.subscriptionProxy)
 	}
 }
 

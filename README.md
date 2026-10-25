@@ -66,9 +66,9 @@ volumes:
   smart-sub-data:
 ```
 
-### 案例：Linux 宿主机有代理，让规则快照刷新走代理（docker compose）
+### 案例：Linux 宿主机有代理，让规则刷新与订阅代拉走代理（docker compose）
 
-场景：部署机在国内，宿主机上已跑着 Clash/mihomo 类代理（HTTP 端口 `7890`）。`SNAPSHOT_PROXY` 让 sidecar 拉取 GitHub 上的 ACL4SSR 规则与模板时走这个代理；**朋友的订阅拉取不走代理**（始终直连，见 env 表）。
+场景：部署机在国内，宿主机上已跑着 Clash/mihomo 类代理（HTTP 端口 `7890`）。`SNAPSHOT_PROXY` 让 sidecar 拉取 GitHub 上的 ACL4SSR 规则与模板时走这个代理；`SUBSCRIPTION_PROXY` 让 sidecar 代拉机场订阅时也走它（机场 WAF 拦服务器直连的请求形态时需要）。两者独立配置、可同可异，默认均直连（见 env 表）。
 
 ```yaml
 services:
@@ -82,7 +82,7 @@ services:
     environment:
       - PUBLIC_BASE_URL=http://192.168.1.100:8080
       - SNAPSHOT_PROXY=http://host.docker.internal:7890       # 规则/模板刷新走代理
-      - SUBSCRIPTION_PROXY=http://host.docker.internal:7890   # v1.3.4：引擎拉订阅也走代理（机场 WAF 拦直连时）
+      - SUBSCRIPTION_PROXY=http://host.docker.internal:7890   # v1.3.8：代拉订阅走代理（机场 WAF 拦直连时）
     extra_hosts:
       - "host.docker.internal:host-gateway"   # Linux 必加：Docker 原生不认识这个域名，此行把它解析到宿主网关
     restart: unless-stopped
@@ -111,7 +111,7 @@ volumes:
 |---|---|---|
 | `PUBLIC_BASE_URL` | 无 | 转换链接 origin 覆盖 + 客户端自动更新地址 + 规则集引用地址（均转 `MANAGED_CONFIG_PREFIX`）。**局域网部署必设**，见上文 |
 | `SNAPSHOT_PROXY` | 空（直连） | 规则/模板上游（GitHub）访问代理，`http://` 或 `socks5://`：仅作用于快照每日刷新。国内服务器上 GitHub 直连慢/超时时配置，如 `-e SNAPSHOT_PROXY=http://host.docker.internal:7890`（代理跑在宿主机时） |
-| `SUBSCRIPTION_PROXY` | 空（直连） | 引擎拉取**订阅**（机场）时代理（v1.3.4）。场景：机场 WAF 拦服务器直连的请求形态（表现为日志 `twostage=1/2 upstream=400`、机场对 curl 返回 200 但转换服务拉不动）。与 `SNAPSHOT_PROXY` 可同可异，如 `-e SUBSCRIPTION_PROXY=http://host.docker.internal:7890` |
+| `SUBSCRIPTION_PROXY` | 空（直连） | sidecar 代拉**订阅**（机场）时代理（Go+curl 两路，v1.3.8；引擎 pref 改写保留兜底）。场景：机场 WAF 拦服务器直连的请求形态（表现为日志 `twostage=1/2 upstream=400`、机场对 curl 返回 200 但转换服务拉不动）。与 `SNAPSHOT_PROXY` 可同可异，如 `-e SUBSCRIPTION_PROXY=http://host.docker.internal:7890` |
 | `SUB_TOKEN` | 空 | 非空时：① sidecar 容器内调用 `/sub` 自动带 token（朋友无感知）② 管理端点 `GET /api/links` / `DELETE /api/links/{code}` 强制 `?token=` 鉴权（缺失/不符 401）。v1.2.0 起短链**不携带** token；公网档必设（附录 A） |
 | `PRESET_URL` | ACL4SSR_Online.ini | 仅覆盖 default 档规则模板，**覆盖即豁免快照本地化**——该档原样透传此 URL 给转换内核（网络自担）。主要为冒烟测试用，日常部署无需设置 |
 | `DATA_DIR` | `/base/data` | 短链 SQLite（`state.db`）与运行时规则快照（`rules/`）所在目录，即 volume 挂载点。**须位于容器内 `/base` 树内**（引擎本地读取硬限），否则规则快照本地化整体禁用（启动告警，不拒启动） |
