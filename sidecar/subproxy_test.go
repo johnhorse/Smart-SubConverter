@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -598,5 +600,36 @@ func TestInternalSubStore(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("未知 ref 应 404，实际 %d", resp.StatusCode)
+	}
+}
+
+// v1.3.6 代拉降级链：Go 拉取被 403 → exec curl 重试成功（机场 WAF 按 TLS 指纹拦 Go 的场景）
+func TestInternalSubCurlFallback(t *testing.T) {
+	// 机场 fixture：对 Go 抓取恒 403（模拟 WAF 指纹拦截）
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "blocked", http.StatusForbidden)
+	}))
+	defer airport.Close()
+
+	// 假 curl：不真拉，直接吐节点内容（断言重试走到了 curl）
+	dir := t.TempDir()
+	curlPath := filepath.Join(dir, "curl")
+	writeTB(t, curlPath, "#!/bin/sh\necho 'vmess://via-curl'\n")
+	if err := os.Chmod(curlPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	st := newInternalSubStore(testConfig(t, ""))
+	u, err := st.fetchAndRegister("Quantumult%20X", airport.URL, "http://sidecar.test")
+	if err != nil {
+		t.Fatalf("Go 403 后 curl 重试应成功: %v", err)
+	}
+	// 直接取注册内容验证
+	ts := httptest.NewServer(http.HandlerFunc(st.handleInternalSub))
+	defer ts.Close()
+	content, _ := fetchBody(ts.URL + strings.TrimPrefix(u, "http://sidecar.test"))
+	if strings.TrimSpace(string(content)) != "vmess://via-curl" {
+		t.Fatalf("内容应来自 curl 重试: %q", content)
 	}
 }

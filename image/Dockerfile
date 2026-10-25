@@ -44,7 +44,7 @@ ARG S6_OVERLAY_VERSION
 ENV LD_LIBRARY_PATH=
 
 # Extended 是 glibc 二进制；nginx/xz 为 musl 原生版，互不影响（assignment-findings ④）
-RUN apk add --no-cache nginx xz
+RUN apk add --no-cache nginx xz curl
 
 COPY --from=fetch-s6 /tmp/s6-noarch.tar.xz /tmp/s6-arch.tar.xz /tmp/
 # s6 tarball 含符号链接与权限位，须 -p 保留

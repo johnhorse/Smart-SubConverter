@@ -6,11 +6,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -24,7 +27,8 @@ type internalSubStore struct {
 	entries map[string]internalSubEntry
 	// sourceURL -> ref：同源 60s 内复用（对齐引擎 cache_subscription 语义）
 	bySource map[string]internalSubEntry
-	client   *http.Client // 代拉用（SUBSCRIPTION_PROXY 生效时走代理）
+	client   *http.Client // Go 代拉（SUBSCRIPTION_PROXY 生效时走代理）
+	proxyURL string       // 同上代理地址（curl -x 用；空 = 直连）
 }
 
 type internalSubEntry struct {
@@ -44,6 +48,7 @@ func newInternalSubStore(cfg config) *internalSubStore {
 		entries:  map[string]internalSubEntry{},
 		bySource: map[string]internalSubEntry{},
 		client:   upstreamClient(cfg, timeout),
+		proxyURL: proxyURLString(cfg),
 	}
 }
 
@@ -56,6 +61,41 @@ func (s *internalSubStore) fetchAndRegister(ua, sourceURL, sidecarBase string) (
 	}
 	s.mu.Unlock()
 
+	body, err := s.fetch(ua, sourceURL)
+	if err != nil {
+		return "", err
+	}
+
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	ref := hex.EncodeToString(buf)
+	s.mu.Lock()
+	s.gcLocked()
+	s.entries[ref] = internalSubEntry{ref: ref, content: body, expires: time.Now().Add(internalSubTTL)}
+	s.bySource[sourceURL] = s.entries[ref]
+	s.mu.Unlock()
+	return sidecarBase + "/internal/sub/" + ref, nil
+}
+
+// fetch 代拉：Go 抓取优先，失败时 exec curl 重试（v1.3.6）——实测部分机场 WAF 按 TLS 指纹
+// 放行（任意 IP + curl 指纹全通，Go/busybox/libcurl 指纹被拦；HTTP 代理 CONNECT 隧道不换
+// 指纹），curl 是已验证可行的形态；两路均带 SUBSCRIPTION_PROXY 代理。
+func (s *internalSubStore) fetch(ua, sourceURL string) (string, error) {
+	goBody, goErr := s.fetchGo(ua, sourceURL)
+	if goErr == nil {
+		return goBody, nil
+	}
+	if body, err := s.fetchCurl(ua, sourceURL); err == nil {
+		log.Printf("internal-sub Go 拉取失败（%v），curl 重试成功", goErr)
+		return body, nil
+	} else {
+		return "", fmt.Errorf("go: %v; curl: %w", goErr, err)
+	}
+}
+
+func (s *internalSubStore) fetchGo(ua, sourceURL string) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return "", err
@@ -73,26 +113,46 @@ func (s *internalSubStore) fetchAndRegister(ua, sourceURL, sidecarBase string) (
 		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("internal-sub 代拉失败 status=%d bytes=%d", resp.StatusCode, len(body))
+		log.Printf("internal-sub Go 代拉 status=%d bytes=%d", resp.StatusCode, len(body))
 		return "", errUpstreamStatus{resp.StatusCode}
 	}
+	return string(body), nil
+}
 
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
+func (s *internalSubStore) fetchCurl(ua, sourceURL string) (string, error) {
+	curl, err := exec.LookPath("curl")
+	if err != nil {
 		return "", err
 	}
-	ref := hex.EncodeToString(buf)
-	s.mu.Lock()
-	s.gcLocked()
-	s.entries[ref] = internalSubEntry{ref: ref, content: string(body), expires: time.Now().Add(internalSubTTL)}
-	s.bySource[sourceURL] = s.entries[ref]
-	s.mu.Unlock()
-	return sidecarBase + "/internal/sub/" + ref, nil
+	args := []string{"-sS", "--max-time", "45", "--max-filesize", "8388608"}
+	if ua != "" {
+		args = append(args, "-A", ua)
+	}
+	if s.proxyURL != "" {
+		args = append(args, "-x", s.proxyURL)
+	}
+	args = append(args, sourceURL)
+	var out, errBuf bytes.Buffer
+	cmd := exec.Command(curl, args...)
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%v stderr=%s", err, strings.TrimSpace(errBuf.String()))
+	}
+	return out.String(), nil
 }
 
 type errUpstreamStatus struct{ code int }
 
 func (e errUpstreamStatus) Error() string { return "upstream status" }
+
+// proxyURLString cfg 里代理的字符串形态（curl -x 用；nil = 空直连）
+func proxyURLString(cfg config) string {
+	if cfg.snapshotProxy == nil {
+		return ""
+	}
+	return cfg.snapshotProxy.String()
+}
 
 // gcLocked 清理过期条目（调用方持锁）
 func (s *internalSubStore) gcLocked() {
