@@ -418,15 +418,27 @@ func TestAdminTokenAuth(t *testing.T) {
 func TestShortLinkQuanxTwoStage(t *testing.T) {
 	uriA := "ss://YWJjLTEyOjEubTIuMy40OjQ0Mw==#a"
 	uriB := "vmess://eyJ2IjoiMiJ9"
-	mixedB64 := base64.StdEncoding.EncodeToString([]byte(uriA + "\n" + uriB))
+	// 机场 fixture（v1.3.5 代拉目标）
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(uriA + "\n" + uriB + "\n"))
+	}))
+	defer airport.Close()
+
 	var gotTargets, gotURLs, gotConfigs []string
 	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotTargets = append(gotTargets, r.URL.Query().Get("target"))
-		gotURLs = append(gotURLs, r.URL.Query().Get("url"))
-		gotConfigs = append(gotConfigs, r.URL.Query().Get("config"))
-		switch r.URL.Query().Get("target") {
+		q := r.URL.Query()
+		gotTargets = append(gotTargets, q.Get("target"))
+		gotURLs = append(gotURLs, q.Get("url"))
+		gotConfigs = append(gotConfigs, q.Get("config"))
+		switch q.Get("target") {
 		case "mixed":
-			_, _ = w.Write([]byte(mixedB64))
+			// 引擎 stub：真实 fetch 第一段 url（sidecar 内部回环 ref），把内容转成 mixed（base64 原样）
+			content, err := fetchBody(q.Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
 		case "quanx":
 			_, _ = w.Write([]byte("[server_local]\nvmess = 5.6.7.8:443, tag=b\n"))
 		default:
@@ -435,9 +447,10 @@ func TestShortLinkQuanxTwoStage(t *testing.T) {
 	}))
 	defer ext.Close()
 	s := mustServer(t, testConfig(t, ext.URL))
-	code := newLink(t, s, "https://sub.example.com/l", "quanx", "default", "https://example.com/preset.ini")
+	code := newLink(t, s, airport.URL+"/sub", "quanx", "default", "https://example.com/preset.ini")
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL // 代拉 ref 注册到本测试 sidecar（引擎 stub 回拉可达）
 
 	resp := get(t, ts.URL+"/s/"+code)
 	defer resp.Body.Close()
@@ -448,8 +461,8 @@ func TestShortLinkQuanxTwoStage(t *testing.T) {
 	if len(gotTargets) != 2 || gotTargets[0] != "mixed" || gotTargets[1] != "quanx" {
 		t.Errorf("应两段调用 mixed→quanx，实际 %v", gotTargets)
 	}
-	if gotURLs[0] != "https://sub.example.com/l" {
-		t.Errorf("第一段 url 应为原始订阅: %q", gotURLs[0])
+	if !strings.Contains(gotURLs[0], "/internal/sub/") {
+		t.Errorf("第一段 url 应为内部回环 ref（v1.3.5 代拉）: %q", gotURLs[0])
 	}
 	if gotURLs[1] != uriA+"|"+uriB {
 		t.Errorf("第二段 url 应为 | 连接的节点列表: %q", gotURLs[1])
@@ -459,22 +472,42 @@ func TestShortLinkQuanxTwoStage(t *testing.T) {
 	}
 }
 
+// fetchBody 测试辅助：真实 GET（引擎 stub 拉内部回环 ref 用）
+func fetchBody(u string) ([]byte, error) {
+	resp, err := http.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+}
+
 // auto 链：UA 宽匹配 quantumult → 两段式；其他 UA → 单段原路径
 func TestShortLinkAutoUA(t *testing.T) {
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("vmess://x\n"))
+	}))
+	defer airport.Close()
 	var targets []string
 	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		targets = append(targets, r.URL.Query().Get("target"))
 		if r.URL.Query().Get("target") == "mixed" {
-			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString([]byte("vmess://x"))))
+			content, err := fetchBody(r.URL.Query().Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
 			return
 		}
 		_, _ = w.Write([]byte("proxies: ok"))
 	}))
 	defer ext.Close()
 	s := mustServer(t, testConfig(t, ext.URL))
-	code := newLink(t, s, "https://sub.example.com/l", "auto", "default", "https://example.com/preset.ini")
+	code := newLink(t, s, airport.URL+"/sub", "auto", "default", "https://example.com/preset.ini")
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
 
 	targets = nil
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/s/"+code, nil)
@@ -500,20 +533,70 @@ func TestShortLinkAutoUA(t *testing.T) {
 		t.Errorf("clash UA + auto 应走单段原路径，实际 %v", targets)
 	}
 }
-
-// 两段式第一段出空列表 → 502
 func TestShortLinkQuanxTwoStageEmptyNodes(t *testing.T) {
-	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// 机场返回无 URI 内容（代拉成功但无节点）→ 第一段 mixed 无有效节点 → 502
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("garbage-no-uri"))
+	}))
+	defer airport.Close()
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("target") == "mixed" {
+			content, err := fetchBody(r.URL.Query().Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
+			return
+		}
+		http.NotFound(w, r)
 	}))
 	defer ext.Close()
 	s := mustServer(t, testConfig(t, ext.URL))
-	code := newLink(t, s, "https://sub.example.com/l", "quanx", "default", "https://example.com/preset.ini")
+	code := newLink(t, s, airport.URL+"/sub", "quanx", "default", "https://example.com/preset.ini")
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
 	resp := get(t, ts.URL+"/s/"+code)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("空节点列表应 502，实际 %d", resp.StatusCode)
+	}
+}
+
+// v1.3.5 内部订阅端点：注册/ref 取内容/未知 ref 404/同源 60s 复用
+func TestInternalSubStore(t *testing.T) {
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("vmess://node\n"))
+	}))
+	defer airport.Close()
+	cfg := testConfig(t, "")
+	st := newInternalSubStore(cfg)
+	base := "http://sidecar.test"
+
+	u1, err := st.fetchAndRegister("Quantumult%20X", airport.URL, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(u1, "/internal/sub/") {
+		t.Fatalf("ref URL 形态异常: %q", u1)
+	}
+	// 同源 60s 内复用（同 ref）
+	u2, _ := st.fetchAndRegister("Quantumult%20X", airport.URL, base)
+	if u1 != u2 {
+		t.Errorf("同源 60s 内应复用 ref: %q vs %q", u1, u2)
+	}
+	// 引擎视角：GET ref 拿到内容
+	ts := httptest.NewServer(http.HandlerFunc(st.handleInternalSub))
+	defer ts.Close()
+	content, err := fetchBody(ts.URL + strings.TrimPrefix(u1, base))
+	if err != nil || string(content) != "vmess://node\n" {
+		t.Fatalf("ref 取内容异常: %v %q", err, content)
+	}
+	// 未知 ref → 404
+	resp, _ := http.Get(ts.URL + "/internal/sub/deadbeef")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("未知 ref 应 404，实际 %d", resp.StatusCode)
 	}
 }

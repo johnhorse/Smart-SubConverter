@@ -123,7 +123,8 @@ type config struct {
 	dataDir               string // state.db 与运行时快照 rules/ 所在目录（volume 挂载点；单测指向 tmp）
 	subProxyTimeout       time.Duration
 	presetRefreshInterval time.Duration // 快照刷新周期（启动先刷一轮）
-	snapshotProxy         *url.URL      // 规则/模板上游访问代理（SNAPSHOT_PROXY，v1.3.1）；订阅拉取不经它（引擎 proxy_subscription=NONE 直连）
+	snapshotProxy         *url.URL      // 规则/模板上游访问代理（SNAPSHOT_PROXY，v1.3.1）；订阅代拉共用（v1.3.5）
+	sidecarBase           string        // sidecar 自身回环基址（引擎拉内部订阅端点用；main 按 SIDECAR_PORT 填充）
 }
 
 func loadConfigFromEnv() config {
@@ -187,9 +188,10 @@ type server struct {
 	presets     []presetEntry
 	mon         *monitor
 	probeClient *http.Client
-	proxyClient *http.Client     // /s/ 订阅代理（超时 SUB_PROXY_TIMEOUT）
-	store       *store           // 短链存储（v1.2.0；openStore 失败则启动失败）
-	snap        *snapshotManager // 规则快照本地化（v1.3.0；nil = 禁用，三档按豁免档语义）
+	proxyClient *http.Client       // /s/ 订阅代理（超时 SUB_PROXY_TIMEOUT）
+	store       *store             // 短链存储（v1.2.0；openStore 失败则启动失败）
+	snap        *snapshotManager   // 规则快照本地化（v1.3.0；nil = 禁用，三档按豁免档语义）
+	isub        *internalSubStore  // 内部订阅端点 + 代拉（v1.3.5；绕机场 WAF 的 TLS 指纹拦截）
 }
 
 // presetExempt：PRESET_URL 覆盖即豁免本地化（仅 default 档可被覆盖，契约 v1.3.0 语义：
@@ -225,6 +227,7 @@ func newServer(cfg config) (*server, error) {
 		probeClient: &http.Client{Timeout: cfg.probeTimeout},
 		proxyClient: &http.Client{Timeout: cfg.subProxyTimeout},
 		store:       st,
+		isub:        newInternalSubStore(cfg),
 	}
 	if snapshotEnabled(cfg.dataDir) {
 		s.snap = newSnapshotManager(cfg, s.presetExempt)
@@ -263,6 +266,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /s/{code}", s.handleShortLink)
 	mux.HandleFunc("GET /api/links", s.handleLinks)
 	mux.HandleFunc("DELETE /api/links/{code}", s.handleDeleteLink)
+	mux.HandleFunc("GET /internal/sub/", s.isub.handleInternalSub) // 引擎专用（回环 listener，nginx 不路由）
 	return mux
 }
 
@@ -272,7 +276,11 @@ func main() {
 	if port == "" {
 		port = "8081"
 	}
-	s, err := newServer(loadConfigFromEnv())
+	cfg := loadConfigFromEnv()
+	if cfg.sidecarBase == "" {
+		cfg.sidecarBase = "http://127.0.0.1:" + port // 引擎拉内部订阅端点的回环基址
+	}
+	s, err := newServer(cfg)
 	if err != nil {
 		// 库损坏等运维态：拒绝启动，绝不自动清空（契约「存储」节）
 		log.Fatalf("sidecar 启动失败: %v", err)

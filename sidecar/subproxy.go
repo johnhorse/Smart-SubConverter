@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -141,10 +142,25 @@ func (s *server) proxyQuanxTwoStage(w http.ResponseWriter, r *http.Request, lnk 
 		stageTimeout = 15 * time.Second
 	}
 
-	// 第一段：机场 → mixed 通用节点列表
+	// v1.3.5：机场 WAF 按 TLS 指纹拦引擎直拉（busybox/libcurl 指纹 403、curl/Go 200，UA 无关——
+	// 实测矩阵），改为 sidecar 代拉（Go 抓取，SUBSCRIPTION_PROXY/SNAPSHOT_PROXY 生效时走代理）
+	// 并注册内部回环 ref，引擎从 127.0.0.1 拉内容（无 WAF）。
+	internalURL, err := s.isub.fetchAndRegister(ua, lnk.SourceURL, s.cfg.sidecarBase)
+	if err != nil {
+		var st errUpstreamStatus
+		if ok := errors.As(err, &st); ok {
+			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=0/2 代拉 airport=%d", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), st.code)
+		} else {
+			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=0/2 代拉 err=%T", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
+		}
+		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
+		return
+	}
+
+	// 第一段：内部回环内容 → mixed 通用节点列表
 	q1 := url.Values{}
 	q1.Set("target", "mixed")
-	q1.Set("url", lnk.SourceURL)
+	q1.Set("url", internalURL)
 	if s.cfg.subToken != "" {
 		q1.Set("token", s.cfg.subToken)
 	}
