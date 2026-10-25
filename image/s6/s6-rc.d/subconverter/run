@@ -13,6 +13,7 @@ import_env() {
 import_env PORT
 import_env PREF_PATH
 import_env MANAGED_CONFIG_PREFIX
+import_env SUBSCRIPTION_PROXY
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -35,6 +36,16 @@ CONF_DIR="$(dirname "$CONF")"
 mkdir -p "$CONF_DIR"
 if [ ! -f "$CONF" ] && [ -f /base/pref.example.toml ]; then
   cp /base/pref.example.toml "$CONF"
+fi
+
+# SUBSCRIPTION_PROXY（v1.3.4）：引擎拉订阅走代理（改写 pref proxy_subscription，默认 NONE 直连）。
+# 场景：机场 WAF 拦服务器直连的请求形态（同 IP 同 UA 下 curl 过、引擎/wget 403），宿主代理出口可过。
+# 值透传 pref 语法：http://… / socks5://… / SYSTEM / NONE
+if [ -n "$SUBSCRIPTION_PROXY" ] && grep -q '^proxy_subscription *= *"NONE"' "$CONF"; then
+  sed -i "s|^proxy_subscription *= *\"NONE\"|proxy_subscription = \"$SUBSCRIPTION_PROXY\"|" "$CONF"
+  echo "SUBSCRIPTION_PROXY: proxy_subscription -> $SUBSCRIPTION_PROXY"
+elif [ -n "$SUBSCRIPTION_PROXY" ]; then
+  echo "SUBSCRIPTION_PROXY 已设置但 $CONF 中未找到默认 proxy_subscription = \"NONE\" 行，未改写"
 fi
 
 exec /usr/bin/subconverter -f "$CONF"

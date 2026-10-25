@@ -223,6 +223,7 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 | `EXTENDED_BASE` | `http://127.0.0.1:25500` | Extended 内部地址 |
 | `PUBLIC_BASE_URL` | 无（强烈建议设置） | link origin 覆盖 + 镜像层转 `MANAGED_CONFIG_PREFIX`（见 assignment-findings ⑤）；**同时决定输出中 getruleset/MANAGED-CONFIG 自引用前缀**——不设则回指 127.0.0.1:25500，外部客户端（Quantumult X 等）拉不到规则集导入失败（sidecar 启动打警告） |
 | `SNAPSHOT_PROXY` | 空（直连） | 规则/模板上游访问代理（`http://` 或 `socks5://`）：作用于快照刷新与豁免档远端 HEAD；**订阅拉取不经它**（引擎侧 `proxy_subscription=NONE` 强制直连）。国内服务器 GitHub 直连慢时配置宿主代理（如 `http://host.docker.internal:7890`） |
+| `SUBSCRIPTION_PROXY` | 空（直连） | v1.3.4：**引擎拉订阅走代理**（s6 启动时改写 pref `proxy_subscription`，值为代理 URI / `SYSTEM`）。场景：机场 WAF 拦服务器直连请求形态（curl 可过、引擎/wget 403 的 TLS 指纹类拦截），宿主代理出口可过时配置。与 `SNAPSHOT_PROXY` 相互独立（规则走 `SNAPSHOT_PROXY`、订阅走 `SUBSCRIPTION_PROXY`，可同可异） |
 | `SUB_TOKEN` | 空 | 非空时：① 注入 `/s/` 代理与 `store_error` 降级长链的容器内 `/sub` 调用（朋友无感知）② 管理端点（GET /api/links、DELETE）强制鉴权；公网档必配（README 附录） |
 | `PRESET_URL` | ACL4SSR_Online.ini 的 GitHub URL | 仅覆盖 `default` 档：**覆盖即豁免本地化**——该档 sidecar 原样透传此 URL 给引擎（部署者自担网络；冒烟 fixture 注入沿用此口） |
 | `POLL_INTERVAL` | `15m` | 健康轮询周期（仅豁免档远端 HEAD；本地化档由快照刷新循环驱动） |

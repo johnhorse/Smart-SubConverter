@@ -32,6 +32,9 @@ rc=0
 
 # ---- fixture server：python3 静态服务（绑 0.0.0.0——host.docker.internal 进来的
 # ---- 流量目标 IP 是宿主网关地址，绑 127.0.0.1 会拒收）
+# touch 刷新 mtime：豁免档 status 判定「Last-Modified < 24h → fresh」依赖文件 mtime，
+# 仓库 checkout 时间跨 24h 后会静默变 stale（时间炸弹，2026-10-25 抓过一次）
+touch "$FIXTURES"/*.ini "$FIXTURES"/*.txt 2>/dev/null || true
 FIXTURE_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 python3 -m http.server "$FIXTURE_PORT" --bind 0.0.0.0 --directory "$FIXTURES" >/dev/null 2>&1 &
 FIXTURE_PID=$!
@@ -553,6 +556,19 @@ print(json.load(sys.stdin)['link'])
             echo "FAIL 容器3 /api/preview 未生成 link"
             rc=1
         fi
+
+        # v1.3.4 SUBSCRIPTION_PROXY：env 非空 → s6 启动改写 pref proxy_subscription（默认 NONE）
+        NAME4="ssc-smoke-subproxy"
+        docker rm -f "$NAME4" >/dev/null 2>&1 || true
+        docker run -d --name "$NAME4" -e SUBSCRIPTION_PROXY=http://host.docker.internal:7890 "$IMAGE" >/dev/null
+        sleep 5
+        if docker exec "$NAME4" grep -q '^proxy_subscription = "http://host.docker.internal:7890"' /base/pref.toml 2>/dev/null; then
+            echo "PASS SUBSCRIPTION_PROXY 改写 pref proxy_subscription 生效"
+        else
+            echo "FAIL SUBSCRIPTION_PROXY 未改写 /base/pref.toml"
+            rc=1
+        fi
+        docker rm -f "$NAME4" >/dev/null 2>&1 || true
     else
         echo "FAIL 容器3 /healthz 30s 内未就绪"
         rc=1
