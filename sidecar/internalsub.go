@@ -124,7 +124,9 @@ func (s *internalSubStore) fetchCurl(ua, sourceURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	args := []string{"-sS", "--max-time", "45", "--max-filesize", "8388608"}
+	// -f 必需：HTTP ≥400 时 curl 失败退出（exit 22）——否则 WAF 的 403 拦截页会被当
+	// 作订阅内容传给引擎，表现为「代拉成功但 mixed 无有效节点」的 400（2026-10-25 实抓）
+	args := []string{"-fsS", "--max-time", "45", "--max-filesize", "8388608"}
 	if ua != "" {
 		args = append(args, "-A", ua)
 	}

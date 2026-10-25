@@ -633,3 +633,25 @@ func TestInternalSubCurlFallback(t *testing.T) {
 		t.Fatalf("内容应来自 curl 重试: %q", content)
 	}
 }
+
+// v1.3.7 -f 语义：假 curl 收到 -f 且模拟 4xx（exit 22）→ fetchCurl 判失败（WAF 拦截页
+// 不再被当作订阅内容）；Go 路径同样失败 → 整体报错（502，如实暴露）
+func TestInternalSubCurlFailFast(t *testing.T) {
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "blocked", http.StatusForbidden)
+	}))
+	defer airport.Close()
+
+	dir := t.TempDir()
+	curlPath := filepath.Join(dir, "curl")
+	writeTB(t, curlPath, "#!/bin/sh\n[ \"$1\" = \"-fsS\" ] && exit 22\necho should-not-reach\n")
+	if err := os.Chmod(curlPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	st := newInternalSubStore(testConfig(t, ""))
+	if _, err := st.fetchAndRegister("Quantumult%20X", airport.URL, "http://sidecar.test"); err == nil {
+		t.Fatal("Go 403 + curl(-f) 失败时 fetchAndRegister 应报错，而不是把拦截页当内容")
+	}
+}
