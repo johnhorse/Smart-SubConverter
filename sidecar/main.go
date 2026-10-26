@@ -76,9 +76,9 @@ type previewResponse struct {
 // 客户端注册表（契约冻结：顺序即 chips 顺序，auto 永远第一；verified 随真机实测置 true）
 var registry = []clientEntry{
 	{"auto", "自动识别", "auto", false},
-	{"clash", "Clash / Mihomo", "clash", false},
+	{"clash", "Clash / Mihomo", "clash", true},  // 2026-10-25 Clash Verge（家庭网络）+ 2026-10-26 ShellCrash（VPS，机场 CF 按 ASN 封禁直连，两段式内联 170 节点）
 	{"surge", "Surge", "surge", false},
-	{"quanx", "Quantumult X", "quanx", false},
+	{"quanx", "Quantumult X", "quanx", true},    // 2026-10-25 / 10-26 两案真机终验（两段式 [server_local]）
 	{"loon", "Loon", "loon", false},
 	{"stash", "Stash", "stash", false},
 	{"shadowrocket", "Shadowrocket", "shadowrocket", false},

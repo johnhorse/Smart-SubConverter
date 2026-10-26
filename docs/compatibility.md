@@ -9,6 +9,7 @@
 | 自动识别（按客户端 UA） | auto | 未验证 | — | — |
 | Clash / Mihomo | clash | 未验证 | — | — |
 | Clash Verge | clash | 已验证 | — | 2026-10-25 · 真机订阅导入成功 |
+| ShellCrash | clash | 已验证 | — | 2026-10-26 · VPS 真机（消费端网络被机场 CF 按 ASN 封禁）· 两段式内联 170 节点导入成功 · 走 auto 短链 UA 识别正确 |
 | Surge | surge | 未验证 | 未验证 | — |
 | Quantumult X | quanx | 已验证 | 未验证 | 2026-10-25 · 真机导入成功（注意走「配置文件 → 导入」） |
 | Loon | loon | 未验证 | 未验证 | — |

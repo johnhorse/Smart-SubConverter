@@ -65,6 +65,15 @@ volumes:
 
 > macOS / Windows（Docker Desktop）不需要 `extra_hosts` 那行——`host.docker.internal` 原生可用。`docker run` 等价写法：`--add-host=host.docker.internal:host-gateway -e SNAPSHOT_PROXY=http://host.docker.internal:7890`。
 
+### 消费端在受限网络：provider 形态死锁与 clash 两段式根治（v1.4.0）
+
+上面三个坑都在说「**服务端**怎么拉到机场」。还有一个镜像问题：**客户端**拉到订阅后，自己够不够得到机场？2026-10-26 实战（VPS 部署，消费端 ShellCrash）：
+
+- **机场的封锁判据可能是 ASN，不是单个 IP**：机场域名挂 Cloudflare，对腾讯云 AS45090 整段返回 error 1005——换 IP 没用，只要出口 ASN 是被ban的云厂商就拒。判别方法：`curl -sS https://机场域名/ -o /dev/null -w '%{http_code}'` 分别从消费端网络与其他网络（家庭宽带、手机热点）跑，一 403/1005 一 200 即坐实
+- **mihomo 系客户端自拉 proxy-providers 走宿主直连、不经自身代理链**：转换引擎的 clash 输出若是 provider 形态（0 内联节点、节点列表 URL 指向机场原始订阅，由客户端自拉），那么宿主网络够不到机场时节点永远 0——**配置能导入、分组全空转（COMPATIBLE）**，且服务端配了代理也救不了它（代拉的只是转换，客户端拉 provider 是另一条路）。这是「看起来转换成功了但客户端不可用」的最隐蔽形态
+- **v1.4.0 起对 clash 显式链与 auto+clash 系 UA 一律走两段式内联**（与 Quantumult X v1.3.3 对称）：sidecar 代拉机场（`SUBSCRIPTION_PROXY` 生效）→ 转通用节点列表 → 再转 clash 输出内联 `proxies`——客户端拿到即用、零二次拉取，上面两个封锁面（服务端出口、客户端出口）只要**服务端**能到机场就全部绕开。验证口径：拉取输出应含大量内联节点、不含 `proxy-providers`，sidecar 日志见 `twostage target=clash nodes=N`
+
+
 ## 端口绑定范围警告
 
 README 快速开始里的 `-p 8080:80` 会把服务绑到**所有网卡**。对纯局域网机器这没问题，但**如果部署机有公网 IP，照抄这条命令等于把整个服务裸奔到公网**——任何扫到端口的人都能用你的转换服务，还能查看短链列表、删码（见[使用前须知](security.md#使用前须知)与[管理端点信任边界](security.md#短链数据与备份)）。公网 IP 主机请任选其一：
