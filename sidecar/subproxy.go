@@ -57,13 +57,14 @@ func (s *server) handleShortLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// v1.3.3 QX 两段式服务端代取：Extended 对 quanx + http 订阅默认走 native server_remote
-	// （把机场原始 URL 塞给 QX 自拉），而「机场输出 QX 解析不了、必须转换」正是本服务存在的
-	// 意义——改为两段式：mixed 先转通用 URI 列表（服务端代拉机场），再以节点列表转 quanx，
-	// 输出 [server_local] 明文节点。判定：显式 quanx 档，或 auto 且 UA 宽匹配 quantumult
-	// （宽匹配仅为路由决策，权威识别仍在引擎）。
-	if lnk.Target == "quanx" || (lnk.Target == "auto" && strings.Contains(strings.ToLower(r.Header.Get("User-Agent")), "quantumult")) {
-		s.proxyQuanxTwoStage(w, r, lnk, configURL, code, start)
+	// v1.3.3 QX 两段式服务端代取；v1.4.0 扩展到 clash：Extended 对 quanx/clash + http 订阅
+	// 默认把机场原始 URL 塞给客户端自拉（QX native server_remote / clash proxy-providers，
+	// 0 内联节点），而「机场输出客户端解析不了」正是本服务存在的意义——改为两段式：mixed 先
+	// 转通用 URI 列表（服务端代拉机场），再以节点列表转链 target，输出内联明文节点。判定：
+	// 显式 quanx/clash 档，或 auto 且 UA 宽匹配 quantumult / clash 系词表（宽匹配仅为路由
+	// 决策，权威识别仍在引擎）
+	if stageTarget, ok := twoStageRouteTarget(lnk.Target, r.Header.Get("User-Agent")); ok {
+		s.proxyTwoStage(w, r, lnk, configURL, code, stageTarget, start)
 		return
 	}
 
@@ -131,30 +132,55 @@ func streamBody(w http.ResponseWriter, src io.Reader) error {
 	}
 }
 
-// proxyQuanxTwoStage v1.3.3 QX 两段式：第一段 target=mixed 让引擎代拉机场并转通用
-// URI 列表（整体 base64，解码后按空白分），第二段以「URI|URI」明文节点列表转 quanx
-// （非 http 形态 → 引擎必然服务端解析 → [server_local] 明文节点，QX 零二次拉取）。
-// 两段各自分得 SUB_PROXY_TIMEOUT 的一半（context 截止）。
-func (s *server) proxyQuanxTwoStage(w http.ResponseWriter, r *http.Request, lnk storedLink, configURL, code string, start time.Time) {
-	ua := r.Header.Get("User-Agent")
-	stageTimeout := s.cfg.subProxyTimeout / 2
-	if stageTimeout <= 0 { // 防零值（生产 env 解析保证 >0；直接构造 config 的路径兜底）
-		stageTimeout = 15 * time.Second
+// twoStageRouteTarget 两段式路由判定 + 第二段归一 target：显式 quanx/clash 恒走（target
+// 原样）；auto 链按 UA 宽匹配家族归一（quantumult → quanx、clash 系词表 {clash, mihomo,
+// shellcrash} 小写包含 → clash），与 v1.3.3 QX 硬编码 quanx 的既有行为同构；其余（Surge /
+// Loon / Stash 等）直通，返回 false。宽匹配仅为路由决策，权威识别仍在引擎。
+// 词表三词各自独立必需：shellcrash 不含 clash 子串（crash ≠ clash，contains 实测 false）。
+func twoStageRouteTarget(target, ua string) (string, bool) {
+	switch target {
+	case "quanx", "clash":
+		return target, true
+	case "auto":
+		l := strings.ToLower(ua)
+		if strings.Contains(l, "quantumult") {
+			return "quanx", true
+		}
+		for _, w := range []string{"clash", "mihomo", "shellcrash"} {
+			if strings.Contains(l, w) {
+				return "clash", true
+			}
+		}
 	}
+	return "", false
+}
 
-	// v1.3.5：机场 WAF 按 TLS 指纹拦引擎直拉（busybox/libcurl 指纹 403、curl/Go 200，UA 无关——
-	// 实测矩阵），改为 sidecar 代拉（Go 抓取，SUBSCRIPTION_PROXY 生效时走代理）
-	// 并注册内部回环 ref，引擎从 127.0.0.1 拉内容（无 WAF）。
-	internalURL, err := s.isub.fetchAndRegister(ua, lnk.SourceURL, s.cfg.sidecarBase)
+// twoStageFailure 两段式失败的结构化原因：核心只产出结构，/s/ 与 preview 各自映射为
+// 日志行与错误码（不碰响应）
+type twoStageFailure struct {
+	stage  int    // 0=代拉 1=第一段(mixed) 2=第二段(链 target 转换)
+	kind   string // err=请求失败 upstream=引擎非200 nodes=第一段空节点 airport=代拉非200 internal=构造请求失败
+	err    error  // kind=err / internal
+	status int    // kind=upstream / airport
+}
+
+// twoStageConvert 两段式共享核心（v1.3.3 QX；v1.4.0 参数化 target 并供 preview 同路）：
+// sidecar 代拉订阅源注册内部回环（v1.3.5：绕机场 WAF 的 TLS 指纹拦截，SUBSCRIPTION_PROXY
+// 生效时走代理；代拉受 ctx 约束——preview 侧的整体预算即从代拉起算）→ 第一段 target=mixed
+// 让引擎从回环拉内容转通用 URI 列表（整体 base64，解码后按空白分）→ 第二段以「URI|URI」
+// 明文节点列表转链 target。非 http 形态输入 → 引擎必然服务端解析 → 内联明文节点（quanx
+// [server_local] / clash proxies 数组），客户端零二次拉取。两段各自分得 stageTimeout。
+// 成功返回第二段响应与第二段的 context cancel（B1：resp body 由调用方流式消费，cancel
+// 责任随之移交——调用方须在 body 消费完后触发；核心内 defer cancel 会在 return 瞬间取消
+// ctx，大响应 body 读到一半即截断）。所有失败路径在返回前自行 cancel。
+func (s *server) twoStageConvert(ctx context.Context, client *http.Client, ua, sourceURL, configURL, target string, stageTimeout time.Duration) (*http.Response, []string, context.CancelFunc, *twoStageFailure) {
+	internalURL, err := s.isub.fetchAndRegister(ctx, ua, sourceURL, s.cfg.sidecarBase)
 	if err != nil {
 		var st errUpstreamStatus
-		if ok := errors.As(err, &st); ok {
-			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=0/2 代拉 airport=%d", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), st.code)
-		} else {
-			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=0/2 代拉 err=%v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
+		if errors.As(err, &st) {
+			return nil, nil, nil, &twoStageFailure{stage: 0, kind: "airport", status: st.code}
 		}
-		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
-		return
+		return nil, nil, nil, &twoStageFailure{stage: 0, kind: "err", err: err}
 	}
 
 	// 第一段：内部回环内容 → mixed 通用节点列表
@@ -166,35 +192,28 @@ func (s *server) proxyQuanxTwoStage(w http.ResponseWriter, r *http.Request, lnk 
 	}
 	req1, err := http.NewRequest(http.MethodGet, s.cfg.extendedBase+"/sub?"+q1.Encode(), nil)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody{"internal"})
-		return
+		return nil, nil, nil, &twoStageFailure{stage: 1, kind: "internal", err: err}
 	}
 	req1.Header.Set("User-Agent", ua)
-	ctx1, cancel1 := context.WithTimeout(r.Context(), stageTimeout)
+	ctx1, cancel1 := context.WithTimeout(ctx, stageTimeout)
 	defer cancel1()
-	resp1, err := s.proxyClient.Do(req1.WithContext(ctx1))
+	resp1, err := client.Do(req1.WithContext(ctx1))
 	if err != nil {
-		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=1/2 err=%v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), sanitizeURLErr(err))
-		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
-		return
+		return nil, nil, nil, &twoStageFailure{stage: 1, kind: "err", err: err}
 	}
 	body1, _ := io.ReadAll(io.LimitReader(resp1.Body, 8<<20))
 	resp1.Body.Close()
 	if resp1.StatusCode != http.StatusOK {
-		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=1/2 upstream=%d", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), resp1.StatusCode)
-		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
-		return
+		return nil, nil, nil, &twoStageFailure{stage: 1, kind: "upstream", status: resp1.StatusCode}
 	}
 	uris := parseNodeURIList(body1)
 	if len(uris) == 0 {
-		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=1/2 nodes=0", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond))
-		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
-		return
+		return nil, nil, nil, &twoStageFailure{stage: 1, kind: "nodes"}
 	}
 
-	// 第二段：节点列表 → quanx 完整配置（server_local 明文节点）
+	// 第二段：节点列表 → 链 target 完整配置（内联明文节点）
 	q2 := url.Values{}
-	q2.Set("target", "quanx")
+	q2.Set("target", target)
 	q2.Set("url", strings.Join(uris, "|"))
 	q2.Set("config", configURL)
 	if s.cfg.subToken != "" {
@@ -202,32 +221,68 @@ func (s *server) proxyQuanxTwoStage(w http.ResponseWriter, r *http.Request, lnk 
 	}
 	req2, err := http.NewRequest(http.MethodGet, s.cfg.extendedBase+"/sub?"+q2.Encode(), nil)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errBody{"internal"})
-		return
+		return nil, nil, nil, &twoStageFailure{stage: 2, kind: "internal", err: err}
 	}
 	req2.Header.Set("User-Agent", ua)
-	ctx2, cancel2 := context.WithTimeout(r.Context(), stageTimeout)
-	defer cancel2()
-	resp2, err := s.proxyClient.Do(req2.WithContext(ctx2))
+	ctx2, cancel2 := context.WithTimeout(ctx, stageTimeout)
+	resp2, err := client.Do(req2.WithContext(ctx2))
 	if err != nil {
-		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=2/2 err=%v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), sanitizeURLErr(err))
-		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
-		return
+		cancel2()
+		return nil, nil, nil, &twoStageFailure{stage: 2, kind: "err", err: err}
 	}
-	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
-		log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=2/2 upstream=%d", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), resp2.StatusCode)
+		resp2.Body.Close()
+		cancel2()
+		return nil, nil, nil, &twoStageFailure{stage: 2, kind: "upstream", status: resp2.StatusCode}
+	}
+	return resp2, uris, cancel2, nil
+}
+
+// proxyTwoStage /s/ 两段式包装（v1.3.3 QX 起家，v1.4.0 参数化到 clash）：失败恒 502
+// upstream_unavailable（契约 /s/ 第 4/5 条；日志逐段脱敏摘要，补 target= 便于排障），
+// 成功流式透传第二段输出。两段各自分得 SUB_PROXY_TIMEOUT 的一半。
+// stageTarget = 归一后的第二段转换 target（显式链原样、auto 链按 UA 家族，见 twoStageRouteTarget）。
+func (s *server) proxyTwoStage(w http.ResponseWriter, r *http.Request, lnk storedLink, configURL, code, stageTarget string, start time.Time) {
+	ua := r.Header.Get("User-Agent")
+	stageTimeout := s.cfg.subProxyTimeout / 2
+	if stageTimeout <= 0 { // 防零值（生产 env 解析保证 >0；直接构造 config 的路径兜底）
+		stageTimeout = 15 * time.Second
+	}
+
+	resp2, uris, cancelStage2, fail := s.twoStageConvert(r.Context(), s.proxyClient, ua, lnk.SourceURL, configURL, stageTarget, stageTimeout)
+	if fail != nil {
+		if fail.kind == "internal" {
+			writeJSON(w, http.StatusInternalServerError, errBody{"internal"})
+			return
+		}
+		switch {
+		case fail.kind == "airport":
+			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=0/2 target=%s 代拉 airport=%d", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), stageTarget, fail.status)
+		case fail.stage == 0:
+			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=0/2 target=%s 代拉 err=%v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), stageTarget, fail.err)
+		case fail.kind == "err":
+			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=%d/2 target=%s err=%v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), fail.stage, stageTarget, sanitizeURLErr(fail.err))
+		case fail.kind == "upstream":
+			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=%d/2 target=%s upstream=%d", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), fail.stage, stageTarget, fail.status)
+		default: // nodes：代拉成功但第一段解析不出有效节点
+			log.Printf("s/ hit code=%s*** status=%d latency=%s twostage=1/2 target=%s nodes=0", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), stageTarget)
+		}
 		writeSubError(w, r, http.StatusBadGateway, "upstream_unavailable", subErrTitle, subErrDetail)
 		return
 	}
+	// B1：第二段 resp body 在此流式消费，cancel 随之交接——defer 保证消费完成后才取消
+	// 第二段 ctx（失败路径核心内已自行 cancel）
+	defer cancelStage2()
+	defer resp2.Body.Close()
 
 	if ct := resp2.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
 	w.WriteHeader(http.StatusOK)
 	copyErr := streamBody(w, resp2.Body)
-	log.Printf("s/ hit code=%s*** status=%d latency=%s twostage nodes=%d", logCode(code), http.StatusOK, time.Since(start).Round(time.Millisecond), len(uris))
+	log.Printf("s/ hit code=%s*** status=%d latency=%s twostage target=%s nodes=%d", logCode(code), http.StatusOK, time.Since(start).Round(time.Millisecond), stageTarget, len(uris))
 	if copyErr != nil {
+		// 响应头已发，无法改状态码；客户端拉完即断是常态，仅记脱敏摘要
 		log.Printf("s/ 透传中断 code=%s*** copyErr=%T", logCode(code), copyErr)
 	}
 }

@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // D7 预校验：返回空串表示通过，否则为 bad_url_* 错误码
@@ -111,6 +113,12 @@ func isTimeoutErr(err error) bool {
 // probeConvert 向 Extended 发探测 GET /sub 并按契约归类结果（config 用所选档位 url）。
 // 日志只记 target 与 errorCode（D6：探测 URL 含订阅链接，绝不入日志）。
 func (s *server) probeConvert(subURL, target, presetURL string) probeResult {
+	// v1.4.0 两段式探测（契约 preview「sidecar 行为」第 2 条）：quanx / clash（含 auto
+	// 默认的 clash——handlePreview 已把 auto 归一化为 clash 探测值）与 /s/ 拉取同一两段式
+	// 路径，所见即所得：preview 绿 = 受限网络消费端拉得到内联节点；其余 target 直通不变
+	if target == "quanx" || target == "clash" {
+		return s.probeTwoStage(subURL, target, presetURL)
+	}
 	q := url.Values{}
 	q.Set("target", target)
 	q.Set("url", subURL)
@@ -141,6 +149,122 @@ func (s *server) probeConvert(subURL, target, presetURL string) probeResult {
 		return probeResult{false, "upstream_error", "上游返回的内容不像有效配置"}
 	}
 	return probeResult{ok: true}
+}
+
+// probeTwoStage preview 探测的两段式路径（与 /s/ 拉取共用 twoStageConvert）：整体预算
+// min(PROBE_TIMEOUT, SUB_PROXY_TIMEOUT)（v1.4.0 M2：代拉也纳入——否则挂死源最坏
+// internalSubStore 120s + curl 45s 重试远超 PROBE_TIMEOUT），代拉后每段再分预算一半
+// （默认 30s → 每段 15s，整体贴近既有 PROBE_TIMEOUT 交互预期；/s/ 维持 SUB_PROXY_TIMEOUT/2
+// 不变——同路指转换与代拉逻辑同构，超时按各自交互场景）。失败映射既有错误码（M3：按段
+// 区分——stage 0 代拉失败是订阅源侧问题归 upstream_error；stage 1/2 才是引擎侧：超时
+// upstream_timeout、不可达 backend_down）。
+func (s *server) probeTwoStage(subURL, target, presetURL string) probeResult {
+	ua := uaFor(target)
+	budget := s.cfg.probeTimeout
+	if s.cfg.subProxyTimeout > 0 && s.cfg.subProxyTimeout < budget {
+		budget = s.cfg.subProxyTimeout
+	}
+	stageTimeout := budget / 2
+	if stageTimeout <= 0 { // 防零值（生产 env 解析保证 >0；直接构造 config 的路径兜底）
+		stageTimeout = 15 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	resp, _, cancelStage2, fail := s.twoStageConvert(ctx, s.probeClient, ua, subURL, presetURL, target, stageTimeout)
+	if fail != nil {
+		switch {
+		case fail.kind == "internal":
+			log.Printf("preview probe: target=%s code=backend_down twostage=%d/2", target, fail.stage)
+			return probeResult{false, "backend_down", "上游请求构造失败"}
+		case fail.stage == 0: // 代拉失败（err / airport）：订阅源侧不可用或被拦，不是引擎问题
+			log.Printf("preview probe: target=%s code=upstream_error twostage=0/2", target)
+			return probeResult{false, "upstream_error", "订阅源拉取失败（不可用或被拦截）"}
+		case fail.kind == "err" && isTimeoutErr(fail.err):
+			log.Printf("preview probe: target=%s code=upstream_timeout twostage=%d/2", target, fail.stage)
+			return probeResult{false, "upstream_timeout", fmt.Sprintf("上游转换超时（%s）", budget)}
+		case fail.kind == "err":
+			log.Printf("preview probe: target=%s code=backend_down twostage=%d/2", target, fail.stage)
+			return probeResult{false, "backend_down", "上游转换引擎连接失败"}
+		default: // stage 1/2 的 upstream / nodes
+			log.Printf("preview probe: target=%s code=upstream_error twostage=%d/2", target, fail.stage)
+			return probeResult{false, "upstream_error", "上游转换失败（订阅源无有效节点）"}
+		}
+	}
+	defer cancelStage2() // B1：body 读完后才取消第二段 ctx（失败路径核心内已自行 cancel）
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	// 内联节点粗验（契约「内联节点数 > 0」，M1：取代早前「含 proxies: 即可」的等价论证——
+	// 该论证有漏洞，URI 全是引擎不识别协议时引擎 200 返回空 proxies: 也会被误判绿）：
+	// 第一段 nodes==0 已把关拦掉「解析不出 URI」，这里把关第二段「引擎识别不了 URI」的残余
+	if !twoStageInlineNodes(target, body) {
+		log.Printf("preview probe: target=%s code=upstream_error (inline nodes check)", target)
+		return probeResult{false, "upstream_error", "上游转换未产出任何内联节点"}
+	}
+	return probeResult{ok: true}
+}
+
+// twoStageInlineNodes 两段式输出的内联节点粗验（M1）：只服务两段式路径的 quanx/clash，
+// 不引 YAML 库——clash 数顶级 proxies: 键之下、缩进 >0 的 "- " 列表条目（缩进归 0 即下一个
+// 顶级键，停止）；proxies: [] 或空列表自然计 0。quanx 数 [server_local] 段内的节点行
+// （该段是节点专用段，段内非空非注释且含裸 token 赋值的行即节点，不依赖等号空格风格）。
+func twoStageInlineNodes(target string, body []byte) bool {
+	switch target {
+	case "clash":
+		return countClashInlineProxies(string(body)) > 0
+	case "quanx":
+		return countQuanxServerLocalNodes(string(body)) > 0
+	}
+	return false
+}
+
+func countClashInlineProxies(s string) int {
+	in := false
+	n := 0
+	for _, ln := range strings.Split(s, "\n") {
+		trimmed := strings.TrimRight(ln, " \t\r")
+		if strings.TrimSpace(trimmed) == "" {
+			continue
+		}
+		indent := len(trimmed) - len(strings.TrimLeft(trimmed, " \t"))
+		if !in {
+			if indent == 0 && strings.HasPrefix(trimmed, "proxies:") {
+				in = true
+			}
+			continue
+		}
+		if indent == 0 {
+			break // 下一个顶级键，proxies 列表结束
+		}
+		if t := strings.TrimSpace(trimmed); strings.HasPrefix(t, "- ") || t == "-" {
+			n++
+		}
+	}
+	return n
+}
+
+func countQuanxServerLocalNodes(s string) int {
+	in := false
+	n := 0
+	for _, ln := range strings.Split(s, "\n") {
+		t := strings.TrimSpace(ln)
+		if !in {
+			if t == "[server_local]" {
+				in = true
+			}
+			continue
+		}
+		if strings.HasPrefix(t, "[") { // 下一段
+			break
+		}
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if i := strings.Index(t, "="); i > 0 && !strings.ContainsAny(strings.TrimSpace(t[:i]), " \t") {
+			n++
+		}
+	}
+	return n
 }
 
 // jsQueryEscape 等价 JS encodeURIComponent（url.QueryEscape 会把空格编成 +，链接里要 %20）

@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -58,8 +59,10 @@ func newInternalSubStore(cfg config) *internalSubStore {
 	}
 }
 
-// fetchAndRegister 代拉订阅并注册 ref。命中未过期缓存直接复用。返回引擎可拉的回环 URL。
-func (s *internalSubStore) fetchAndRegister(ua, sourceURL, sidecarBase string) (string, error) {
+// fetchAndRegister 代拉订阅并注册 ref。命中未过期缓存直接复用（不受 ctx 影响）。返回引擎
+// 可拉的回环 URL。ctx 约束代拉全程（v1.4.0 M2：preview 侧整体预算从代拉起算；/s/ 侧传
+// r.Context()——客户端断开时代拉随之取消）。
+func (s *internalSubStore) fetchAndRegister(ctx context.Context, ua, sourceURL, sidecarBase string) (string, error) {
 	s.mu.Lock()
 	if e, ok := s.bySource[sourceURL]; ok && time.Now().Before(e.expires) {
 		s.mu.Unlock()
@@ -67,7 +70,7 @@ func (s *internalSubStore) fetchAndRegister(ua, sourceURL, sidecarBase string) (
 	}
 	s.mu.Unlock()
 
-	body, err := s.fetch(ua, sourceURL)
+	body, err := s.fetch(ctx, ua, sourceURL)
 	if err != nil {
 		return "", err
 	}
@@ -87,13 +90,13 @@ func (s *internalSubStore) fetchAndRegister(ua, sourceURL, sidecarBase string) (
 
 // fetch 代拉：Go 抓取优先，失败时 exec curl 重试（v1.3.6）——实测部分机场 WAF 按 TLS 指纹
 // 放行（任意 IP + curl 指纹全通，Go/busybox/libcurl 指纹被拦；HTTP 代理 CONNECT 隧道不换
-// 指纹），curl 是已验证可行的形态；两路均带 SUBSCRIPTION_PROXY 代理。
-func (s *internalSubStore) fetch(ua, sourceURL string) (string, error) {
-	goBody, goErr := s.fetchGo(ua, sourceURL)
+// 指纹），curl 是已验证可行的形态；两路均带 SUBSCRIPTION_PROXY 代理，且受 ctx 约束。
+func (s *internalSubStore) fetch(ctx context.Context, ua, sourceURL string) (string, error) {
+	goBody, goErr := s.fetchGo(ctx, ua, sourceURL)
 	if goErr == nil {
 		return goBody, nil
 	}
-	if body, err := s.fetchCurl(ua, sourceURL); err == nil {
+	if body, err := s.fetchCurl(ctx, ua, sourceURL); err == nil {
 		log.Printf("internal-sub Go 拉取失败（%v），curl 重试成功", goErr)
 		return body, nil
 	} else {
@@ -101,8 +104,8 @@ func (s *internalSubStore) fetch(ua, sourceURL string) (string, error) {
 	}
 }
 
-func (s *internalSubStore) fetchGo(ua, sourceURL string) (string, error) {
-	req, err := http.NewRequest(http.MethodGet, sourceURL, nil)
+func (s *internalSubStore) fetchGo(ctx context.Context, ua, sourceURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -126,7 +129,7 @@ func (s *internalSubStore) fetchGo(ua, sourceURL string) (string, error) {
 	return string(body), nil
 }
 
-func (s *internalSubStore) fetchCurl(ua, sourceURL string) (string, error) {
+func (s *internalSubStore) fetchCurl(ctx context.Context, ua, sourceURL string) (string, error) {
 	curl, err := exec.LookPath("curl")
 	if err != nil {
 		return "", err
@@ -142,7 +145,7 @@ func (s *internalSubStore) fetchCurl(ua, sourceURL string) (string, error) {
 	}
 	args = append(args, sourceURL)
 	var out, errBuf bytes.Buffer
-	cmd := exec.Command(curl, args...)
+	cmd := exec.CommandContext(ctx, curl, args...) // ctx 截止即 kill（--max-time 45 仍是兜底双保险）
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
@@ -156,11 +159,13 @@ type errUpstreamStatus struct{ code int }
 func (e errUpstreamStatus) Error() string { return "upstream status" }
 
 // sanitizeURLErr 剥掉 *url.Error 的 URL 再进日志/错误链（订阅 URL 与引擎内部 URL 的
-// query 含 token、节点凭据，同 logCode 的脱敏口径；非 url.Error 原样返回）
+// query 含 token、节点凭据，同 logCode 的脱敏口径；非 url.Error 原样返回）。%w 包装保留
+// errors.As / net.Error 解包链（M3：超时分类依赖 Timeout() 接口可解包；ue.Err 文本本就
+// 不含 URL，脱敏语义不变）。
 func sanitizeURLErr(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		return fmt.Errorf("%s: %v", ue.Op, ue.Err)
+		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
 	}
 	return err
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -80,7 +81,7 @@ func TestShortLinkHitPassthrough(t *testing.T) {
 	defer ts.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/s/"+code, nil)
-	req.Header.Set("User-Agent", "ClashforWindows/0.20.39")
+	req.Header.Set("User-Agent", "Stash/2.8.0") // v1.4.0 起 auto+clash 系 UA 走两段式，直通靶换 stash UA
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +100,7 @@ func TestShortLinkHitPassthrough(t *testing.T) {
 	if gotTarget != "auto" || gotURL != "https://sub.example.com/l" || gotConfig != "https://example.com/preset.ini" {
 		t.Errorf("上游参数 = target=%s url=%s config=%s，应为冻结值", gotTarget, gotURL, gotConfig)
 	}
-	if gotUA != "ClashforWindows/0.20.39" {
+	if gotUA != "Stash/2.8.0" {
 		t.Errorf("UA 透传失败: %q", gotUA)
 	}
 	if gotToken != "" {
@@ -143,7 +144,7 @@ func TestShortLinkUpstream5xx(t *testing.T) {
 	ext := stubExtended(t, 500, "boom", 0)
 	defer ext.Close()
 	s := mustServer(t, testConfig(t, ext.URL))
-	code := newLink(t, s, "https://sub.example.com/l", "clash", "default", "https://example.com/preset.ini")
+	code := newLink(t, s, "https://sub.example.com/l", "loon", "default", "https://example.com/preset.ini") // 直通靶 target（clash 显式 v1.4.0 起两段式，另有专测）
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
 	resp := get(t, ts.URL+"/s/"+code)
@@ -233,7 +234,7 @@ func TestShortLinkUpstreamDown(t *testing.T) {
 	url := ext.URL
 	ext.Close()
 	s := mustServer(t, testConfig(t, url))
-	code := newLink(t, s, "https://sub.example.com/l", "clash", "default", "https://example.com/preset.ini")
+	code := newLink(t, s, "https://sub.example.com/l", "loon", "default", "https://example.com/preset.ini")
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
 	resp := get(t, ts.URL+"/s/"+code)
@@ -250,7 +251,7 @@ func TestShortLinkTimeout(t *testing.T) {
 	cfg := testConfig(t, ext.URL)
 	cfg.subProxyTimeout = 120 * time.Millisecond
 	s := mustServer(t, cfg)
-	code := newLink(t, s, "https://sub.example.com/l", "clash", "default", "https://example.com/preset.ini")
+	code := newLink(t, s, "https://sub.example.com/l", "loon", "default", "https://example.com/preset.ini")
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
 	resp := get(t, ts.URL+"/s/"+code)
@@ -274,7 +275,7 @@ func TestShortLinkStreaming(t *testing.T) {
 	defer ext.Close()
 	defer release()
 	s := mustServer(t, testConfig(t, ext.URL))
-	code := newLink(t, s, "https://sub.example.com/l", "clash", "default", "https://example.com/preset.ini")
+	code := newLink(t, s, "https://sub.example.com/l", "loon", "default", "https://example.com/preset.ini")
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
 
@@ -312,7 +313,7 @@ func TestShortLinkTokenInjected(t *testing.T) {
 	cfg := testConfig(t, ext.URL)
 	cfg.subToken = "sec"
 	s := mustServer(t, cfg)
-	code := newLink(t, s, "https://sub.example.com/l", "clash", "default", "https://example.com/preset.ini")
+	code := newLink(t, s, "https://sub.example.com/l", "loon", "default", "https://example.com/preset.ini")
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
 	resp := get(t, ts.URL+"/s/"+code) // 不带 token
@@ -331,7 +332,7 @@ func TestAdminEndpointsOpenMode(t *testing.T) {
 	defer ext.Close()
 	s := mustServer(t, testConfig(t, ext.URL))
 	code1 := newLink(t, s, "https://sub.example.com/l", "surge", "full_multimode", fullMultiModeURL)
-	code2 := newLink(t, s, "https://sub.example.com/m", "clash", "default", "https://example.com/preset.ini")
+	code2 := newLink(t, s, "https://sub.example.com/m", "loon", "default", "https://example.com/preset.ini")
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
 
@@ -484,7 +485,8 @@ func fetchBody(u string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 }
 
-// auto 链：UA 宽匹配 quantumult → 两段式；其他 UA → 单段原路径
+// auto 链路由（契约 /s/ 第 4 条）：UA 宽匹配 quantumult / clash 系词表 → 两段式；
+// 其余 UA（Surge 等）→ 单段原路径
 func TestShortLinkAutoUA(t *testing.T) {
 	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("vmess://x\n"))
@@ -531,8 +533,20 @@ func TestShortLinkAutoUA(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp2.Body.Close()
+	if len(targets) != 2 || targets[0] != "mixed" || targets[1] != "clash" {
+		t.Errorf("clash UA + auto 应走两段式（v1.4.0），实际 %v", targets)
+	}
+
+	targets = nil
+	req3, _ := http.NewRequest(http.MethodGet, ts.URL+"/s/"+code, nil)
+	req3.Header.Set("User-Agent", "Surge Mac/2398")
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp3.Body.Close()
 	if len(targets) != 1 || targets[0] != "auto" {
-		t.Errorf("clash UA + auto 应走单段原路径，实际 %v", targets)
+		t.Errorf("Surge UA + auto 应走单段原路径（无 mixed 先行），实际 %v", targets)
 	}
 }
 func TestShortLinkQuanxTwoStageEmptyNodes(t *testing.T) {
@@ -566,6 +580,230 @@ func TestShortLinkQuanxTwoStageEmptyNodes(t *testing.T) {
 	}
 }
 
+// v1.4.0 clash 两段式（与 QX 同骨架）：显式 clash 链 mixed 代拉机场 → 明文节点列表 →
+// clash（proxies 内联数组，客户端零二次拉取）
+func TestShortLinkClashTwoStage(t *testing.T) {
+	uriA := "ss://YWJjLTEyOjEubTIuMy40OjQ0Mw==#a"
+	uriB := "vmess://eyJ2IjoiMiJ9"
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(uriA + "\n" + uriB + "\n"))
+	}))
+	defer airport.Close()
+
+	var gotTargets, gotURLs, gotConfigs []string
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		gotTargets = append(gotTargets, q.Get("target"))
+		gotURLs = append(gotURLs, q.Get("url"))
+		gotConfigs = append(gotConfigs, q.Get("config"))
+		switch q.Get("target") {
+		case "mixed":
+			content, err := fetchBody(q.Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
+		case "clash":
+			_, _ = w.Write([]byte("proxies:\n  - {name: node-a, type: ss, server: 5.6.7.8}"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	code := newLink(t, s, airport.URL+"/sub", "clash", "default", "https://example.com/preset.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	resp := get(t, ts.URL+"/s/"+code)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "node-a") {
+		t.Fatalf("clash 两段式输出异常: %d %s", resp.StatusCode, body)
+	}
+	if len(gotTargets) != 2 || gotTargets[0] != "mixed" || gotTargets[1] != "clash" {
+		t.Errorf("应两段调用 mixed→clash，实际 %v", gotTargets)
+	}
+	if !strings.Contains(gotURLs[0], "/internal/sub/") {
+		t.Errorf("第一段 url 应为内部回环 ref（v1.3.5 代拉）: %q", gotURLs[0])
+	}
+	if gotURLs[1] != uriA+"|"+uriB {
+		t.Errorf("第二段 url 应为 | 连接的节点列表: %q", gotURLs[1])
+	}
+	if gotConfigs[0] != "" || gotConfigs[1] == "" {
+		t.Errorf("config 只应出现在第二段: %v", gotConfigs)
+	}
+}
+
+// auto 链 + clash 系 UA 词表（契约 {clash, mihomo, shellcrash}，小写包含）→ 两段式
+func TestShortLinkAutoClashFamilyUAs(t *testing.T) {
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("vmess://x\n"))
+	}))
+	defer airport.Close()
+	var targets []string
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targets = append(targets, r.URL.Query().Get("target"))
+		if r.URL.Query().Get("target") == "mixed" {
+			content, err := fetchBody(r.URL.Query().Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
+			return
+		}
+		_, _ = w.Write([]byte("proxies: ok"))
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	code := newLink(t, s, airport.URL+"/sub", "auto", "default", "https://example.com/preset.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	for _, ua := range []string{"clash-verge/v2.4.1", "mihomo/1.19.17", "ShellCrash/3.2.7"} {
+		targets = nil
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/s/"+code, nil)
+		req.Header.Set("User-Agent", ua)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if len(targets) != 2 || targets[0] != "mixed" || targets[1] != "clash" {
+			t.Errorf("UA %q + auto 应走两段式 mixed→clash，实际 %v", ua, targets)
+		}
+	}
+}
+
+// clash 显式链空节点：代拉成功但第一段 mixed 无有效节点 → 502（与 quanx 对称）
+func TestShortLinkClashTwoStageEmptyNodes(t *testing.T) {
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("garbage-no-uri"))
+	}))
+	defer airport.Close()
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("target") == "mixed" {
+			content, err := fetchBody(r.URL.Query().Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	code := newLink(t, s, airport.URL+"/sub", "clash", "default", "https://example.com/preset.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+	resp := get(t, ts.URL+"/s/"+code)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("clash 空节点列表应 502，实际 %d", resp.StatusCode)
+	}
+}
+
+// B1 回归：第二段大响应（512KB 分块流式，远超 bufio 缓冲）必须完整透传不截断——
+// cancel 责任移交前，核心内 defer cancel2 在 return 瞬间取消 ctx，大 body 读一半即断
+func TestShortLinkClashTwoStageLargeBody(t *testing.T) {
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("vmess://x\n"))
+	}))
+	defer airport.Close()
+	const total = 512 << 10
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch q.Get("target") {
+		case "mixed":
+			content, err := fetchBody(q.Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
+		case "clash":
+			chunk := make([]byte, 4096)
+			for i := 0; i < total/len(chunk); i++ {
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
+				w.(http.Flusher).Flush() // 逐块 flush：确保 body 远早于响应完成就在网络上传
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	code := newLink(t, s, airport.URL+"/sub", "clash", "default", "https://example.com/preset.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	resp := get(t, ts.URL+"/s/"+code)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d，应 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("body 读取中断（ctx 取消泄漏到消费阶段）: %v", err)
+	}
+	if len(body) != total {
+		t.Fatalf("body = %d 字节，应 %d（大响应被截断）", len(body), total)
+	}
+}
+
+// m1：SUB_TOKEN 非空时两段（mixed 与 clash 转换）都容器内注入 token
+func TestShortLinkClashTwoStageToken(t *testing.T) {
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("vmess://x\n"))
+	}))
+	defer airport.Close()
+	var gotTokens []string
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		gotTokens = append(gotTokens, q.Get("token"))
+		switch q.Get("target") {
+		case "mixed":
+			content, err := fetchBody(q.Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
+		case "clash":
+			_, _ = w.Write([]byte("proxies:\n  - {name: node-a}"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ext.Close()
+	cfg := testConfig(t, ext.URL)
+	cfg.subToken = "sec"
+	s := mustServer(t, cfg)
+	code := newLink(t, s, airport.URL+"/sub", "clash", "default", "https://example.com/preset.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	resp := get(t, ts.URL+"/s/"+code)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+	if len(gotTokens) != 2 || gotTokens[0] != "sec" || gotTokens[1] != "sec" {
+		t.Errorf("两段 token = %v，应均注入 sec", gotTokens)
+	}
+}
+
 // v1.3.5 内部订阅端点：注册/ref 取内容/未知 ref 404/同源 60s 复用
 func TestInternalSubStore(t *testing.T) {
 	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -576,7 +814,7 @@ func TestInternalSubStore(t *testing.T) {
 	st := newInternalSubStore(cfg)
 	base := "http://sidecar.test"
 
-	u1, err := st.fetchAndRegister("Quantumult%20X", airport.URL, base)
+	u1, err := st.fetchAndRegister(context.Background(), "Quantumult%20X", airport.URL, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +822,7 @@ func TestInternalSubStore(t *testing.T) {
 		t.Fatalf("ref URL 形态异常: %q", u1)
 	}
 	// 同源 60s 内复用（同 ref）
-	u2, _ := st.fetchAndRegister("Quantumult%20X", airport.URL, base)
+	u2, _ := st.fetchAndRegister(context.Background(), "Quantumult%20X", airport.URL, base)
 	if u1 != u2 {
 		t.Errorf("同源 60s 内应复用 ref: %q vs %q", u1, u2)
 	}
@@ -621,7 +859,7 @@ func TestInternalSubCurlFallback(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	st := newInternalSubStore(testConfig(t, ""))
-	u, err := st.fetchAndRegister("Quantumult%20X", airport.URL, "http://sidecar.test")
+	u, err := st.fetchAndRegister(context.Background(), "Quantumult%20X", airport.URL, "http://sidecar.test")
 	if err != nil {
 		t.Fatalf("Go 403 后 curl 重试应成功: %v", err)
 	}
@@ -651,7 +889,7 @@ func TestInternalSubCurlFailFast(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	st := newInternalSubStore(testConfig(t, ""))
-	if _, err := st.fetchAndRegister("Quantumult%20X", airport.URL, "http://sidecar.test"); err == nil {
+	if _, err := st.fetchAndRegister(context.Background(), "Quantumult%20X", airport.URL, "http://sidecar.test"); err == nil {
 		t.Fatal("Go 403 + curl(-f) 失败时 fetchAndRegister 应报错，而不是把拦截页当内容")
 	}
 }

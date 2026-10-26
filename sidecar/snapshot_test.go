@@ -355,9 +355,10 @@ func TestShortLinkFrozenConfigMapping(t *testing.T) {
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
 
-	old := newLink(t, s, "https://sub.example.com/old", "clash", "default", defaultPresetURL) // v1.2.0 存量链
+	// 直通靶 target（v1.4.0 起 clash 显式走两段式；config 映射语义与链 target 无关，直通保语义）
+	old := newLink(t, s, "https://sub.example.com/old", "loon", "default", defaultPresetURL) // v1.2.0 存量链
 	get(t, ts.URL+"/s/"+old).Body.Close()
-	other := newLink(t, s, "https://sub.example.com/x", "clash", "default", "https://deploy.example.com/custom.ini")
+	other := newLink(t, s, "https://sub.example.com/x", "loon", "default", "https://deploy.example.com/custom.ini")
 	get(t, ts.URL+"/s/"+other).Body.Close()
 
 	if len(gotConfigs) != 2 {
@@ -388,7 +389,7 @@ func TestPreviewEngineConfigSnapshot(t *testing.T) {
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
 
-	body := `{"url":"https://sub.example.com/l","target":"clash"}`
+	body := `{"url":"https://sub.example.com/l","target":"loon"}` // 直通靶（engineConfig 快照路径与探测路径无关）
 	resp, err := http.Post(ts.URL+"/api/preview", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
