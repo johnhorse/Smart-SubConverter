@@ -13,7 +13,35 @@ env:
   IMAGE_NAME: smart-subconverter
 
 jobs:
+  # 单测承载（v1.4.0 PR0）：冒烟只覆盖端到端路径，单测覆盖单函数/单分支；
+  # PR 时代码改动（subproxy/preview 等）先过这里，再进 build 的冒烟
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # go-version-file 读 sidecar/go.mod 的 go + toolchain 指令；
+      # sidecar 依赖 modernc.org/sqlite（纯 Go），无 CGO，无需 alpine 镜像 trick
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sidecar/go.mod
+
+      - name: sidecar 单测（vet + test，与 Makefile build-sidecar 同口径）
+        working-directory: sidecar
+        run: |
+          go vet ./...
+          go test ./...
+
+      # npm ci 失败回退 npm install：与 build job 前端产物步骤同模式（package-lock 可能落后）
+      - name: 前端单测（vitest）
+        run: |
+          (cd frontend && (npm ci --no-audit --no-fund || npm install --no-audit --no-fund))
+          (cd frontend && npm run test)
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
