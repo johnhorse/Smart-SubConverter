@@ -15,7 +15,7 @@ permissions:
 
 env:
   IMAGE_NAME: smart-subconverter
-  SHORT_DESCRIPTION: '自托管「零选项」订阅转换服务：朋友粘贴订阅链接 → 点一下 → 拿走能直接用的配置。单容器 Docker 部署，短链不泄露凭据，规则快照内置不卡 GitHub。'
+  SHORT_DESCRIPTION: '自托管零选项订阅转换：粘贴、点一下、拿走。单容器 Docker 部署。'   # Docker Hub 上限 100 字节（中文 3B/字）；GitHub About 不受限用长版
 
 jobs:
   sync:
