@@ -53,9 +53,14 @@ jobs:
             echo "::error::Docker Hub 登录失败（检查 DOCKERHUB secrets；响应开头：$(printf '%s' "$RESP" | head -c 200)）"
             exit 1
           fi
-          jq -n --arg d "$SHORT_DESCRIPTION" --rawfile f README.hub.md \
+          HTTP_CODE=$(jq -n --arg d "$SHORT_DESCRIPTION" --rawfile f README.hub.md \
             '{description: $d, full_description: $f}' \
-            | curl -fsS -X PATCH "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$IMAGE_NAME/" \
+            | curl -sS -o /tmp/patch-resp.json -w '%{http_code}' \
+              -X PATCH "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$IMAGE_NAME/" \
               -H "Authorization: JWT $JWT" \
               -H 'Content-Type: application/json' \
-              -d @-
+              -d @-)
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Docker Hub PATCH 失败 HTTP $HTTP_CODE：$(head -c 500 /tmp/patch-resp.json)"
+            exit 1
+          fi
