@@ -62,5 +62,8 @@ jobs:
               -d @-)
           if [ "$HTTP_CODE" != "200" ]; then
             echo "::error::Docker Hub PATCH 失败 HTTP $HTTP_CODE：$(head -c 500 /tmp/patch-resp.json)"
+            if [ "$HTTP_CODE" = "403" ]; then
+              echo "::error::403 通常= PAT 权限不含 Hub 仓库管理写（registry 推送权限不覆盖此项）。去 hub.docker.com → Account Settings → Personal access tokens 生成含 Hub/仓库写权限的 token，更新 GitHub secret DOCKERHUB_TOKEN 后重跑"
+            fi"
             exit 1
           fi
