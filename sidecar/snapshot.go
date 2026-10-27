@@ -73,45 +73,51 @@ func newSnapshotManager(cfg config, exempt func(presetEntry) bool) *snapshotMana
 
 // bootstrap 启动引导：目录无改写产物时从出厂层复制原始文件（不覆盖已有），
 // SNAPSHOT_META 时间戳作为各档初始 lastRefreshedAt；出厂层不存在（开发/单测
-// 环境）则跳过复制等首轮刷新（已注入 rules/ 的原始文件首轮改写即可用）。
+// 环境）则跳过复制。复制后同步预生成三档改写产物（v1.5.0）——带组短链拉取期
+// 派生与 preview 建链都读改写产物，新卷首启 refreshLoop 首轮拉取（慢网络可达
+// 数分钟）期间不再缺产物；纯本地 IO，原料缺失/校验不过仅记日志不阻塞启动。
 func (m *snapshotManager) bootstrap() {
 	if err := os.MkdirAll(m.rulesDir, 0o755); err != nil {
 		log.Printf("snapshot 创建 %s 失败: %v", m.rulesDir, err)
 		return
 	}
-	entries, err := os.ReadDir(m.vendorDir)
-	if err != nil {
-		return // 出厂层不存在：跳过复制
-	}
-	for _, e := range entries {
-		if e.IsDir() || e.Name() == snapshotMetaFile {
-			continue
-		}
-		dst := filepath.Join(m.rulesDir, e.Name())
-		if _, err := os.Stat(dst); err == nil {
-			continue // 运行时层已有（上轮留存）不覆盖
-		}
-		data, err := os.ReadFile(filepath.Join(m.vendorDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			log.Printf("snapshot 复制出厂文件 %s 失败: %v", e.Name(), err)
-		}
-	}
-	if meta := m.readVendorMeta(); meta != nil {
-		m.mu.Lock()
-		for _, p := range m.presets {
-			if m.exempt != nil && m.exempt(p) {
+	if entries, err := os.ReadDir(m.vendorDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() || e.Name() == snapshotMetaFile {
 				continue
 			}
-			st := m.stateLocked(p.ID)
-			if st.lastRefreshedAt == nil {
-				t := *meta
-				st.lastRefreshedAt = &t
+			dst := filepath.Join(m.rulesDir, e.Name())
+			if _, err := os.Stat(dst); err == nil {
+				continue // 运行时层已有（上轮留存）不覆盖
+			}
+			data, err := os.ReadFile(filepath.Join(m.vendorDir, e.Name()))
+			if err != nil {
+				continue
+			}
+			if err := os.WriteFile(dst, data, 0o644); err != nil {
+				log.Printf("snapshot 复制出厂文件 %s 失败: %v", e.Name(), err)
 			}
 		}
-		m.mu.Unlock()
+		if meta := m.readVendorMeta(); meta != nil {
+			m.mu.Lock()
+			for _, p := range m.presets {
+				if m.exempt != nil && m.exempt(p) {
+					continue
+				}
+				st := m.stateLocked(p.ID)
+				if st.lastRefreshedAt == nil {
+					t := *meta
+					st.lastRefreshedAt = &t
+				}
+			}
+			m.mu.Unlock()
+		}
+	}
+	for _, p := range m.presets {
+		if m.exempt != nil && m.exempt(p) {
+			continue
+		}
+		m.rewriteAndSwap(p, "", false, time.Now()) // updated=false：只补产物不动 states
 	}
 }
 
@@ -296,6 +302,29 @@ func (m *snapshotManager) mapFrozenConfig(rawURL string) (string, bool) {
 	return "", false
 }
 
+// presetByURL 原始 URL 反查内置档。m.presets 是 presetTable 原始 URL 副本（不含
+// PRESET_URL 覆盖值），豁免档自定义 URL 天然不匹配——无本地原料，派生兜底不适用
+func (m *snapshotManager) presetByURL(rawURL string) (presetEntry, bool) {
+	for _, p := range m.presets {
+		if p.URL == rawURL {
+			return p, true
+		}
+	}
+	return presetEntry{}, false
+}
+
+// ensureRewritten 确保该档改写产物存在（v1.5.0 派生兜底）：缺则用运行时层本地
+// 原料（原始 ini + 已引用的规则集）当场同步改写——纯本地 IO 无网络；原料不齐 /
+// 校验不过 → false（rewriteAndSwap 内已记日志，不切换既有产物）
+func (m *snapshotManager) ensureRewritten(p presetEntry) bool {
+	if _, ok := m.rewrittenPath(p); ok {
+		return true
+	}
+	m.rewriteAndSwap(p, "", false, time.Now())
+	_, ok := m.rewrittenPath(p)
+	return ok
+}
+
 func (m *snapshotManager) stateOf(id string) snapshotState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -358,13 +387,37 @@ func pathInScope(file, baseDir string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
-// atomicWrite 先写 .tmp 再 rename（读端无半成品窗口）
+// atomicWrite 先写同目录唯一名临时文件再 rename（读端无半成品窗口）。临时名 CreateTemp
+// 唯一化（v1.5.0）：/s/ 并发拉取同码派生写同目标时，固定 .tmp 名会互相 rename 踢出 ENOENT
 func atomicWrite(file string, data []byte) error {
-	tmp := file + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	dir, base := filepath.Split(file)
+	if dir == "" {
+		dir = "."
+	}
+	f, err := os.CreateTemp(dir, base+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, file)
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	// CreateTemp 默认 0600；对齐既有 0644（引擎同容器用户需读）
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, file); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func isHTTPSeg(s string) bool {

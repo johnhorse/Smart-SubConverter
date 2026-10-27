@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -707,7 +708,7 @@ func TestHandleClientsPresets(t *testing.T) {
 		{"full_adblockplus", "全量 + 去广告", fullAdblockPlusURL},
 	}
 	for i, w := range want {
-		if resp.Presets[i] != w {
+		if resp.Presets[i].presetEntry != w {
 			t.Errorf("presets[%d] = %+v, want %+v", i, resp.Presets[i], w)
 		}
 	}
@@ -873,5 +874,360 @@ func TestTwoStageInlineNodes(t *testing.T) {
 		if got := twoStageInlineNodes(c.target, []byte(c.body)); got != c.want {
 			t.Errorf("twoStageInlineNodes(%s) = %v, want %v\nbody:\n%s", c.target, got, c.want, c.body)
 		}
+	}
+}
+
+// ---- v1.5.0 自定义分组：probe / 校验 / 能力位 ----
+
+// postProbe 直接调 handler（probe 模式），返回解析后的响应
+func postProbe(t *testing.T, s *server, body string) probePreviewResponse {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "/api/preview", strings.NewReader(body))
+	r.Host = "h:1"
+	w := httptest.NewRecorder()
+	s.handlePreview(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("probe 响应码 = %d，契约要求恒 200", w.Code)
+	}
+	var resp probePreviewResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("probe 响应不是合法 JSON: %v", err)
+	}
+	return resp
+}
+
+// derefCode 错误码指针安全取值（测试断言消息用）
+func derefCode(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
+}
+
+// 节点名解析三类 scheme + 缺席语义（SC-2）
+func TestNodeNameFromURI(t *testing.T) {
+	cases := []struct {
+		uri  string
+		want string
+		ok   bool
+	}{
+		{"vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"ps":"日本家宽","v":"2"}`)), "日本家宽", true},
+		{"vmess://" + base64.RawStdEncoding.EncodeToString([]byte(`{"ps":"raw无填充","v":"2"}`)), "raw无填充", true},
+		{"vmess://" + base64.URLEncoding.EncodeToString([]byte(`{"ps":"url安全","v":"2"}`)), "url安全", true},
+		{"ss://YWJjLTEyOjEuMi4zLjQ6NDQz#%E9%A6%99%E6%B8%AF%E4%B8%93%E7%BA%BF", "香港专线", true},
+		{"trojan://pass@1.2.3.4:443?sni=x#%E7%BE%8E%E5%9B%BD%E4%B8%93%E7%BA%BF", "美国专线", true},
+		{"vless://uuid@1.2.3.4:443#%E5%8F%B0%E6%B9%BE%E8%8A%82%E7%82%B9", "台湾节点", true},
+		{"ss://YWJjLTEyOjEuMi4zLjQ6NDQz", "", false}, // 无 fragment 缺席
+		{"vmess://" + base64.StdEncoding.EncodeToString([]byte("not json")), "", false},
+		{"vmess://!!!not-base64!!!", "", false},
+		{"vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"v":"2"}`)), "", false}, // 无 ps
+		{"garbage-without-scheme", "", false},
+	}
+	for _, c := range cases {
+		n, ok := nodeNameFromURI(c.uri)
+		if ok != c.ok || (ok && n != c.want) {
+			t.Errorf("nodeNameFromURI(%q) = (%q,%v)，want (%q,%v)", c.uri, n, ok, c.want, c.ok)
+		}
+	}
+}
+
+// probe 模式：走两段式第一段（mixed）→ nodes 节点名列表；link/deepLink 恒 null；
+// 不执行第二段（引擎只收 1 次调用）；零副作用（不写库）；带 groups 忽略
+func TestPreviewProbeMode(t *testing.T) {
+	subBody := "ss://YWJjLTEyOjEuMi4zLjQ6NDQz#%E9%A6%99%E6%B8%AF%E4%B8%93%E7%BA%BF\n" +
+		"vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"ps":"日本家宽","v":"2"}`)) + "\n" +
+		"ss://YWJjLTEyOjEuMi4zLjQ6NDQz#%E6%B8%AF%E4%BA%BA%E5%AE%B6%E5%AE%BD\n"
+	subURL := publicAirportURL(t, subBody)
+	hits := 0
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		hits++
+		if q.Get("target") == "mixed" {
+			content, err := fetchBody(q.Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
+			return
+		}
+		http.NotFound(w, r) // 第二段不应发生（fetchBody 未被引，probe 只到 mixed）
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	for _, body := range []string{
+		`{"url":"` + subURL + `","probe":true}`,
+		`{"url":"` + subURL + `","probe":true,"groups":[{"name":"专线","keyword":"专线","urlTest":false}]}`,
+	} {
+		resp := postProbe(t, s, body)
+		if !resp.OK || resp.ErrorCode != nil || resp.Message != "" {
+			t.Fatalf("probe ok 响应 = %+v", resp)
+		}
+		if resp.Target != "clash" || resp.Preset == nil || resp.Preset.ID != "default" {
+			t.Errorf("probe 回显 = %s %+v", resp.Target, resp.Preset)
+		}
+		want := []string{"香港专线", "日本家宽", "港人家宽"}
+		if len(resp.Nodes) != 3 || resp.Nodes[0] != want[0] || resp.Nodes[1] != want[1] || resp.Nodes[2] != want[2] {
+			t.Errorf("nodes = %v，want %v", resp.Nodes, want)
+		}
+		if resp.Link != nil || resp.DeepLink != nil {
+			t.Errorf("probe link/deepLink 应恒 null：%v %v", resp.Link, resp.DeepLink)
+		}
+	}
+	if hits != 2 { // 两次 probe 各 1 次 mixed，无第二段
+		t.Errorf("引擎调用次数 = %d，应恰 2（每次 probe 仅 mixed）", hits)
+	}
+	var n int
+	if err := s.store.db.QueryRow("SELECT COUNT(*) FROM links").Scan(&n); err != nil || n != 0 {
+		t.Errorf("probe 零副作用：links 行数 = %d (err %v)，应 0", n, err)
+	}
+}
+
+// probe 失败形态：bad_url → 沿用错误码族、link 恒 null、nodes 恒 []
+func TestPreviewProbeBadURL(t *testing.T) {
+	s := mustServer(t, testConfig(t, "http://unused"))
+	resp := postProbe(t, s, `{"url":"","probe":true}`)
+	if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "bad_url_empty" {
+		t.Fatalf("probe 空 url = %+v，应 bad_url_empty", resp)
+	}
+	if resp.Link != nil || resp.DeepLink != nil {
+		t.Errorf("probe 预校验失败 link 应 null：%v", resp.Link)
+	}
+	if len(resp.Nodes) != 0 {
+		t.Errorf("ok:false 时 nodes 恒 []，得 %v", resp.Nodes)
+	}
+	// 上游失败（引擎 mixed 400）→ upstream_error、nodes []
+	ext := stubExtended(t, 400, "boom", 0)
+	defer ext.Close()
+	s2 := mustServer(t, testConfig(t, ext.URL))
+	resp2 := postProbe(t, s2, `{"url":"https://sub.example.com/s","probe":true}`)
+	if resp2.OK || resp2.ErrorCode == nil || *resp2.ErrorCode != "upstream_error" || len(resp2.Nodes) != 0 {
+		t.Fatalf("probe 上游失败 = %+v", resp2)
+	}
+}
+
+// 非 probe 响应 nodes 恒 []（JSON 字段级：`"nodes":[]` 出现在原始 body）
+func TestPreviewNonProbeNodesAlwaysEmpty(t *testing.T) {
+	ext := stubExtended(t, 200, "[General]\nx", 0)
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	for _, body := range []string{
+		`{"url":"https://sub.example.com/s","target":"surge"}`,
+		`{"url":"bad","target":"surge"}`,
+		`{"url":"https://sub.example.com/s","target":"surge","preset":"nope"}`,
+	} {
+		r := httptest.NewRequest(http.MethodPost, "/api/preview", strings.NewReader(body))
+		r.Host = "h:1"
+		w := httptest.NewRecorder()
+		s.handlePreview(w, r)
+		if !strings.Contains(w.Body.String(), `"nodes":[]`) {
+			t.Errorf("body %s → 非 probe 响应 nodes 应恒 []：%s", body, w.Body.String())
+		}
+	}
+}
+
+// enableSnap 开启快照管理器（测试造「树内」server 态；bootstrap 只在 tmp 建目录）
+func enableSnap(t *testing.T, s *server) {
+	t.Helper()
+	s.snap = newSnapshotManager(s.cfg, s.presetExempt)
+}
+
+// bad_groups 校验矩阵（能力位已开；不过 → bad_groups 不调上游、丢 groups 照常建短链、nodes []）
+func TestPreviewBadGroupsMatrix(t *testing.T) {
+	calls := 0
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte("[General]\nx"))
+	}))
+	defer ext.Close()
+	cfg := testConfig(t, ext.URL)
+	cfg.presetURL = defaultPresetURL // testConfig 默认覆盖值会令 default 档豁免，能力位测试需要不豁免
+	s := mustServer(t, cfg)
+	enableSnap(t, s)
+	rune33 := strings.Repeat("专", 33)
+	var many []string
+	for i := 0; i < 11; i++ {
+		many = append(many, fmt.Sprintf(`{"name":"组%d","keyword":"k%d","urlTest":false}`, i, i))
+	}
+	bad := []string{
+		`[{"name":"","keyword":"k"}]`,
+		`[{"name":"   ","keyword":"k"}]`,
+		`[{"name":"n","keyword":""}]`,
+		`[{"name":"n","keyword":"  "}]`,
+		`[{"name":"` + rune33 + `","keyword":"k"}]`,
+		`[{"name":"n","keyword":"` + rune33 + `"}]`,
+		`[{"name":"n` + "`" + `","keyword":"k"}]`,
+		`[{"name":"n","keyword":"k` + "`" + `"}]`,
+		`[{"name":"n\u0000","keyword":"k"}]`,
+		`[{"name":"n","keyword":"k\u007f"}]`,
+		`[{"name":"a","keyword":"k"},{"name":"a","keyword":"k2"}]`,
+		"[" + strings.Join(many, ",") + "]",
+	}
+	for _, g := range bad {
+		resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s","target":"surge","groups":`+g+`}`, "h:1", "")
+		if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "bad_groups" {
+			t.Errorf("groups %s → code %v，应 bad_groups", g, derefCode(resp.ErrorCode))
+			continue
+		}
+		if !strings.Contains(resp.Link, "/s/") {
+			t.Errorf("bad_groups 丢 groups 应照常建短链：%s", resp.Link)
+		}
+	}
+	if calls != 0 {
+		t.Errorf("校验失败不应触达上游，实际 %d 次", calls)
+	}
+}
+
+// 合法边界：恰 32 rune、恰 10 组、trim 归一化（存库的 groups 为规范化 JSON）；
+// 撞名后缀不发生在建链期（拉取期才派生）
+func TestPreviewGroupsValidBoundaries(t *testing.T) {
+	subURL, extURL, _ := twoStageEnv(t, "clash", "proxies:\n  - {name: node-a}\n")
+	vcfg := testConfig(t, extURL)
+	vcfg.presetURL = defaultPresetURL
+	s := mustServer(t, vcfg)
+	enableSnap(t, s)
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	var ten []string
+	for i := 0; i < 10; i++ {
+		ten = append(ten, fmt.Sprintf(`{"name":"组%d","keyword":"词%d","urlTest":false}`, i, i))
+	}
+	name32 := strings.Repeat("组", 32)
+	bodies := []string{
+		`{"url":"` + subURL + `","groups":[{"name":"` + name32 + `","keyword":"` + name32 + `","urlTest":true}]}`,
+		`{"url":"` + subURL + `","groups":[` + strings.Join(ten, ",") + `]}`,
+	}
+	for _, body := range bodies {
+		resp, _ := postPreview(t, s, body, "h:1", "")
+		if !resp.OK || resp.ErrorCode != nil {
+			t.Fatalf("合法边界响应 = %+v", resp)
+		}
+	}
+	// trim 归一化：请求带空格 → 存库为 trim 后的规范化 JSON
+	resp, _ := postPreview(t, s, `{"url":"`+subURL+`","groups":[{"name":"  专线  ","keyword":" 专线 ","urlTest":false}]}`, "h:1", "")
+	if !resp.OK {
+		t.Fatalf("trim 归一化响应 = %+v", resp)
+	}
+	if lnk := storedFor(t, s, resp.Link); lnk.Groups != `[{"name":"专线","keyword":"专线","urlTest":false}]` {
+		t.Errorf("存库 groups = %s，应为 trim 后规范化 JSON", lnk.Groups)
+	}
+	// 幂等：同 groups（未 trim 形态重发）→ 同码
+	resp2, _ := postPreview(t, s, `{"url":"`+subURL+`","groups":[{"name":"专线","keyword":"专线","urlTest":false}]}`, "h:1", "")
+	if resp2.Link != resp.Link {
+		t.Errorf("同参数同 groups 应复用同码：%s vs %s", resp.Link, resp2.Link)
+	}
+}
+
+// groups_disabled：部署级（snap==nil 出树态）或所选档（豁免档）任一能力位 false；
+// 优先级 bad_url_* > bad_preset > groups_disabled（preset 无效时档位未知）
+func TestPreviewGroupsDisabled(t *testing.T) {
+	calls := 0
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte("[General]\nx"))
+	}))
+	defer ext.Close()
+	groupsBody := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+
+	// 部署级：出树（testConfig tmp 天然 snap==nil）
+	s := mustServer(t, testConfig(t, ext.URL))
+	for _, body := range []string{
+		`{"url":"https://sub.example.com/s","target":"surge","groups":` + groupsBody + `}`,
+		`{"url":"https://sub.example.com/s","target":"surge","preset":"full_multimode","groups":` + groupsBody + `}`,
+	} {
+		resp, _ := postPreview(t, s, body, "h:1", "")
+		if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "groups_disabled" {
+			t.Errorf("出树部署 body %s → code %v，应 groups_disabled", body, derefCode(resp.ErrorCode))
+		}
+		if !strings.Contains(resp.Link, "/s/") {
+			t.Errorf("groups_disabled 丢 groups 应照常建短链：%s", resp.Link)
+		}
+	}
+
+	// 档位级：snap 在 + PRESET_URL 覆盖 → default 豁免；其余两档照常
+	cfg := testConfig(t, ext.URL)
+	cfg.presetURL = "https://example.com/other.ini"
+	s2 := mustServer(t, cfg)
+	enableSnap(t, s2)
+	resp, _ := postPreview(t, s2, `{"url":"https://sub.example.com/s","target":"surge","preset":"default","groups":`+groupsBody+`}`, "h:1", "")
+	if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "groups_disabled" {
+		t.Fatalf("豁免档 → code %v，应 groups_disabled", derefCode(resp.ErrorCode))
+	}
+	// 非豁免档走正常转换
+	resp2, _ := postPreview(t, s2, `{"url":"https://sub.example.com/s","target":"surge","preset":"full_multimode","groups":`+groupsBody+`}`, "h:1", "")
+	if !resp2.OK || resp2.ErrorCode != nil {
+		t.Fatalf("非豁免档响应 = %+v", resp2)
+	}
+	if lnk := storedFor(t, s2, resp2.Link); lnk.Groups == "" {
+		t.Error("非豁免档 + 合法 groups 应随短链冻结 groups")
+	}
+	// 优先级：bad_preset 先于 groups_disabled
+	resp3, _ := postPreview(t, s2, `{"url":"https://sub.example.com/s","target":"surge","preset":"nope","groups":`+groupsBody+`}`, "h:1", "")
+	if resp3.ErrorCode == nil || *resp3.ErrorCode != "bad_preset" {
+		t.Errorf("bad_preset 应先于 groups_disabled，得 %v", derefCode(resp3.ErrorCode))
+	}
+	if calls != 1 { // 仅非豁免档 ok 一例触达上游
+		t.Errorf("上游调用次数 = %d，应 1", calls)
+	}
+}
+
+// GET /api/clients 能力位两态：出树（顶层 false、全档 false）/ 树内无豁免（顶层 true、
+// 全档 true）/ 树内 + 豁免档（顶层 true、default false 其余 true）
+func TestClientsCapabilities(t *testing.T) {
+	getCaps := func(s *server) (top bool, per []bool) {
+		ts := httptest.NewServer(s.routes())
+		defer ts.Close()
+		resp := get(t, ts.URL+"/api/clients")
+		defer resp.Body.Close()
+		var got struct {
+			Capabilities struct {
+				CustomGroups bool `json:"customGroups"`
+			} `json:"capabilities"`
+			Presets []struct {
+				ID           string `json:"id"`
+				URL          string `json:"url"`
+				CustomGroups bool   `json:"customGroups"`
+			} `json:"presets"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range got.Presets {
+			per = append(per, p.CustomGroups)
+			if p.ID == "" || p.URL == "" {
+				t.Errorf("preset 字段退化: %+v", p)
+			}
+		}
+		return got.Capabilities.CustomGroups, per
+	}
+
+	s1 := mustServer(t, testConfig(t, "http://unused"))
+	top, per := getCaps(s1)
+	if top || per[0] || per[1] || per[2] {
+		t.Errorf("出树能力位 = top:%v per:%v，应全 false", top, per)
+	}
+
+	cfg2 := testConfig(t, "http://unused")
+	cfg2.presetURL = defaultPresetURL
+	s2 := mustServer(t, cfg2)
+	enableSnap(t, s2)
+	top, per = getCaps(s2)
+	if !top || !per[0] || !per[1] || !per[2] {
+		t.Errorf("树内无豁免能力位 = top:%v per:%v，应全 true", top, per)
+	}
+
+	cfg := testConfig(t, "http://unused")
+	cfg.presetURL = "https://example.com/other.ini"
+	s3 := mustServer(t, cfg)
+	enableSnap(t, s3)
+	top, per = getCaps(s3)
+	if !top || per[0] || !per[1] || !per[2] {
+		t.Errorf("树内+豁免档能力位 = top:%v per:%v，应 [false,true,true]", top, per)
 	}
 }

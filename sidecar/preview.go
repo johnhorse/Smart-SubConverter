@@ -314,6 +314,105 @@ var validateMessages = map[string]string{
 	"bad_url_format":  "不是有效的 http(s) 链接",
 	"bad_url_private": "链接指向私网或回环地址，转换服务无法访问",
 	"bad_preset":      "指定的规则模板不可用",
+	"groups_disabled": "当前部署或所选模板不支持自定义分组",
+	"bad_groups":      "分组信息有误——组名和关键词不超过 32 字，别用特殊符号，同名分组只留一个",
+}
+
+// probeNodeList probe 模式核心（v1.5.0）：复用两段式第一段（stage1Mixed，代拉订阅 →
+// 引擎 target=mixed 展开为 URI 列表），逐条解析节点名返回；不执行第二段 target 转换。
+// 零副作用：不算指纹、不写库。预算与起算沿用 v1.4.0 两段式探测口径（整体
+// min(PROBE_TIMEOUT, SUB_PROXY_TIMEOUT) 从代拉起算；probe 不分段——第一段吃全额预算）。
+func (s *server) probeNodeList(subURL, target string) ([]string, probeResult) {
+	ua := uaFor(target)
+	budget := s.cfg.probeTimeout
+	if s.cfg.subProxyTimeout > 0 && s.cfg.subProxyTimeout < budget {
+		budget = s.cfg.subProxyTimeout
+	}
+	if budget <= 0 { // 防零值（生产 env 解析保证 >0；直接构造 config 的路径兜底）
+		budget = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	uris, fail := s.stage1Mixed(ctx, s.probeClient, ua, subURL, 0)
+	if fail != nil {
+		switch {
+		case fail.stage == 0: // 代拉失败（err / airport）：订阅源侧不可用或被拦，归 upstream_error
+			log.Printf("preview probe: target=%s mode=probe twostage=0/2", target)
+			return nil, probeResult{false, "upstream_error", "订阅源拉取失败（不可用或被拦截）"}
+		case fail.kind == "internal":
+			return nil, probeResult{false, "backend_down", "上游请求构造失败"}
+		case fail.kind == "err" && isTimeoutErr(fail.err):
+			log.Printf("preview probe: target=%s mode=probe code=upstream_timeout", target)
+			return nil, probeResult{false, "upstream_timeout", fmt.Sprintf("上游转换超时（%s）", budget)}
+		case fail.kind == "err":
+			log.Printf("preview probe: target=%s mode=probe code=backend_down (%T)", target, fail.err)
+			return nil, probeResult{false, "backend_down", "上游转换引擎连接失败"}
+		case fail.kind == "upstream":
+			log.Printf("preview probe: target=%s mode=probe code=upstream_error status=%d", target, fail.status)
+			return nil, probeResult{false, "upstream_error", fmt.Sprintf("上游转换引擎返回错误（HTTP %d）", fail.status)}
+		default: // nodes：代拉成功但第一段解析不出有效节点
+			log.Printf("preview probe: target=%s mode=probe code=upstream_error (nodes=0)", target)
+			return nil, probeResult{false, "upstream_error", "上游转换失败（订阅源无有效节点）"}
+		}
+	}
+	names := []string{}
+	for _, u := range uris {
+		if n, ok := nodeNameFromURI(u); ok {
+			names = append(names, n)
+		}
+	}
+	return names, probeResult{ok: true}
+}
+
+// nodeNameFromURI 按解析节点名（契约 SC-2）：vmess:// base64 JSON 的 ps；ss:// /
+// trojan:// 及其余 scheme 用 URL fragment（Go url.Parse 已做 % 解码），无 fragment 或
+// 解析失败则该节点缺席列表
+func nodeNameFromURI(uri string) (string, bool) {
+	i := strings.Index(uri, "://")
+	if i <= 0 {
+		return "", false
+	}
+	if strings.EqualFold(uri[:i], "vmess") {
+		payload := uri[i+3:]
+		if j := strings.IndexByte(payload, '#'); j >= 0 {
+			payload = payload[:j]
+		}
+		b, err := decodeVmessB64(payload)
+		if err != nil {
+			return "", false
+		}
+		var v struct {
+			PS string `json:"ps"`
+		}
+		if json.Unmarshal(b, &v) != nil || v.PS == "" {
+			return "", false
+		}
+		return v.PS, true
+	}
+	u, err := url.Parse(uri)
+	if err != nil || u.Fragment == "" {
+		return "", false
+	}
+	return u.Fragment, true
+}
+
+// decodeVmessB64 vmess 载荷 base64 解码：std / 无填充 / url-safe / url-safe 无填充
+// 四形态都试（各订阅产出不齐）
+func decodeVmessB64(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	var firstErr error
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		if b, err := enc.DecodeString(s); err == nil {
+			return b, nil
+		} else if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return nil, firstErr
 }
 
 // resolvePreset：preset 缺省/空串/"default" → default 档；注册表 id → 该档；否则非法
@@ -331,9 +430,11 @@ func resolvePreset(presets []presetEntry, id string) (presetEntry, bool) {
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SubURL string `json:"url"`
-		Target string `json:"target"`
-		Preset string `json:"preset"`
+		SubURL string      `json:"url"`
+		Target string      `json:"target"`
+		Preset string      `json:"preset"`
+		Groups []nodeGroup `json:"groups"` // v1.5.0：组意图（转换提交时携带；probe 模式忽略）
+		Probe  bool        `json:"probe"`  // v1.5.0：true = 探测模式（取名两段式，零副作用）
 	}
 	// 契约要求响应恒 200：请求体解析失败按「未提供链接」处理，不发明新错误码
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
@@ -369,9 +470,10 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		linkPresetID = sel.ID
 	}
 	// makeLink 查/建短链（契约 sidecar 行为 step 3：与探测结果无关，永远执行）。
-	// 存储失败 → link 降级 /sub 旧长链并置 store_error（唯一保留长链返回的正常场景）
-	makeLink := func() (link string, storeCode string) {
-		code, err := s.store.getOrCreateLink(req.SubURL, linkTarget, linkPresetID, linkPresetURL)
+	// 存储失败 → link 降级 /sub 旧长链并置 store_error（唯一保留长链返回的正常场景）。
+	// v1.5.0 groups 校验/能力位失败时 gj 传 ""（丢 groups 照常建短链，对齐 bad_preset）
+	makeLink := func(gj string) (link string, storeCode string) {
+		code, err := s.store.getOrCreateLink(req.SubURL, linkTarget, linkPresetID, linkPresetURL, gj)
 		if err != nil {
 			log.Printf("preview 短链生成失败: %T (store_error)", err)
 			return buildLink(origin, linkTarget, req.SubURL, linkPresetURL, s.cfg.subToken), "store_error"
@@ -379,13 +481,31 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return origin + "/s/" + code, ""
 	}
 
+	// probe 模式响应（v1.5.0）：link/deepLink 恒 null（零副作用即目的），ok:false 时
+	// nodes 恒 []；预校验失败复用既有错误码族
+	writeProbeResult := func(pr probeResult, nodes []string) {
+		resp := probePreviewResponse{OK: pr.ok, Target: probeTarget, Preset: echo, Message: pr.message, Nodes: nodes}
+		if !pr.ok {
+			resp.ErrorCode = &pr.errorCode
+			resp.Nodes = []string{}
+		}
+		if resp.Nodes == nil {
+			resp.Nodes = []string{}
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+
 	// 契约预校验判定序：bad_url_* 先于 bad_preset。
 	// 无效 URL 不落库（D7：私网/垃圾 URL 不持久化供 /s/ 重放），link 用 /sub 旧长链维持 D4 非空
 	if code := validateURL(req.SubURL); code != "" {
+		if req.Probe {
+			writeProbeResult(probeResult{false, code, validateMessages[code]}, nil)
+			return
+		}
 		link := buildLink(origin, linkTarget, req.SubURL, linkPresetURL, s.cfg.subToken)
 		writeJSON(w, http.StatusOK, previewResponse{
 			OK: false, Target: probeTarget, Preset: echo, ErrorCode: &code, Message: validateMessages[code],
-			Link: link, DeepLink: buildDeepLink(linkTarget, link),
+			Link: link, DeepLink: buildDeepLink(linkTarget, link), Nodes: []string{},
 		})
 		return
 	}
@@ -393,17 +513,60 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		// 不静默回落（防「以为选了 A、实际拿到默认模板」的链接流出）；preset 输入值不入日志
 		code := "bad_preset"
 		log.Printf("preview 预校验: code=bad_preset target=%s", probeTarget)
-		link, _ := makeLink() // bad_preset 优先于 store_error；link 仍以 default 档短链生成
+		if req.Probe {
+			writeProbeResult(probeResult{false, code, validateMessages[code]}, nil)
+			return
+		}
+		link, _ := makeLink("") // bad_preset 优先于 store_error；link 仍以 default 档短链生成
 		writeJSON(w, http.StatusOK, previewResponse{
 			OK: false, Target: probeTarget, Preset: nil, ErrorCode: &code, Message: validateMessages[code],
-			Link: link, DeepLink: buildDeepLink(linkTarget, link),
+			Link: link, DeepLink: buildDeepLink(linkTarget, link), Nodes: []string{},
 		})
 		return
 	}
 
+	// v1.5.0 groups 服务端兜底（probe 模式带 groups 忽略之）：能力位任一 false →
+	// groups_disabled（预校验错不调上游，UI 正常流程点不出，防手改请求）；随后
+	// bad_groups。判定序：bad_url_* > bad_preset > groups_disabled > bad_groups
+	// （preset 无效时档位未知，groups_disabled 判不了——上面已提前返回）。两错均丢
+	// groups 照常建短链（对齐 bad_preset 的 link 语义）
+	groups := normalizeGroups(req.Groups)
+	groupsJSON := "" // 空 = 无组（存量行为；列存 NULL、指纹用 "[]"）
+	if len(groups) > 0 {
+		groupsJSON = canonicalGroupsJSON(groups)
+	}
+	if !req.Probe && len(groups) > 0 {
+		if !s.customGroupsEnabled() || !s.presetCustomGroups(sel) {
+			code := "groups_disabled"
+			log.Printf("preview 预校验: code=groups_disabled target=%s preset=%s", probeTarget, sel.ID)
+			link, _ := makeLink("")
+			writeJSON(w, http.StatusOK, previewResponse{
+				OK: false, Target: probeTarget, Preset: echo, ErrorCode: &code, Message: validateMessages[code],
+				Link: link, DeepLink: buildDeepLink(linkTarget, link), Nodes: []string{},
+			})
+			return
+		}
+		if err := validateGroups(groups); err != nil {
+			code := "bad_groups"
+			log.Printf("preview 预校验: code=bad_groups target=%s", probeTarget)
+			link, _ := makeLink("")
+			writeJSON(w, http.StatusOK, previewResponse{
+				OK: false, Target: probeTarget, Preset: echo, ErrorCode: &code, Message: validateMessages[code],
+				Link: link, DeepLink: buildDeepLink(linkTarget, link), Nodes: []string{},
+			})
+			return
+		}
+	}
+
+	if req.Probe {
+		nodes, pr := s.probeNodeList(req.SubURL, probeTarget)
+		writeProbeResult(pr, nodes)
+		return
+	}
+
 	pr := s.probeConvert(req.SubURL, probeTarget, s.engineConfig(sel))
-	link, storeCode := makeLink()
-	resp := previewResponse{OK: pr.ok, Target: probeTarget, Preset: echo, Message: pr.message, Link: link, DeepLink: buildDeepLink(linkTarget, link)}
+	link, storeCode := makeLink(groupsJSON)
+	resp := previewResponse{OK: pr.ok, Target: probeTarget, Preset: echo, Message: pr.message, Link: link, DeepLink: buildDeepLink(linkTarget, link), Nodes: []string{}}
 	if !pr.ok {
 		resp.ErrorCode = &pr.errorCode // 探测错误优先；store_error 仅在探测成功时体现
 	} else if storeCode != "" {

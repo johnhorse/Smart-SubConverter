@@ -38,9 +38,21 @@ type presetEntry struct {
 	URL  string `json:"url"`
 }
 
+// capabilities 部署级能力位（v1.5.0：customGroups=派生能力，出树 DATA_DIR → false）
+type capabilitiesInfo struct {
+	CustomGroups bool `json:"customGroups"`
+}
+
+// presetWithCaps 档位级能力位（v1.5.0）：快照本地化档 true、豁免档 false（派生需读本地 ini）
+type presetWithCaps struct {
+	presetEntry
+	CustomGroups bool `json:"customGroups"`
+}
+
 type clientsResponse struct {
-	Clients []clientEntry `json:"clients"`
-	Presets []presetEntry `json:"presets"`
+	Clients      []clientEntry    `json:"clients"`
+	Presets      []presetWithCaps `json:"presets"`
+	Capabilities capabilitiesInfo `json:"capabilities"`
 }
 
 type presetStatus struct {
@@ -71,6 +83,21 @@ type previewResponse struct {
 	Message   string     `json:"message"`
 	Link      string     `json:"link"`
 	DeepLink  *string    `json:"deepLink"`
+	Nodes     []string   `json:"nodes"` // v1.5.0：非 probe 恒 []（节点名唯一出口是 probe）
+}
+
+// probePreviewResponse probe 模式响应（v1.5.0）：与 previewResponse 同形，唯 link /
+// deepLink 恒 null（「link 永远非空」条款本模式豁免——探测建链无副作用即目的），
+// nodes 为节点名列表（ok:false 时恒 []）
+type probePreviewResponse struct {
+	OK        bool       `json:"ok"`
+	Target    string     `json:"target"`
+	Preset    *presetRef `json:"preset"`
+	ErrorCode *string    `json:"errorCode"`
+	Message   string     `json:"message"`
+	Link      *string    `json:"link"`
+	DeepLink  *string    `json:"deepLink"`
+	Nodes     []string   `json:"nodes"`
 }
 
 // 客户端注册表（契约冻结：顺序即 chips 顺序，auto 永远第一；verified 随真机实测置 true）
@@ -221,6 +248,16 @@ func (s *server) engineConfig(p presetEntry) string {
 	return p.URL
 }
 
+// customGroupsEnabled 部署级分组能力位（v1.5.0 R1/D2=A）：复用快照本地化启用判定
+// （DATA_DIR 在 /base 树内 → true；出树 → false），与既有出树降级语义同一判定
+func (s *server) customGroupsEnabled() bool { return s.snap != nil }
+
+// presetCustomGroups 档位级分组能力位（v1.5.0）：快照本地化档 true、豁免档 false
+// （派生需要读本地 ini，豁免档没有）
+func (s *server) presetCustomGroups(p presetEntry) bool {
+	return s.snap != nil && !s.presetExempt(p)
+}
+
 // newServer 打开短链存储（库损坏等失败 → 返回错误，main 拒绝启动）；DATA_DIR 在
 // /base 树内时构造快照管理器（出树 → 禁用 + 警告，不拒启动）
 func newServer(cfg config) (*server, error) {
@@ -240,7 +277,7 @@ func newServer(cfg config) (*server, error) {
 	if snapshotEnabled(cfg.dataDir) {
 		s.snap = newSnapshotManager(cfg, s.presetExempt)
 	} else {
-		log.Printf("DATA_DIR %s 不在 %s 路径树内（引擎本地读取硬限），快照本地化整体禁用——三档按豁免档语义工作（source=remote）", cfg.dataDir, engineBaseDir)
+		log.Printf("DATA_DIR %s 不在 %s 路径树内（引擎本地读取硬限），快照本地化整体禁用（自定义分组一并禁用，customGroups=false）——三档按豁免档语义工作（source=remote）", cfg.dataDir, engineBaseDir)
 	}
 	s.mon.snap = s.snap
 	s.mon.exempt = s.presetExempt
@@ -256,9 +293,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func (s *server) handleClients(w http.ResponseWriter, r *http.Request) {
+	ps := make([]presetWithCaps, len(s.presets))
+	for i, p := range s.presets {
+		ps[i] = presetWithCaps{presetEntry: p, CustomGroups: s.presetCustomGroups(p)}
+	}
 	writeJSON(w, http.StatusOK, clientsResponse{
-		Clients: registry,
-		Presets: s.presets,
+		Clients:      registry,
+		Presets:      ps,
+		Capabilities: capabilitiesInfo{CustomGroups: s.customGroupsEnabled()},
 	})
 }
 
@@ -274,7 +316,8 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /s/{code}", s.handleShortLink)
 	mux.HandleFunc("GET /api/links", s.handleLinks)
 	mux.HandleFunc("DELETE /api/links/{code}", s.handleDeleteLink)
-	mux.HandleFunc("GET /internal/sub/", s.isub.handleInternalSub) // 引擎专用（回环 listener，nginx 不路由）
+	mux.HandleFunc("GET /internal/sub/", s.isub.handleInternalSub)    // 引擎专用（回环 listener，nginx 不路由）
+	mux.HandleFunc("GET /internal/derived/", s.handleInternalDerived) // 同上；serve 派生 ini（无 TTL，短链存活期内可重复拉取）
 	return mux
 }
 

@@ -13,5 +13,15 @@ import_env PUBLIC_BASE_URL
 import_env SUB_TOKEN
 import_env PRESET_URL
 import_env POLL_INTERVAL
+# DATA_DIR：README/契约承诺的部署变量（volume 挂载点；树外值 → 出树降级 customGroups=false）。
+# S5 冒烟（2026-10-28）实证缺此导入：env 被静默忽略、sidecar 恒用 /base/data
+import_env DATA_DIR
+# 侧超时/代理类 env 同样承诺于契约「环境变量」节而此前未导入（恒用默认值/恒直连）；
+# 2026-10-28 补齐（SUBSCRIPTION_PROXY 的 pref.toml 改写另有路径，此处补的是 sidecar 代拉侧）
+import_env SNAPSHOT_PROXY
+import_env SUBSCRIPTION_PROXY
+import_env PRESET_REFRESH_INTERVAL
+import_env PROBE_TIMEOUT
+import_env SUB_PROXY_TIMEOUT
 
 exec /usr/bin/ssc-sidecar

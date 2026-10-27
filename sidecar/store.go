@@ -38,12 +38,15 @@ func newCode() (string, error) {
 	return string(out[:]), nil
 }
 
-// shortFingerprint 短链指纹 = SHA-256 of "v1|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}"。
+// shortFingerprint 短链指纹 = SHA-256 of "v2|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}|{groupsJSON}"。
+// v1.5.0 升 v2：追加 groupsJSON（规范化序列化，键序 name→keyword→urlTest、无空白、
+// 空组 "[]"；groupsJSON 空串等价 "[]"）。v1→v2 前缀差异使存量指纹不再命中（契约
+// 「幂等与指纹 v2」：无 groups 首建换新码属预期一次性影响，v1 存量码照常 hit）。
 // 订阅 URL 规范化（契约级钉死，OH-8）：两端 trim、scheme/host 小写、去默认端口
 // （http:80 / https:443）、path 空补 /、query 原样保留、fragment 丢弃。
 // target 为请求原样值（auto 或指定）；config_url 用解析后的档位 URL（同 id 被
 // PRESET_URL 覆盖时指纹自然区分）。已通过预校验的 URL 解析不会失败，防御性兜底为全空段。
-func shortFingerprint(subURL, target, configURL string) string {
+func shortFingerprint(subURL, target, configURL, groupsJSON string) string {
 	var scheme, host, path, query string
 	if u, err := url.Parse(strings.TrimSpace(subURL)); err == nil && u.Scheme != "" && u.Host != "" {
 		scheme = strings.ToLower(u.Scheme)
@@ -66,12 +69,16 @@ func shortFingerprint(subURL, target, configURL string) string {
 		}
 		query = u.RawQuery
 	}
-	sum := sha256.Sum256([]byte("v1|" + scheme + "|" + host + "|" + path + "|" + query + "|" + target + "|" + configURL))
+	if groupsJSON == "" {
+		groupsJSON = "[]"
+	}
+	sum := sha256.Sum256([]byte("v2|" + scheme + "|" + host + "|" + path + "|" + query + "|" + target + "|" + configURL + "|" + groupsJSON))
 	return hex.EncodeToString(sum[:])
 }
 
 // schemaMigrations 按序幂等迁移（user_version 递增；只追加不改历史条目。
-// CREATE 用 IF NOT EXISTS：崩溃在 DDL 与 user_version 落盘之间时重启可重放）
+// v1/v2 同事务执行（SQLite DDL 事务性）：v2 的 ALTER TABLE 无 IF NOT EXISTS 形态，
+// 非原子落盘时崩溃在 DDL 与 user_version 之间会让重启重放报 duplicate column 卡死启动
 var schemaMigrations = []string{
 	`CREATE TABLE IF NOT EXISTS links (
 		code        TEXT PRIMARY KEY,
@@ -82,6 +89,7 @@ var schemaMigrations = []string{
 		config_url  TEXT NOT NULL,
 		created_at  INTEGER NOT NULL
 	)`,
+	`ALTER TABLE links ADD COLUMN groups TEXT`,
 }
 
 type store struct {
@@ -121,11 +129,20 @@ func (st *store) migrate(path string) error {
 		return fmt.Errorf("读取 SQLite 库元数据失败（%s 可能已损坏）: %w；请先备份 %s 再排查，勿直接删除", path, err, path)
 	}
 	for i := v; i < len(schemaMigrations); i++ {
-		if _, err := st.db.Exec(schemaMigrations[i]); err != nil {
+		tx, err := st.db.Begin()
+		if err != nil {
+			return fmt.Errorf("迁移 v%d 开事务失败: %w", i+1, err)
+		}
+		if _, err := tx.Exec(schemaMigrations[i]); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("迁移 v%d 失败: %w；请先备份 %s 再排查，勿直接删除", i+1, err, path)
 		}
-		if _, err := st.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("写 user_version=%d 失败: %w", i+1, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("迁移 v%d 提交失败: %w", i+1, err)
 		}
 	}
 	return nil
@@ -137,6 +154,7 @@ type storedLink struct {
 	SourceURL string
 	Target    string
 	ConfigURL string
+	Groups    string // v1.5.0 冻结的规范化 groups JSON（""=无组；同码冻结语义）
 }
 
 func (st *store) codeByFingerprint(fp string) (string, error) {
@@ -147,14 +165,16 @@ func (st *store) codeByFingerprint(fp string) (string, error) {
 
 func (st *store) linkByCode(code string) (storedLink, bool, error) {
 	var l storedLink
-	err := st.db.QueryRow("SELECT source_url, target, config_url FROM links WHERE code = ?", code).
-		Scan(&l.SourceURL, &l.Target, &l.ConfigURL)
+	var groups sql.NullString
+	err := st.db.QueryRow("SELECT source_url, target, config_url, groups FROM links WHERE code = ?", code).
+		Scan(&l.SourceURL, &l.Target, &l.ConfigURL, &groups)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedLink{}, false, nil
 	}
 	if err != nil {
 		return storedLink{}, false, err
 	}
+	l.Groups = groups.String
 	return l, true, nil
 }
 
@@ -162,8 +182,9 @@ func (st *store) linkByCode(code string) (storedLink, bool, error) {
 // 重建 → 指纹相同但插入新随机码（即轮换语义）。插入的两类唯一约束冲突分开处理（OH-9）：
 // 指纹冲突（并发下他人已插同参数）→ 重查返回既有码；码碰撞 → 重新生成再插（≤5 次）。
 // 不解析驱动错误串定性：插入失败后重查指纹，命中即指纹冲突，未命中按码碰撞换码。
-func (st *store) getOrCreateLink(subURL, target, presetID, configURL string) (string, error) {
-	fp := shortFingerprint(subURL, target, configURL)
+// groupsJSON 为规范化序列化（""=无组 → 列存 NULL；指纹侧空组等价 "[]"）。
+func (st *store) getOrCreateLink(subURL, target, presetID, configURL, groupsJSON string) (string, error) {
+	fp := shortFingerprint(subURL, target, configURL, groupsJSON)
 	if code, err := st.codeByFingerprint(fp); err == nil {
 		return code, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -174,9 +195,13 @@ func (st *store) getOrCreateLink(subURL, target, presetID, configURL string) (st
 		if err != nil {
 			return "", err
 		}
+		var groupsVal any // NULL=无组（契约 links 表注）
+		if groupsJSON != "" {
+			groupsVal = groupsJSON
+		}
 		_, err = st.db.Exec(
-			"INSERT INTO links (code, fingerprint, source_url, target, preset_id, config_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			code, fp, subURL, target, presetID, configURL, time.Now().Unix())
+			"INSERT INTO links (code, fingerprint, source_url, target, preset_id, config_url, created_at, groups) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			code, fp, subURL, target, presetID, configURL, time.Now().Unix(), groupsVal)
 		if err == nil {
 			return code, nil
 		}

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -613,6 +614,40 @@ func TestDegradedOutOfTree(t *testing.T) {
 		if p.Source != "remote" {
 			t.Errorf("降级下 health %s source = %s, want remote", p.Name, p.Source)
 		}
+	}
+}
+
+// atomicWrite 并发安全（v1.5.0）：多 goroutine 同写同目标（/s/ 并发拉取同码派生路径）
+// 全部成功、终态一致、无临时残留——固定 .tmp 名时代并发 rename 会互相踢出 ENOENT
+func TestAtomicWriteConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.ini")
+	const n = 16
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- atomicWrite(target, []byte("same-content"))
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("并发 atomicWrite: %v", err)
+		}
+	}
+	if got := readTB(t, target); got != "same-content" {
+		t.Fatalf("终态内容 = %q, want same-content", got)
+	}
+	left, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 {
+		t.Errorf("临时文件残留: %d 项（应仅目标文件）", len(left))
 	}
 }
 

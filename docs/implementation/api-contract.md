@@ -238,13 +238,14 @@ hit 且该码 `groups` 非空 → 拉取时派生，流程：
 1. 读该码冻结档位的**当前生效快照 ini**（`{DATA_DIR}/rules/` 内运行时改写产物——豁免/出树态建链期已被能力位挡，兜底撞上 → 502 `derive_error`）
 2. 解析 ini 既有 `custom_proxy_group=` 行的全部组名（模板组名单）
 3. 逐组生成行（关键词 `regexp.QuoteMeta` 转义；行内分隔符为反引号，模板原生形态）：
-   - `urlTest:false` → ``custom_proxy_group=`{name}`select`{escaped_keyword}` ``
-   - `urlTest:true` → ``custom_proxy_group=`{name}`url-test`{escaped_keyword}`http://www.gstatic.com/generate_204`300,,50` ``（模板默认外网测速 URL、间隔 300、tolerance 50——R5 定案：测速流量穿节点，勿换国内 URL）
+   - `urlTest:false` → ``custom_proxy_group={name}`select`{escaped_keyword}``
+   - `urlTest:true` → ``custom_proxy_group={name}`url-test`{escaped_keyword}`http://www.gstatic.com/generate_204`300,,50``（模板默认外网测速 URL、间隔 300、tolerance 50——R5 定案：测速流量穿节点，勿换国内 URL；行首 `=` 后直接组名、无前导反引号——模板原生形态，前导反引号形态引擎实测被静默吞）
 4. 撞名兜底（R3；闸门证有害形态：同名追加行被引擎静默吞、用户组丢失）：组名 ∈ 模板组名单或本次已生成组名 → 后缀带圈数字逐级递增（`{name}②`、`{name}③`…），撞穿全表 → 502 `derive_error`（极罕见）
 5. 插入位（X-2 default 阶梯，闸门三档 81 个模板组逐组点名验证成立）：`[custom]` 段内既有 `custom_proxy_group=` 行块之后、`enable_rule_generator=true` 之前
-6. 写 `${DATA_DIR}/derived/{code}.ini`（按短链 code 命名；**拉取时覆盖写**——快照刷新后下次拉取自动用新模板）
-7. 引擎调用的 `config=` 指派生文件的**容器内回环 URL**（`http://127.0.0.1:{SIDECAR_PORT}/internal/derived/{code}`，sidecar serve 该文件；仅容器内回环可达、nginx 不路由，同 `/internal/sub/{ref}` 模式但无 TTL——短链存活期内可重复拉取）——闸门发现：引擎 `config=` 只认 http URL，本地路径与 `file://` 均被当 opaque URL 拒 400
-8. 两段式链（clash/quanx）第二段 `config=` 同样指派生 URL；QX 追加组闸门实测保留（`[policy]` static 行完整），**无需按 target 隐藏入口**（R4 不触发）
+6. 主组接线（用户裁决 B，2026-10-28）：追加组行的同时，`[custom]` 段首个 `custom_proxy_group=` 行（主组，三档模板均为「🚀 节点选择」）行尾为每个自定义组追加 `` `[]{最终组名} `` 引用段（反引号分隔、[]组引用——模板原生形态，主组成员本就含 `[]♻️ 自动选择` 等；追加顺序 = groups 顺序；最终组名 = 撞名后缀解析后的名字，与生成的组行一致；兼容主组行尾 `.*` 正则段与 `[]DIRECT` 两形态）——**规则流量可达**：否则自定义组在规则模式下不通流量、仅摆设；接线后用户在客户端主组（如「🚀 节点选择」）里选中自定义组即让规则流量走该组命中节点
+7. 写 `${DATA_DIR}/derived/{code}.ini`（按短链 code 命名；**拉取时覆盖写**——快照刷新后下次拉取自动用新模板）
+8. 引擎调用的 `config=` 指派生文件的**容器内回环 URL**（`http://127.0.0.1:{SIDECAR_PORT}/internal/derived/{code}`，sidecar serve 该文件；仅容器内回环可达、nginx 不路由，同 `/internal/sub/{ref}` 模式但无 TTL——短链存活期内可重复拉取）——闸门发现：引擎 `config=` 只认 http URL，本地路径与 `file://` 均被当 opaque URL 拒 400
+9. 两段式链（clash/quanx）第二段 `config=` 同样指派生 URL；QX 追加组闸门实测保留（`[policy]` static 行完整），**无需按 target 隐藏入口**（R4 不触发）
 
 - **派生失败**（读快照/写盘失败等）→ HTTP 502，body `{"error":"derive_error"}`，fail-closed **不回退无组输出**（R2：配置不得静默偏离用户意图）；sidecar 日志脱敏摘要；502 内容协商（v1.3.1 人话页）对 `derive_error` 同 502 家族沿用
 - **拉取期零命中**（订阅更新后关键词不再命中任何节点）：组行无条件写入派生 ini（R3-6 单测口径），引擎原生退化 → 客户端可见形态 = **组仅含 DIRECT**（闸门例 3 实证 `proxies: [DIRECT]`，组不消失不空组）；v1 不做拉取期重评
@@ -253,7 +254,7 @@ hit 且该码 `groups` 非空 → 拉取时派生，流程：
 
 ### 闸门依据（2026-10-27，8 例全过）
 
-default 插入位成立（fallback 未触发）/ 撞名有害（吞行）→ 后缀②启用 / QX 保留组 → R4 不触发 / 零命中 = 仅含 DIRECT → 无需显式 `[]DIRECT` 兜底 / QuoteMeta 必要性实锤（4b 对照误命中）/ `config=` 只认 http URL → 派生走回环 serve。完整证据与产物路径：`docs/designs/custom-node-groups.md`「Gate Results (2026-10-27)」节。
+default 插入位成立（fallback 未触发）/ 撞名有害（吞行）→ 后缀②启用 / QX 保留组 → R4 不触发 / 零命中 = 仅含 DIRECT → 无需显式 `[]DIRECT` 兜底 / QuoteMeta 必要性实锤（4b 对照误命中）/ `config=` 只认 http URL → 派生走回环 serve。完整证据与产物路径：`docs/designs/custom-node-groups.md`「Gate Results (2026-10-27)」节。主组接线（流程第 6 步）为 B 裁决后补——闸门 8 例未覆盖该行为，由派生单测与 S5 冒烟断言覆盖。
 
 ## GET /api/health
 

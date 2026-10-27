@@ -1,4 +1,4 @@
-import type { ClientsResponse, HealthResponse, PreviewResponse } from './types'
+import type { ClientsResponse, HealthResponse, NodeGroup, PreviewResponse } from './types'
 
 export const PREVIEW_TIMEOUT_MS = 15_000
 export const HEALTHY_TIMEOUT_MS = 8_000
@@ -30,13 +30,28 @@ async function fetchJson<T>(path: string, init: RequestInit, timeoutMs: number):
   }
 }
 
-export function fetchPreview(url: string, target: string, preset: string): Promise<PreviewResponse> {
+export interface PreviewOptions {
+  // probe:true = 探测模式：不建链零副作用，响应 nodes 为节点名列表（link/deepLink 恒 null）
+  probe?: boolean
+  // 分组意图；空组不带字段（存量请求字节不变）
+  groups?: NodeGroup[]
+}
+
+export function fetchPreview(
+  url: string,
+  target: string,
+  preset: string,
+  options: PreviewOptions = {},
+): Promise<PreviewResponse> {
+  const body: Record<string, unknown> = { url, target, preset }
+  if (options.probe) body.probe = true
+  if (options.groups && options.groups.length > 0) body.groups = options.groups
   return fetchJson<PreviewResponse>(
     '/api/preview',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, target, preset }),
+      body: JSON.stringify(body),
     },
     PREVIEW_TIMEOUT_MS,
   )

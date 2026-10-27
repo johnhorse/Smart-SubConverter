@@ -12,6 +12,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -55,6 +57,19 @@ func (s *server) handleShortLink(w http.ResponseWriter, r *http.Request) {
 		if mapped, ok := s.snap.mapFrozenConfig(configURL); ok {
 			configURL = mapped
 		}
+	}
+
+	// v1.5.0 拉取期派生：该码带 groups → 读冻结档位当前生效快照 ini 派生，引擎
+	// config= 改指派生文件的容器内回环 URL（两段式链第二段与单段链同样生效——第一段
+	// mixed 无 config 参数）。失败 fail-closed 502 derive_error（不回退无组输出，R2）
+	if lnk.Groups != "" {
+		derived, err := s.prepareDerivedConfig(code, configURL, lnk.Groups)
+		if err != nil {
+			log.Printf("s/ hit code=%s*** status=%d latency=%s derive_error: %v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
+			writeSubError(w, r, http.StatusBadGateway, "derive_error", deriveErrTitle, deriveErrDetail)
+			return
+		}
+		configURL = derived
 	}
 
 	// v1.3.3 QX 两段式服务端代取；v1.4.0 扩展到 clash：Extended 对 quanx/clash + http 订阅
@@ -164,51 +179,66 @@ type twoStageFailure struct {
 	status int    // kind=upstream / airport
 }
 
-// twoStageConvert 两段式共享核心（v1.3.3 QX；v1.4.0 参数化 target 并供 preview 同路）：
-// sidecar 代拉订阅源注册内部回环（v1.3.5：绕机场 WAF 的 TLS 指纹拦截，SUBSCRIPTION_PROXY
-// 生效时走代理；代拉受 ctx 约束——preview 侧的整体预算即从代拉起算）→ 第一段 target=mixed
-// 让引擎从回环拉内容转通用 URI 列表（整体 base64，解码后按空白分）→ 第二段以「URI|URI」
-// 明文节点列表转链 target。非 http 形态输入 → 引擎必然服务端解析 → 内联明文节点（quanx
-// [server_local] / clash proxies 数组），客户端零二次拉取。两段各自分得 stageTimeout。
-// 成功返回第二段响应与第二段的 context cancel（B1：resp body 由调用方流式消费，cancel
-// 责任随之移交——调用方须在 body 消费完后触发；核心内 defer cancel 会在 return 瞬间取消
-// ctx，大响应 body 读到一半即截断）。所有失败路径在返回前自行 cancel。
-func (s *server) twoStageConvert(ctx context.Context, client *http.Client, ua, sourceURL, configURL, target string, stageTimeout time.Duration) (*http.Response, []string, context.CancelFunc, *twoStageFailure) {
+// stage1Mixed 两段式第一段（v1.5.0 评审 F7 提取，/s/ 拉取与 preview probe 节点
+// 探测共用）：sidecar 代拉订阅源注册内部回环（v1.3.5：绕机场 WAF 的 TLS 指纹拦截，
+// SUBSCRIPTION_PROXY 生效时走代理）→ 引擎 target=mixed 展开为通用 URI 列表。
+// stageTimeout>0 时第一段单独分得预算（/s/ SUB_PROXY_TIMEOUT/2、preview 两段式
+// 探测整体预算/2）；<=0 时直接受 ctx 约束（probe 节点名单口径：全额预算不分段）。
+// 失败返回 twoStageFailure（stage 0=代拉 1=第一段），成功返回 URI 列表；调用方各自
+// 映射错误码与日志。
+func (s *server) stage1Mixed(ctx context.Context, client *http.Client, ua, sourceURL string, stageTimeout time.Duration) ([]string, *twoStageFailure) {
 	internalURL, err := s.isub.fetchAndRegister(ctx, ua, sourceURL, s.cfg.sidecarBase)
 	if err != nil {
 		var st errUpstreamStatus
 		if errors.As(err, &st) {
-			return nil, nil, nil, &twoStageFailure{stage: 0, kind: "airport", status: st.code}
+			return nil, &twoStageFailure{stage: 0, kind: "airport", status: st.code}
 		}
-		return nil, nil, nil, &twoStageFailure{stage: 0, kind: "err", err: err}
+		return nil, &twoStageFailure{stage: 0, kind: "err", err: err}
 	}
-
-	// 第一段：内部回环内容 → mixed 通用节点列表
-	q1 := url.Values{}
-	q1.Set("target", "mixed")
-	q1.Set("url", internalURL)
+	q := url.Values{}
+	q.Set("target", "mixed")
+	q.Set("url", internalURL)
 	if s.cfg.subToken != "" {
-		q1.Set("token", s.cfg.subToken)
+		q.Set("token", s.cfg.subToken)
 	}
-	req1, err := http.NewRequest(http.MethodGet, s.cfg.extendedBase+"/sub?"+q1.Encode(), nil)
+	req, err := http.NewRequest(http.MethodGet, s.cfg.extendedBase+"/sub?"+q.Encode(), nil)
 	if err != nil {
-		return nil, nil, nil, &twoStageFailure{stage: 1, kind: "internal", err: err}
+		return nil, &twoStageFailure{stage: 1, kind: "internal", err: err}
 	}
-	req1.Header.Set("User-Agent", ua)
-	ctx1, cancel1 := context.WithTimeout(ctx, stageTimeout)
-	defer cancel1()
-	resp1, err := client.Do(req1.WithContext(ctx1))
+	req.Header.Set("User-Agent", ua)
+	if stageTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, stageTimeout)
+		defer cancel()
+	}
+	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
-		return nil, nil, nil, &twoStageFailure{stage: 1, kind: "err", err: err}
+		return nil, &twoStageFailure{stage: 1, kind: "err", err: err}
 	}
-	body1, _ := io.ReadAll(io.LimitReader(resp1.Body, 8<<20))
-	resp1.Body.Close()
-	if resp1.StatusCode != http.StatusOK {
-		return nil, nil, nil, &twoStageFailure{stage: 1, kind: "upstream", status: resp1.StatusCode}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, &twoStageFailure{stage: 1, kind: "upstream", status: resp.StatusCode}
 	}
-	uris := parseNodeURIList(body1)
+	uris := parseNodeURIList(body)
 	if len(uris) == 0 {
-		return nil, nil, nil, &twoStageFailure{stage: 1, kind: "nodes"}
+		return nil, &twoStageFailure{stage: 1, kind: "nodes"}
+	}
+	return uris, nil
+}
+
+// twoStageConvert 两段式共享核心（v1.3.3 QX；v1.4.0 参数化 target 并供 preview 同路）：
+// 第一段（stage1Mixed）代拉订阅转通用 URI 列表，第二段以「URI|URI」明文节点列表转
+// 链 target，输出内联明文节点（quanx [server_local] / clash proxies 数组），客户端
+// 零二次拉取。两段各自分得 stageTimeout。
+// 成功返回第二段响应与第二段的 context cancel（B1：resp body 由调用方流式消费，cancel
+// 责任随之移交——调用方须在 body 消费完后触发；核心内 defer cancel 会在 return 瞬间取消
+// ctx，大响应 body 读到一半即截断）。所有失败路径在返回前自行 cancel。
+func (s *server) twoStageConvert(ctx context.Context, client *http.Client, ua, sourceURL, configURL, target string, stageTimeout time.Duration) (*http.Response, []string, context.CancelFunc, *twoStageFailure) {
+	// 第一段：内部回环内容 → mixed 通用节点列表
+	uris, fail := s.stage1Mixed(ctx, client, ua, sourceURL, stageTimeout)
+	if fail != nil {
+		return nil, nil, nil, fail
 	}
 
 	// 第二段：节点列表 → 链 target 完整配置（内联明文节点）
@@ -361,14 +391,19 @@ func (s *server) handleLinks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, linksResponse{Links: links})
 }
 
-// handleDeleteLink DELETE /api/links/{code}：恒 204（幂等：码不存在也 204）
+// handleDeleteLink DELETE /api/links/{code}：恒 204（幂等：码不存在也 204）。
+// v1.5.0 X-4：同步删 {DATA_DIR}/derived/{code}.ini（存在才删；删失败仅记日志，204 不变）
 func (s *server) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSubToken(w, r) {
 		return
 	}
-	if err := s.store.deleteLink(r.PathValue("code")); err != nil {
+	code := r.PathValue("code")
+	if err := s.store.deleteLink(code); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errBody{"internal"})
 		return
+	}
+	if err := os.Remove(filepath.Join(s.cfg.dataDir, "derived", code+".ini")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("删除派生文件失败 code=%s***: %v", logCode(code), err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

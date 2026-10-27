@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import App from './App.vue'
-import { fetchPreview } from './api'
+import { fetchClients, fetchPreview } from './api'
 import type { PreviewResponse } from './types'
 
 vi.mock('./api', () => ({
@@ -175,5 +175,155 @@ describe('App 状态流转（组件层）', () => {
     await vi.waitFor(() => expect(wrapper.find('.result').exists()).toBe(true))
 
     expect(wrapper.find('.preset-note').text()).toBe('模板：地区分组 + AI 分流')
+  })
+})
+
+describe('App 自定义分组接线（v1.5.0）', () => {
+  beforeEach(() => {
+    vi.mocked(fetchPreview).mockReset()
+    vi.mocked(fetchClients).mockReset().mockResolvedValue({ clients: [], presets: [] })
+  })
+
+  // 能力位全真的 /api/clients 响应（default 档支持、full_multimode 不支持）
+  const capableClients = {
+    clients: [],
+    presets: [
+      { id: 'default', name: 'ACL4SSR 默认', url: 'https://a.ini', customGroups: true },
+      { id: 'full_multimode', name: '地区分组 + AI 分流', url: 'https://b.ini' },
+    ],
+    capabilities: { customGroups: true },
+  }
+
+  it('能力位缺席（旧 sidecar / 接口降级）：loadClients 完成后仍无分组入口（主流程零漂移）', async () => {
+    const wrapper = await mountApp()
+    await vi.waitFor(() => expect(fetchClients).toHaveBeenCalled())
+    await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(false))
+  })
+
+  it('能力位全真：url 空入口置灰 → 粘贴后可点 → 展开触发 probe → 打词输入出现', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['香港专线 01'] })
+    const wrapper = await mountApp()
+
+    await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(true))
+    expect(wrapper.find('.groups-entry').attributes('disabled')).toBeDefined()
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    await vi.waitFor(() => expect(wrapper.find('.groups-entry').attributes('disabled')).toBeUndefined())
+
+    await wrapper.find('.groups-entry').trigger('click')
+    await vi.waitFor(() => {
+      expect(fetchPreview).toHaveBeenCalledWith('https://example.com/sub', 'auto', 'default', { probe: true })
+    })
+    await vi.waitFor(() => {
+      expect(wrapper.find('input[aria-label="分组关键词"]').exists()).toBe(true)
+    })
+  })
+
+  it('端到端：展开 → probe → 打词「专线」→ 已命中计数 → 成组 → 转换请求带 groups → 结果页', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    vi.mocked(fetchPreview)
+      .mockResolvedValueOnce({ ...okResponse, nodes: ['香港专线 01', '日本专线 02', '美国 IEPL 1.0'] })
+      .mockResolvedValueOnce(okResponse)
+    const wrapper = await mountApp()
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(true))
+    await wrapper.find('.groups-entry').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('input[aria-label="分组关键词"]').exists()).toBe(true))
+
+    await wrapper.find('input[aria-label="分组关键词"]').setValue('专线')
+    // 打词防抖 250ms（real timers，waitFor 轮询等到计数出现）
+    await vi.waitFor(() => expect(wrapper.find('.match-count').text()).toBe('已命中 2'))
+    await wrapper.find('.group-confirm').trigger('click')
+    expect(wrapper.find('.group-chip').text()).toBe('专线 ×2')
+
+    await wrapper.find('button[type="submit"]').trigger('submit')
+    await vi.waitFor(() => {
+      expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'default', {
+        groups: [{ name: '专线', keyword: '专线', urlTest: false }],
+      })
+    })
+    await vi.waitFor(() => expect(wrapper.find('.result').exists()).toBe(true))
+  })
+
+  it('能力位全真但未建组：转换请求不带 groups（不展开面板时与存量行为一致）', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    vi.mocked(fetchPreview).mockResolvedValue(okResponse)
+    const wrapper = await mountApp()
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    await wrapper.find('button[type="submit"]').trigger('submit')
+    await vi.waitFor(() => {
+      expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'default')
+    })
+    await vi.waitFor(() => expect(wrapper.find('.result').exists()).toBe(true))
+  })
+
+  // ---- 评审 F1：切到不支持档后组残留不锁死 ----
+
+  it('F1 切到不支持档：面板隐藏、残留组提示行出现；转换请求不带 groups 正常成功；切回后恢复', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['香港专线 01'] })
+    const wrapper = await mountApp()
+
+    // 建一个组
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(true))
+    await wrapper.find('.groups-entry').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('input[aria-label="分组关键词"]').exists()).toBe(true))
+    await wrapper.find('input[aria-label="分组关键词"]').setValue('专线')
+    await vi.waitFor(() => expect(wrapper.find('.match-count').text()).toBe('已命中 1'))
+    await wrapper.find('.group-confirm').trigger('click')
+    expect(wrapper.find('.group-chip').exists()).toBe(true)
+
+    // 切到不支持档：GroupPanel 整体隐藏、提示行出现
+    await wrapper.find('.advanced-toggle').trigger('click')
+    const presetChips = wrapper.findAll('[aria-label="规则模板"] .chip')
+    await presetChips[1].trigger('click')
+    expect(wrapper.find('.groups-entry').exists()).toBe(false)
+    expect(wrapper.find('.groups-kept-note').text()).toContain('本次转换不含分组')
+    expect(wrapper.find('.groups-kept-note').text()).toContain('分组已保留，切换模板后可用')
+
+    // 转换请求不带 groups（等价无组转换，不撞 groups_disabled）
+    vi.mocked(fetchPreview).mockResolvedValueOnce(okResponse)
+    await wrapper.find('button[type="submit"]').trigger('submit')
+    await vi.waitFor(() => {
+      expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'full_multimode')
+    })
+    await vi.waitFor(() => expect(wrapper.find('.result').exists()).toBe(true))
+  })
+
+  it('F1 切回支持档：提示行消失、面板入口恢复且组仍在（再次转换正常携带 groups）', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['香港专线 01'] })
+    const wrapper = await mountApp()
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(true))
+    await wrapper.find('.groups-entry').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('input[aria-label="分组关键词"]').exists()).toBe(true))
+    await wrapper.find('input[aria-label="分组关键词"]').setValue('专线')
+    await vi.waitFor(() => expect(wrapper.find('.match-count').text()).toBe('已命中 1'))
+    await wrapper.find('.group-confirm').trigger('click')
+
+    await wrapper.find('.advanced-toggle').trigger('click')
+    const presetChips = wrapper.findAll('[aria-label="规则模板"] .chip')
+    await presetChips[1].trigger('click') // 切走 → 提示行出现
+    expect(wrapper.find('.groups-kept-note').exists()).toBe(true)
+
+    await presetChips[0].trigger('click') // 切回 → 提示消失、面板恢复且组保留
+    expect(wrapper.find('.groups-kept-note').exists()).toBe(false)
+    // groupsOpen 仍 true（切档前展开过，切档只卸载面板不清状态）→ 展开态直接回归
+    await vi.waitFor(() => expect(wrapper.find('.group-chip').exists()).toBe(true))
+    expect(wrapper.find('.group-chip').text()).toBe('专线 ×1')
+
+    vi.mocked(fetchPreview).mockResolvedValueOnce(okResponse)
+    await wrapper.find('button[type="submit"]').trigger('submit')
+    await vi.waitFor(() => {
+      expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'default', {
+        groups: [{ name: '专线', keyword: '专线', urlTest: false }],
+      })
+    })
   })
 })

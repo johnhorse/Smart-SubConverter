@@ -3,6 +3,7 @@
 package main
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,7 +46,7 @@ func TestShortFingerprintNormalization(t *testing.T) {
 		{"https://[2001:db8::1]:8443/a", "https://[2001:DB8::1]:8443/a"},   // IPv6 字面量小写化
 	}
 	for _, p := range equalPairs {
-		if shortFingerprint(p[0], "clash", "https://c.example/i") != shortFingerprint(p[1], "clash", "https://c.example/i") {
+		if shortFingerprint(p[0], "clash", "https://c.example/i", "") != shortFingerprint(p[1], "clash", "https://c.example/i", "") {
 			t.Errorf("应同指纹：%q ≡ %q", p[0], p[1])
 		}
 	}
@@ -57,9 +58,9 @@ func TestShortFingerprintNormalization(t *testing.T) {
 		{"target 不同", base, "surge", "https://c.example/i"},
 		{"config_url 不同", base, "clash", "https://c.example/other.ini"},
 	}
-	baseFp := shortFingerprint(base, "clash", "https://c.example/i")
+	baseFp := shortFingerprint(base, "clash", "https://c.example/i", "")
 	for _, c := range diffCases {
-		if shortFingerprint(c.raw, c.target, c.configURL) == baseFp {
+		if shortFingerprint(c.raw, c.target, c.configURL, "") == baseFp {
 			t.Errorf("应不同指纹（%s）：%q vs %q", c.name, c.raw, base)
 		}
 	}
@@ -68,11 +69,11 @@ func TestShortFingerprintNormalization(t *testing.T) {
 // 同参数幂等：永远复用既有短码，库里只有一行
 func TestGetOrCreateIdempotent(t *testing.T) {
 	st := openTestStore(t)
-	c1, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i")
+	c1, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	c2, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i")
+	c2, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,13 +93,13 @@ func TestGetOrCreateIdempotent(t *testing.T) {
 func TestGetOrCreateFingerprintConflict(t *testing.T) {
 	st := openTestStore(t)
 	sub, cfgURL := "https://sub.example.com/l", "https://c.example/i"
-	fp := shortFingerprint(sub, "auto", cfgURL)
+	fp := shortFingerprint(sub, "auto", cfgURL, "")
 	if _, err := st.db.Exec(
 		"INSERT INTO links (code, fingerprint, source_url, target, preset_id, config_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		"EXISTING", fp, sub, "auto", "default", cfgURL, 100); err != nil {
 		t.Fatal(err)
 	}
-	c, err := st.getOrCreateLink(sub, "auto", "default", cfgURL)
+	c, err := st.getOrCreateLink(sub, "auto", "default", cfgURL, "")
 	if err != nil {
 		t.Fatalf("指纹冲突应复用既有码而非报错: %v", err)
 	}
@@ -112,11 +113,11 @@ func TestGetOrCreateCodeCollision(t *testing.T) {
 	st := openTestStore(t)
 	stubCodeGen(t, st, "FIRSTCOD", "SECONDCO")
 	// 用不同 URL 建首行占住 FIRSTCOD
-	if _, err := st.getOrCreateLink("https://other.example/a", "clash", "default", "https://c.example/i"); err != nil {
+	if _, err := st.getOrCreateLink("https://other.example/a", "clash", "default", "https://c.example/i", ""); err != nil {
 		t.Fatal(err)
 	}
 	stubCodeGen(t, st, "FIRSTCOD", "SECONDCO") // 重置序列
-	c, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i")
+	c, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestGetOrCreateCodeCollision(t *testing.T) {
 // 码碰撞耗尽：5 次仍撞 → 报错
 func TestGetOrCreateCodeCollisionExhausted(t *testing.T) {
 	st := openTestStore(t)
-	if _, err := st.getOrCreateLink("https://other.example/a", "clash", "default", "https://c.example/i"); err != nil {
+	if _, err := st.getOrCreateLink("https://other.example/a", "clash", "default", "https://c.example/i", ""); err != nil {
 		t.Fatal(err)
 	}
 	codes := []string{"AAAAAAAA", "BBBBBBBB", "CCCCCCCC", "DDDDDDDD", "EEEEEEEE", "FFFFFFFF"}
@@ -140,7 +141,7 @@ func TestGetOrCreateCodeCollisionExhausted(t *testing.T) {
 		}
 	}
 	stubCodeGen(t, st, codes...)
-	if _, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i"); err == nil {
+	if _, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i", ""); err == nil {
 		t.Error("5 次码碰撞后应报错")
 	}
 }
@@ -149,7 +150,7 @@ func TestGetOrCreateCodeCollisionExhausted(t *testing.T) {
 func TestDeleteAndRotate(t *testing.T) {
 	st := openTestStore(t)
 	stubCodeGen(t, st, "FIRSTCOD")
-	c1, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i")
+	c1, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i", "")
 	if err != nil || c1 != "FIRSTCOD" {
 		t.Fatalf("首次建链 = %s (err %v)", c1, err)
 	}
@@ -163,7 +164,7 @@ func TestDeleteAndRotate(t *testing.T) {
 		t.Errorf("删除后 linkByCode 应 miss: found=%v err=%v", found, err)
 	}
 	stubCodeGen(t, st, "SECONDCO")
-	c2, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i")
+	c2, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +173,7 @@ func TestDeleteAndRotate(t *testing.T) {
 	}
 }
 
-// user_version 迁移幂等：首次建库 =1；重开不重复迁移且数据仍在
+// user_version 迁移幂等：首次建库 =2（v1 建表 + v2 groups 列）；重开不重复迁移且数据仍在
 func TestMigrateIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	st, err := openStore(dir)
@@ -180,28 +181,80 @@ func TestMigrateIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	var v int
-	if err := st.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 1 {
-		t.Fatalf("user_version = %d (err %v)，应为 1", v, err)
+	if err := st.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 2 {
+		t.Fatalf("user_version = %d (err %v)，应为 2", v, err)
 	}
-	if _, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i"); err != nil {
+	if _, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.close(); err != nil {
 		t.Fatal(err)
 	}
 
-	st2, err := openStore(dir) // 重开：迁移应跳过（v 已 1）
+	st2, err := openStore(dir) // 重开：迁移应跳过（v 已 2）
 	if err != nil {
 		t.Fatalf("重开库失败: %v", err)
 	}
 	defer st2.close()
-	if err := st2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 1 {
-		t.Fatalf("重开后 user_version = %d (err %v)，应仍为 1", v, err)
+	if err := st2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 2 {
+		t.Fatalf("重开后 user_version = %d (err %v)，应仍为 2", v, err)
 	}
 	var n int
 	if err := st2.db.QueryRow("SELECT COUNT(*) FROM links").Scan(&n); err != nil || n != 1 {
 		t.Errorf("重开后数据应仍在：行数 = %d (err %v)", n, err)
 	}
+}
+
+// 存量 v1 库升级：v1 schema（无 groups 列）+ user_version=1 → openStore 迁移到 v2，
+// 存量记录不动、照常 hit（契约：v1 存量指纹记录不迁移、存量码照常 hit）
+func TestMigrateV1ExistingDB(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE links (
+		code        TEXT PRIMARY KEY,
+		fingerprint TEXT NOT NULL UNIQUE,
+		source_url  TEXT NOT NULL,
+		target      TEXT NOT NULL,
+		preset_id   TEXT NOT NULL,
+		config_url  TEXT NOT NULL,
+		created_at  INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO links (code, fingerprint, source_url, target, preset_id, config_url, created_at)
+		VALUES ('V1LEGACY', 'v1fp-legacy', 'https://sub.example.com/l', 'auto', 'default', 'https://c.example/i', 100)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 1"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	st, err := openStore(dir)
+	if err != nil {
+		t.Fatalf("v1 库升级失败: %v", err)
+	}
+	defer st.close()
+	var v int
+	if err := st.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 2 {
+		t.Fatalf("迁移后 user_version = %d (err %v)，应为 2", v, err)
+	}
+	lnk, found, err := st.linkByCode("V1LEGACY")
+	if err != nil || !found {
+		t.Fatalf("存量 v1 记录应照常 hit: found=%v err=%v", found, err)
+	}
+	if lnk.SourceURL != "https://sub.example.com/l" || lnk.Target != "auto" || lnk.Groups != "" {
+		t.Errorf("存量记录字段 = %+v", lnk)
+	}
+	// 重开一次：迁移不重放（ALTER 已生效，若非事务化幂等会报 duplicate column 拒启动）
+	st2, err := openStore(dir)
+	if err != nil {
+		t.Fatalf("重开应跳过已生效迁移: %v", err)
+	}
+	st2.close()
 }
 
 // 库损坏：非「文件不存在」的损坏文件 → openStore 报错，信息含备份指引
@@ -256,5 +309,81 @@ func TestListLinksOrder(t *testing.T) {
 	}
 	if links[0].Preset != "default" || links[0].SourceURL != "https://x.example/AAA" || links[0].CreatedAt != 1000 {
 		t.Errorf("listLinks 字段 = %+v", links[0])
+	}
+}
+
+// 指纹 v2：groupsJSON 入指纹——同参数同 groups 同码、改组新码；空串与 "[]" 等价（空组
+// 规范化）；groups 影响指纹但不影响 URL 各字段规范化规则（沿用 v1）
+func TestShortFingerprintV2Groups(t *testing.T) {
+	base := "https://sub.example.com/l"
+	if shortFingerprint(base, "clash", "https://c.example/i", "") != shortFingerprint(base, "clash", "https://c.example/i", "[]") {
+		t.Error("空串与 [] 应等价（空组规范化）")
+	}
+	g1 := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+	g2 := `[{"name":"专线","keyword":"专线","urlTest":true}]`
+	g3 := `[{"name":"家宽","keyword":"家宽","urlTest":false}]`
+	fp0 := shortFingerprint(base, "clash", "https://c.example/i", "")
+	fp1 := shortFingerprint(base, "clash", "https://c.example/i", g1)
+	if fp1 == fp0 {
+		t.Error("有组与无组应不同指纹（改组=新短链）")
+	}
+	if shortFingerprint(base, "clash", "https://c.example/i", g1) != fp1 {
+		t.Error("同参数同 groups 应同指纹")
+	}
+	for _, g := range []string{g2, g3} {
+		if shortFingerprint(base, "clash", "https://c.example/i", g) == fp1 {
+			t.Errorf("groups %s 与 %s 不应同指纹", g2, g)
+		}
+	}
+}
+
+// groups 列读写往返：无组 NULL、有组存规范化 JSON；同参数幂等复用、改组新码；
+// linkByCode 读回冻结 groups（同码冻结语义）
+func TestGetOrCreateGroupsRoundtrip(t *testing.T) {
+	st := openTestStore(t)
+	sub, cfgURL := "https://sub.example.com/l", "https://c.example/i"
+	g1 := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+	g2 := `[{"name":"家宽","keyword":"家宽","urlTest":true}]`
+
+	c0, err := st.getOrCreateLink(sub, "clash", "default", cfgURL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var groups0 sql.NullString
+	if err := st.db.QueryRow("SELECT groups FROM links WHERE code = ?", c0).Scan(&groups0); err != nil || groups0.Valid {
+		t.Errorf("无组应列存 NULL：valid=%v err=%v", groups0.Valid, err)
+	}
+	c1, err := st.getOrCreateLink(sub, "clash", "default", cfgURL, g1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c1 == c0 {
+		t.Errorf("改组应新码：%s vs %s", c1, c0)
+	}
+	var stored string
+	if err := st.db.QueryRow("SELECT groups FROM links WHERE code = ?", c1).Scan(&stored); err != nil || stored != g1 {
+		t.Errorf("groups 列 = %q (err %v)，应存规范化 JSON", stored, err)
+	}
+	// 同参数同 groups：幂等复用
+	c1b, err := st.getOrCreateLink(sub, "clash", "default", cfgURL, g1)
+	if err != nil || c1b != c1 {
+		t.Errorf("同参数同 groups 应复用：%s vs %s (err %v)", c1b, c1, err)
+	}
+	// 再改组：又新码
+	c2, err := st.getOrCreateLink(sub, "clash", "default", cfgURL, g2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2 == c1 || c2 == c0 {
+		t.Errorf("再改组应新码：%s", c2)
+	}
+	// 读回冻结值
+	lnk, found, err := st.linkByCode(c1)
+	if err != nil || !found || lnk.Groups != g1 {
+		t.Errorf("linkByCode groups 读回 = %q found=%v err=%v", lnk.Groups, found, err)
+	}
+	lnk0, _, _ := st.linkByCode(c0)
+	if lnk0.Groups != "" {
+		t.Errorf("无组读回应为空串，得 %q", lnk0.Groups)
 	}
 }

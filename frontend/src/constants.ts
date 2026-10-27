@@ -6,6 +6,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   bad_url_format: '这不像一个订阅链接——检查一下是不是复制全了？',
   bad_url_private: '这个链接指向内网地址，转换服务够不着它',
   bad_preset: '这个模板不可用，重新选一个试试',
+  bad_groups: '分组信息有误——组名和关键词不超过 32 字，别用特殊符号，同名分组只留一个',
+  groups_disabled: '当前部署或所选模板不支持自定义分组',
   upstream_error: '转换没成功——可以试试展开「指定客户端」换一个，或稍后再来',
   upstream_timeout: '等太久没等到结果，再试一次看看？',
   backend_down: '转换引擎暂时没响应，稍后再试',
@@ -26,7 +28,19 @@ export const PRECHECK_ERROR_CODES = new Set([
   'bad_url_format',
   'bad_url_private',
   'bad_preset',
+  // v1.5.0：分组预校验错（不调上游、丢 groups 照常建短链），停留状态②可改组重试
+  'bad_groups',
+  'groups_disabled',
 ])
+
+// v1.5.0 分组上限与字段校验（对齐契约 bad_groups 规则：trim 非空 / ≤32 rune / 禁反引号与控制字符）
+export const GROUPS_MAX = 10
+const GROUP_BAD_CHARS = /[\u0000-\u001F\u007F`]/
+
+export function groupFieldInvalid(value: string): boolean {
+  const t = value.trim()
+  return t === '' || [...t].length > 32 || GROUP_BAD_CHARS.test(t)
+}
 
 // /api/clients 不可用时的降级数据（与契约示例同构，保证页面可用）
 export const FALLBACK_CLIENTS: ClientEntry[] = [

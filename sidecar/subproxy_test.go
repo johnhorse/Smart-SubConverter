@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +21,7 @@ import (
 // newLink 建一条短链并返回短码
 func newLink(t *testing.T, s *server, subURL, target, presetID, configURL string) string {
 	t.Helper()
-	code, err := s.store.getOrCreateLink(subURL, target, presetID, configURL)
+	code, err := s.store.getOrCreateLink(subURL, target, presetID, configURL, "")
 	if err != nil {
 		t.Fatalf("getOrCreateLink: %v", err)
 	}
@@ -891,5 +892,286 @@ func TestInternalSubCurlFailFast(t *testing.T) {
 	st := newInternalSubStore(testConfig(t, ""))
 	if _, err := st.fetchAndRegister(context.Background(), "Quantumult%20X", airport.URL, "http://sidecar.test"); err == nil {
 		t.Fatal("Go 403 + curl(-f) 失败时 fetchAndRegister 应报错，而不是把拦截页当内容")
+	}
+}
+
+// ---- v1.5.0 /s/ 拉取期派生 ----
+
+// writeSnapshotFixture 把真实模板写进 dataDir/rules/ 充当冻结档位快照，返回本地路径
+func writeSnapshotFixture(t *testing.T, s *server, name string) string {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join("testdata", "ACL4SSR_Online.ini"))
+	if err != nil {
+		t.Fatalf("读 fixture: %v", err)
+	}
+	path := filepath.Join(s.cfg.dataDir, "rules", name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func derivedPath(s *server, code string) string {
+	return filepath.Join(s.cfg.dataDir, "derived", code+".ini")
+}
+
+// 单段链（surge）：hit 且 groups 非空 → 读快照派生、引擎 config= 指回环派生 URL、
+// 派生文件落盘含组行、内部端点可拉取
+func TestShortLinkGroupsDeriveSingleStage(t *testing.T) {
+	var gotConfig string
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotConfig = r.URL.Query().Get("config")
+		_, _ = w.Write([]byte("[General]\nloglevel = notify"))
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
+	groups := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+	code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", cfgPath, groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	resp := get(t, ts.URL+"/s/"+code)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/s/ 状态码 = %d body=%s", resp.StatusCode, body)
+	}
+	if want := ts.URL + "/internal/derived/" + code; gotConfig != want {
+		t.Errorf("引擎 config= = %q，应指派生 URL %q", gotConfig, want)
+	}
+	data, err := os.ReadFile(derivedPath(s, code))
+	if err != nil {
+		t.Fatalf("派生文件未落盘: %v", err)
+	}
+	if !strings.Contains(string(data), "custom_proxy_group=专线`select`专线") {
+		t.Errorf("派生文件缺组行:\n%s", data)
+	}
+	dr := get(t, ts.URL+"/internal/derived/"+code)
+	dbody, _ := io.ReadAll(dr.Body)
+	dr.Body.Close()
+	if dr.StatusCode != http.StatusOK || !strings.Contains(string(dbody), "custom_proxy_group=专线`select`专线") {
+		t.Errorf("内部端点 serve 异常: %d %s", dr.StatusCode, dbody)
+	}
+}
+
+// 两段式链（显式 clash）：第二段 config= 同样指派生 URL；url-test 行格式；重复拉取
+// 覆盖写（文件仍可用）
+func TestShortLinkGroupsDeriveTwoStage(t *testing.T) {
+	uriA := "ss://YWJjLTEyOjEubTIuMy40OjQ0Mw==#a"
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(uriA + "\n"))
+	}))
+	defer airport.Close()
+	var configs []string
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		configs = append(configs, q.Get("config"))
+		switch q.Get("target") {
+		case "mixed":
+			content, err := fetchBody(q.Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
+		case "clash":
+			_, _ = w.Write([]byte("proxies:\n  - {name: a}\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
+	groups := `[{"name":"家宽","keyword":"家宽","urlTest":true}]`
+	code, err := s.store.getOrCreateLink(airport.URL+"/sub", "clash", "default", cfgPath, groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	for i := 0; i < 2; i++ { // 两次拉取：覆盖写路径
+		resp := get(t, ts.URL+"/s/"+code)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("第 %d 次拉取状态码 = %d", i+1, resp.StatusCode)
+		}
+	}
+	// 第一段 mixed 无 config 参数（空串占位），第二段指派生 URL
+	if len(configs) != 4 {
+		t.Fatalf("两次拉取应 4 次引擎调用，实际 %d", len(configs))
+	}
+	for _, i := range []int{1, 3} {
+		if want := ts.URL + "/internal/derived/" + code; configs[i] != want {
+			t.Errorf("第 %d 次引擎调用 config= = %q，应指派生 URL", i+1, configs[i])
+		}
+	}
+	data, err := os.ReadFile(derivedPath(s, code))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "custom_proxy_group=家宽`url-test`家宽`http://www.gstatic.com/generate_204`300,,50") {
+		t.Errorf("派生文件缺 url-test 行:\n%s", data)
+	}
+}
+
+// 派生失败 fail-closed：冻结 config 为远端 URL（豁免/出树兜底撞上）/ 快照文件缺失 →
+// 502 {"error":"derive_error"}，不回退无组输出；HTML 内容协商同 502 家族
+func TestShortLinkDeriveError(t *testing.T) {
+	s := mustServer(t, testConfig(t, "http://unused"))
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	groups := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"远端 URL（豁免档兜底）", "https://example.com/preset.ini"},
+		{"本地快照缺失", filepath.Join(s.cfg.dataDir, "rules", "missing.rewritten.ini")},
+	}
+	for _, c := range cases {
+		code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", c.path, groups)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/s/"+code, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Errorf("%s：状态码 = %d，应 502", c.name, resp.StatusCode)
+		}
+		if !strings.Contains(string(body), `"derive_error"`) {
+			t.Errorf("%s：body = %s，应含 derive_error", c.name, body)
+		}
+	}
+	// 浏览器直开（Accept text/html）→ 人话页
+	code, err := s.store.getOrCreateLink("https://sub.example.com/l2", "surge", "default", "https://example.com/preset.ini", groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/s/"+code, nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	resp, _ := http.DefaultClient.Do(req)
+	hbody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(string(hbody), "自定义分组") {
+		t.Errorf("HTML 协商异常: %d %s", resp.StatusCode, hbody)
+	}
+}
+
+// X-4：DELETE /api/links/{code} 同步删派生文件（存在才删，幂等 204 不变）
+func TestDeleteLinkRemovesDerivedFile(t *testing.T) {
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("[General]\nx"))
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
+	groups := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+	code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", cfgPath, groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+	resp := get(t, ts.URL+"/s/"+code)
+	resp.Body.Close()
+	if _, err := os.Stat(derivedPath(s, code)); err != nil {
+		t.Fatalf("拉取后派生文件应存在: %v", err)
+	}
+	del := doReq(t, http.MethodDelete, ts.URL+"/api/links/"+code)
+	del.Body.Close()
+	if del.StatusCode != http.StatusNoContent {
+		t.Errorf("DELETE 状态码 = %d，应 204", del.StatusCode)
+	}
+	if _, err := os.Stat(derivedPath(s, code)); !os.IsNotExist(err) {
+		t.Errorf("派生文件应随 DELETE 删除: %v", err)
+	}
+	miss := get(t, ts.URL+"/s/"+code)
+	miss.Body.Close()
+	if miss.StatusCode != http.StatusNotFound {
+		t.Errorf("删除后 /s/ 状态码 = %d，应 404", miss.StatusCode)
+	}
+}
+
+// 无 groups 逐字节回归（T6）：派生路径完全旁路——引擎收到完整 query 与冻结参数一致
+// （config= 原值直通、无派生 URL），响应体逐字节透传
+func TestShortLinkNoGroupsByteIdentical(t *testing.T) {
+	// 单段链
+	var gotQuery url.Values
+	const wantBody = "[General]\nloglevel = notify\nPROXIES-BYTES-\x00\x01\x7f-中文"
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		_, _ = w.Write([]byte(wantBody))
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	code := newLink(t, s, "https://sub.example.com/l", "surge", "default", "https://example.com/preset.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	resp := get(t, ts.URL+"/s/"+code)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != wantBody {
+		t.Errorf("单段响应体不逐字节一致:\n%q\nwant\n%q", body, wantBody)
+	}
+	if gotQuery.Get("target") != "surge" || gotQuery.Get("url") != "https://sub.example.com/l" ||
+		gotQuery.Get("config") != "https://example.com/preset.ini" {
+		t.Errorf("单段引擎 query = %v，应与冻结参数一致", gotQuery)
+	}
+
+	// 两段式链（显式 quanx）：第二段 url=URI|URI、config= 冻结原值
+	uriA := "ss://YWJjLTEyOjEubTIuMy40OjQ0Mw==#a"
+	uriB := "vmess://eyJ2IjoiMiJ9"
+	airport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(uriA + "\n" + uriB + "\n"))
+	}))
+	defer airport.Close()
+	const wantQX = "[server_local]\nvmess = 5.6.7.8:443, tag=b\n"
+	var q2 url.Values
+	ext2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("target") == "mixed" {
+			content, err := fetchBody(q.Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
+			return
+		}
+		q2 = q
+		_, _ = w.Write([]byte(wantQX))
+	}))
+	defer ext2.Close()
+	s2 := mustServer(t, testConfig(t, ext2.URL))
+	code2 := newLink(t, s2, airport.URL+"/sub", "quanx", "default", "https://example.com/preset.ini")
+	ts2 := httptest.NewServer(s2.routes())
+	defer ts2.Close()
+	s2.cfg.sidecarBase = ts2.URL
+	resp2 := get(t, ts2.URL+"/s/"+code2)
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if string(body2) != wantQX {
+		t.Errorf("两段响应体不逐字节一致:\n%q", body2)
+	}
+	if q2.Get("url") != uriA+"|"+uriB || q2.Get("config") != "https://example.com/preset.ini" {
+		t.Errorf("两段第二段 query = %v，应与冻结参数一致", q2)
 	}
 }

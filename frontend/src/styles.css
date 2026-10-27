@@ -441,6 +441,255 @@ body {
 
 /* ---- 移动端 ---- */
 
+/* v1.5.0 自定义分组 */
+.groups {
+  margin-top: 18px;
+}
+
+/* 能力位失效但组已建：面板隐藏，残留组提示行（样式对齐 groups-entry 虚线框 + muted 色） */
+.groups-kept-note {
+  margin: 18px 0 0;
+  border: 1px dashed var(--line-strong);
+  border-radius: 14px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.groups-entry {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 14px;
+  padding: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.groups-entry:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.groups-entry:disabled {
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+.groups-entry-sub {
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.groups-body {
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.groups-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.groups-head > span {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.groups-collapse {
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  font: inherit;
+  font-size: 12px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.groups-collapse:hover {
+  color: var(--ink);
+}
+
+.groups-status {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.groups-retry {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 10px;
+  cursor: pointer;
+  margin-left: 8px;
+}
+
+.group-kw-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.group-kw-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  padding: 9px 12px;
+}
+
+.group-kw-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.group-kw-input::placeholder {
+  color: var(--ink-faint);
+}
+
+.match-count {
+  font-size: 13px;
+  color: var(--accent-ink);
+  white-space: nowrap;
+}
+
+.group-confirm {
+  padding: 9px 16px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.group-kw-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.node-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.node-list li {
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.node-list li.hit {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.node-list li.dim {
+  opacity: 0.45;
+}
+
+.group-rows {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.group-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.group-chip {
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 12px;
+}
+
+.group-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.group-remove {
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  font: inherit;
+  font-size: 15px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.group-remove:hover {
+  color: var(--danger);
+}
+
+.groups-foot {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.add-group-btn {
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.add-group-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.add-group-btn:disabled {
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+.groups-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
 @media (max-width: 560px) {
   .convert-form {
     flex-direction: column;

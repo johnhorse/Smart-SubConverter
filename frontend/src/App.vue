@@ -4,12 +4,14 @@ import { useConverter } from './useConverter'
 import { useHealth } from './useHealth'
 import ClientChips from './components/ClientChips.vue'
 import PresetChips from './components/PresetChips.vue'
+import GroupPanel from './components/GroupPanel.vue'
 import ResultPanel from './components/ResultPanel.vue'
 import StatusBadge from './components/StatusBadge.vue'
 
 const {
   phase, inputUrl, selectedTarget, selectedPreset, advancedOpen, submitting,
-  convertError, result, clients, presets, loadClients, submit,
+  convertError, result, clients, presets, customGroupsAvailable,
+  groupsOpen, groups, nodes, probeState, loadClients, probeNodes, submit,
   selectClient, selectPreset, escapeToClash, restart,
 } = useConverter()
 
@@ -82,6 +84,28 @@ onMounted(() => {
             />
           </div>
         </div>
+
+        <!-- v1.5.0 自定义分组：能力位（部署 × 选中档）全真才渲染入口；probe 失败只影响面板内可用性 -->
+        <GroupPanel
+          :available="customGroupsAvailable"
+          :url="inputUrl"
+          :open="groupsOpen"
+          :model-value="groups"
+          :probe-state="probeState"
+          :nodes="nodes"
+          @update:open="groupsOpen = $event"
+          @update:model-value="groups = $event"
+          @retry="probeNodes"
+        />
+        <!-- 能力位失效（切到不支持档）但组已建：面板隐藏，残留组以提示行可见——
+             已建的组保留，本次转换不含分组，切回支持档即恢复 -->
+        <p
+          v-if="!customGroupsAvailable && groups.length > 0"
+          class="groups-kept-note"
+          role="note"
+        >
+          所选模板不支持自定义分组，本次转换不含分组（分组已保留，切换模板后可用）
+        </p>
       </section>
 
       <!-- 状态③：结果 -->
