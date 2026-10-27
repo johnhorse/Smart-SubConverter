@@ -12,6 +12,8 @@
 
 > 增量修订（2026-10-24，v1.3.1）：`GET /s/{code}` 的 404/502 错误响应内容协商——`Accept: text/html`（浏览器直开）返回人话 HTML 页，客户端/程序化消费维持 JSON 不变。详见「GET /s/{code}」节第 5 条。
 
+> 增量修订（2026-10-28，v1.5.0 节点自定义分组）：`POST /api/preview` 增可选 `groups` 与 `probe` 请求字段、probe 模式响应增 `nodes` 节点名列表（「link 永远非空」在 probe 模式豁免）；`GET /api/clients` 响应增 `capabilities.customGroups` 与 `presets[].customGroups` 能力位；幂等指纹升 v2（含 groups）；`links` 表增 `groups` 列；`GET /s/{code}` 增拉取期派生（config= 走容器内回环 URL）；`DELETE /api/links/{code}` 同步删派生文件；新增错误码 `bad_groups` / `groups_disabled` 与 /s/ 错误体 `derive_error`。详见「自定义分组（v1.5.0）」节。
+
 Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081，仅容器内回环）。注意：**不能用 `PORT`**——该 env 已被 Extended（subconverter）占用。
 
 ## GET /api/clients
@@ -43,6 +45,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 - `verified`：真机实测通过后置 true（V1 发布时全部 false，兼容矩阵随实测更新）
 - presets 顺序即返回顺序（`default` 永远第一，前端默认选中）；三个 url 均为 2026-10-24 实测 200。`full_multimode` 含按地区分组（港日美台新韩）+ 💬 Ai平台 组，Ai平台候选含全部地区组——ChatGPT / Claude / Gemini 等可定向走指定地区（在客户端的 Ai平台组里选地区即可，无需重新生成订阅）
 - env `PRESET_URL` 仅覆盖 `default` 档的 url（冒烟测试用），覆盖时 `id/name` 不变，其余两档不受影响
+- **v1.5.0 起**：顶层增 `"capabilities": { "customGroups": <bool> }`（部署级：出树 `DATA_DIR` → false）；`presets[]` 每档增 `"customGroups": <bool>`（档位级：快照本地化档 true、豁免档 false——派生需读本地 ini）。语义见「自定义分组（v1.5.0）」节
 
 ## POST /api/preview
 
@@ -55,6 +58,8 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 `target` 缺省、空串或 `"auto"` = 自动；否则必须是注册表中的 target 值。
 
 `preset` 可选，缺省、空串或 `"default"` = 默认档；否则必须是 `/api/clients` presets 中的 id。非注册表 id → `bad_preset`（**不做静默回落**——防「以为选了地区分组、实际拿到默认模板」的链接流出）。选中的档位烙进探测请求与生成 link 的 `config=` 参数。
+
+**v1.5.0 增两个可选字段**（语义详见「自定义分组（v1.5.0）」节）：`groups`（组意图数组，转换提交时携带）；`probe`（`true` = 探测模式：返回节点名列表、**不建链零副作用**，此时「link 永远非空」豁免）。
 
 响应恒为 HTTP 200（sidecar 处理的错误都体现在字段里）：
 
@@ -70,7 +75,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 }
 ```
 
-- **`link` 永远非空**（D4 定案）：`ok:false` 时照常返回，前端仍展示并标注「未通过校验，仍可试用」。v1.2.0 起 link 为短链（见「短链」节）；两个降级为 `/sub` 长链的场景：① `store_error`（存储失败）② `bad_url_*`（URL 未过预校验**不落库**——私网 URL 落库后经 `/s/` 持久重放会绕过 D7 准入闸门，OH-13 放大）。`bad_preset` URL 合法，仍走短链（default 档）
+- **`link` 永远非空**（D4 定案）：`ok:false` 时照常返回，前端仍展示并标注「未通过校验，仍可试用」。v1.2.0 起 link 为短链（见「短链」节）；两个降级为 `/sub` 长链的场景：① `store_error`（存储失败）② `bad_url_*`（URL 未过预校验**不落库**——私网 URL 落库后经 `/s/` 持久重放会绕过 D7 准入闸门，OH-13 放大）。`bad_preset` URL 合法，仍走短链（default 档）。**v1.5.0 唯一豁免**：`probe:true` 模式 `link` 恒 `null`（探测建链无副作用即目的）；`bad_groups` / `groups_disabled` 时 link 对齐 `bad_preset` 语义——丢 groups 照常建短链
 - `preset`：本次生效的档位（id + name）。`bad_preset` 时为 `null`；其余情况（含 `ok:false`）恒回显解析后的合法档位，前端结果页据此标注「模板：{name}」
 - `ok:false` 时 `target` 为探测用的 target（auto → "clash"），`errorCode` 与 `message` 必填
 - `link` 由 sidecar 服务端拼接，前端一律直接使用该字段，不自行拼接
@@ -117,6 +122,8 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 | `upstream_timeout` | sidecar→Extended 10s 超时 | 等太久没等到结果，再试一次看看？ |
 | `backend_down` | Extended 连不上 | 转换引擎暂时没响应，稍后再试 |
 | `store_error` | 短链写入存储失败（磁盘满/库损坏等运维态） | 短链生成失败了——这次给的是普通链接（含订阅信息，注意别转发）；请部署者检查 /data 卷 |
+| `bad_groups` | `groups` 校验失败（v1.5.0；空名/超长/含反引号或控制字符/组内重名/超 10 组） | 分组信息有误——组名和关键词不超过 32 字，别用特殊符号，同名分组只留一个 |
+| `groups_disabled` | `groups` 非空但部署（出树 `DATA_DIR`）或所选档（豁免档）不支持分组（v1.5.0；UI 正常流程点不出，防手改请求） | 当前部署或所选模板不支持自定义分组 |
 | `api_unreachable` | **前端侧专用**：fetch /api/preview 失败/超时（15s AbortController）/非 200 | 服务暂时够不着，稍后再试 |
 
 Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤ 实测）：未知 UA + `target=auto` → 400 + body「Invalid request: unsupported target value. 无效请求：不支持的 target 参数值。」——该文案出现时前端提示优先给「展开指定客户端」指引。
@@ -128,20 +135,20 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 ### 存储
 
 - SQLite，`modernc.org/sqlite`（纯 Go 无 cgo）；文件 `${DATA_DIR}/state.db`，权限 0600；首次启动自动建目录建库
-- `links` 表：`code TEXT PRIMARY KEY`、`fingerprint TEXT UNIQUE`、`source_url TEXT`、`target TEXT`、`preset_id TEXT`、`config_url TEXT`、`created_at INTEGER`（unix 秒）
-- schema 版本用 `PRAGMA user_version`（初值 1），启动时按序幂等迁移；**同码冻结创建时参数**：`source_url` / `target` / `config_url` 存的是创建时刻的解析结果，代理时永远用存的值，不重新解析（防 env 改 `PRESET_URL` 后同码内容漂移）
+- `links` 表：`code TEXT PRIMARY KEY`、`fingerprint TEXT UNIQUE`、`source_url TEXT`、`target TEXT`、`preset_id TEXT`、`config_url TEXT`、`created_at INTEGER`（unix 秒）；**v1.5.0 增 `groups TEXT`**（NULL=无组；非 NULL=规范化 JSON，序列化同指纹 v2 的 groupsJSON——见「自定义分组（v1.5.0）」节；`user_version` 1→2 幂等迁移，同码冻结语义：代理时永远用存的值）
+- schema 版本用 `PRAGMA user_version`（初值 1，v1.5.0 起 2），启动时按序幂等迁移；**同码冻结创建时参数**：`source_url` / `target` / `config_url` 存的是创建时刻的解析结果，代理时永远用存的值，不重新解析（防 env 改 `PRESET_URL` 后同码内容漂移）
 - **库损坏（打不开/校验失败，非「文件不存在」）→ sidecar 拒绝启动**，错误信息指引「先备份 /data/state.db 再排查，勿直接删除」；绝不自动清空
 
 ### 幂等与指纹
 
-- 指纹 = SHA-256 of `v1|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}`，其中订阅 URL 规范化规则：两端 trim、scheme/host 转小写、去默认端口（http:80 / https:443）、path 为空补 `/`、query 原样保留、fragment 丢弃；`target` 为请求原样值（auto 或指定）；`config_url` 为**解析后的档位 URL**（不用 preset id——同 id 被 `PRESET_URL` 覆盖时指纹自然区分）
+- 指纹 = SHA-256 of `v1|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}`，其中订阅 URL 规范化规则：两端 trim、scheme/host 转小写、去默认端口（http:80 / https:443）、path 为空补 `/`、query 原样保留、fragment 丢弃；`target` 为请求原样值（auto 或指定）；`config_url` 为**解析后的档位 URL**（不用 preset id——同 id 被 `PRESET_URL` 覆盖时指纹自然区分）。**v1.5.0 起升 v2**：`v2|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}|{groupsJSON}`（前缀与尾段变化，中间字段规范化规则全部沿用；groupsJSON 见「自定义分组（v1.5.0）」节）——「改组=新短链」由此成立
 - 同指纹 → 永远复用既有短码；删除后同参数重建 → 指纹相同但插入新随机码（即轮换语义）
 - 短码：8 字符 base62（大小写字母+数字），`crypto/rand`；插入的两类唯一约束失败分开处理：**指纹冲突 → 重查返回既有码**；**码碰撞 → 重新生成码再插**（上限 5 次）；单测覆盖两类
 
 ### GET /s/{code}（订阅代理端点，nginx 路由到 sidecar）
 
 1. 查表 miss → HTTP 404，body `{"error":"not_found"}`（客户端能展示，朋友侧表现为「订阅更新失败」）；查表运行时 DB 错误 → HTTP 500，body `{"error":"internal"}`（罕见运维态，不在预定义错误内）
-2. hit → 容器内 GET `${EXTENDED_BASE}/sub?target={存的target}&url={enc source_url}&config={enc config_url}`（`SUB_TOKEN` 非空时追加 `&token=…`——token 只在容器内注入，朋友的短链不带 token），响应**流式透传**给客户端（不整包缓冲；响应头只透传 `Content-Type`，长度类头由 Go 按流自动处理）
+2. hit → 容器内 GET `${EXTENDED_BASE}/sub?target={存的target}&url={enc source_url}&config={enc config_url}`（`SUB_TOKEN` 非空时追加 `&token=…`——token 只在容器内注入，朋友的短链不带 token），响应**流式透传**给客户端（不整包缓冲；响应头只透传 `Content-Type`，长度类头由 Go 按流自动处理）。**v1.5.0**：该码存有 `groups` 时，`config=` 改指派生产物（`/internal/derived/{code}` 回环 URL），详见「自定义分组（v1.5.0）」节——无 groups 短链零变化（产物与 v1.4.0 逐字节一致，回归断言）
 3. **UA 透传**：客户端 UA 原样传给 Extended（`target=auto` 识别依赖它）。UA 显式 Set（空 UA 设为空串——Go Transport 对未设置 UA 会补 `Go-http-client/1.1`，破坏识别）；已知边界：直连 /sub 的「无 UA header」与空串 header 在 Extended 侧行为可能有差异，未知客户端本就 fallback
 4. **两段式服务端代取（v1.3.3 QX；v1.3.5 改内部回环代拉；v1.4.0 扩展到 clash）**：链 target=quanx 或 clash（显式恒走），或 target=auto 且请求 UA 宽匹配 `quantumult` / clash 系词表（`clash`、`mihomo`、`shellcrash`，小写包含；路由决策，权威识别仍在引擎）时，/s/ 代理改为：**sidecar 代拉订阅源**（Go 抓取；`SUBSCRIPTION_PROXY` 非空时走代理）→ 内容注册内部端点 `/internal/sub/{ref}`（随机 ref、60s TTL、仅容器内回环可达，nginx 不路由）→ 引擎 `target=mixed` 从回环拉内容转通用节点 URI 列表 → `target=<归一后的链 target>&url=<URI|URI>` 明文节点列表转换（显式链原样；auto 链按 UA 家族归一为 quanx/clash，与 v1.3.3 auto+quantumult 第二段固定 quanx 的既有行为同构） → 输出内联明文节点（quanx：`[server_local]`；clash：`proxies` 内联数组），客户端零二次拉取。动机：① Extended 对 quanx+http 订阅默认 native server_remote（机场原始 URL 塞给客户端自拉），而「机场输出 QX 解析不了」恰是本服务目标用户场景（pref 无 quanx 开关）；② 机场 WAF 按 **TLS 指纹**拦引擎直拉（实测：busybox/libcurl 指纹 403、curl/Go 指纹 200，UA 无关，同 IP）——代拉换 Go 指纹 + 可选代理出口；③（v1.4.0）Extended 对 clash 输出 proxy-providers 形态（0 内联节点、节点列表 url=机场原始订阅、客户端自拉）——客户端网络够不到机场时节点永远 0（2026-10-26 实证：腾讯 AS45090 被机场 CF 按 ASN 封 1005；且 mihomo 自拉 provider 走宿主直连、不经自身代理链，服务端代理通道救不了它），服务端代取内联是唯一解。`SUBSCRIPTION_PROXY` 语义（v1.3.5）：sidecar 代拉走代理（引擎 pref `proxy_subscription` 的改写保留兜底）。两段各分得 `SUB_PROXY_TIMEOUT` 一半；代拉非 200 / 第一段空节点列表 → 502 `upstream_unavailable`
 5. 超时 `${SUB_PROXY_TIMEOUT}`（默认 120s，v1.3.0 起；订阅生成可能慢于 preview）；Extended 非 200 / 连接失败 / 超时 → HTTP 502，body `{"error":"upstream_unavailable"}`（两段式路径同码）
@@ -151,7 +158,7 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 ### 管理端点（GET /api/links、DELETE /api/links/{code}）
 
 - `GET /api/links` → HTTP 200 `{ "links": [ { "code": "Ab3xY9qZ", "target": "surge", "preset": "full_multimode", "sourceUrl": "https://…含凭据…", "createdAt": 1761300000 } ] }`，按 createdAt 降序；**响应即凭据库**，仅部署者自用
-- `DELETE /api/links/{code}` → 删除成功 204（幂等：码不存在也 204）；删除后该短链立即 404
+- `DELETE /api/links/{code}` → 删除成功 204（幂等：码不存在也 204）；删除后该短链立即 404。**v1.5.0**：同步删 `${DATA_DIR}/derived/{code}.ini` 派生文件（存在才删，幂等不变）
 - **鉴权**：`SUB_TOKEN` 非空时两者必须带 `?token=${SUB_TOKEN}`（与 /sub 的 Caddy 校验同值同带法），缺失/不符 → HTTP 401；`SUB_TOKEN` 为空（局域网档）→ 开放，信任边界 = 局域网，README 写明「码即授权：持有码者可拉订阅亦可删码，删码可由同参数重建恢复」
 - 公网档 Caddyfile（README 附录 A）同步修订：token 校验 scope 到 `path /sub*`，显式豁免 `/`、`/api/`、`/s/`（OH-1——原全局 matcher 会把不带 token 的短链 403）
 
@@ -183,6 +190,70 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 ### 闸门实测结论（2026-10-24 已测毕，三项全过）
 
 ① 本地路径可用但硬限 /base（上述布局依据）；volume 挂 /base 子路径实测输出与 GitHub 基线逐行一致。② 规则集全集 35 个 URL 去重 3.07 MiB（最大 1.44MB，无冲突）。③ 引擎磁盘缓存 `/base/cache/`（6h TTL，pref 默认开启；快照本地化后 config/ruleset 不再依赖，订阅源缓存走引擎内置，不进契约承诺）。完整证据：/tmp/gate-probe.txt、清单 /tmp/gate-rules/{urls.txt,MANIFEST.txt}（临时文件，缺失时从三档 .ini 重新解析）。
+
+## 自定义分组（v1.5.0）
+
+「打词即组」：用户在预览的节点名单里输入关键词（如「专线」），命中节点自动成组追加到转换产物；可选「自动选最快」开关（url-test）。设计全文与闸门证据：`docs/designs/custom-node-groups.md`（含 Gate Results 节，2026-10-27 8 例全过）。
+
+### 能力位（R1/D2=A：出树降级）
+
+- `GET /api/clients` 顶层 `"capabilities": { "customGroups": <bool> }`：`DATA_DIR` 在 /base 树内（快照本地化启用）→ `true`；出树 → `false`。出树态启动警告并入既有快照禁用警告行
+- `presets[]` 每档 `"customGroups": <bool>`：快照本地化档 `true`；豁免档（`PRESET_URL` 覆盖的 default 档）`false`——派生需要读本地 ini，豁免档没有
+- 前端入口显隐 = `capabilities.customGroups && 选中档 customGroups`；未粘贴订阅入口置灰
+- 服务端兜底：请求带非空 `groups` 且部署级或所选档任一能力位为 `false` → `groups_disabled`（预校验错，不调上游；UI 正常流程点不出，防手改请求）。**优先级：`bad_url_*` > `bad_preset` > `groups_disabled` > `bad_groups`**（preset 无效时档位未知，`groups_disabled` 判不了）
+
+### groups 请求字段与归一化（CQ-3/R3-3）
+
+```json
+{ "url": "https://…", "target": "clash", "preset": "default",
+  "groups": [ { "name": "专线", "keyword": "专线", "urlTest": false } ] }
+```
+
+- `groups` 缺省 / `null` / `[]` = 无组（存量行为，v1.4.0 逐字节回归路径）
+- 每项三字段：`name`（组名）、`keyword`（关键词，**字面量 substring 语义，非正则**）、`urlTest`（`false`=select 组、`true`=url-test 组）
+- 校验（不过 → `bad_groups`，不调上游）：`name` / `keyword` trim 后非空；长度 ≤ 32 个 Unicode 字符（rune 数）；禁反引号 `` ` `` 与控制字符（U+0000–U+001F、U+007F）；`name` 组内不重复；`groups` ≤ 10 项
+- **服务端不校验命中数**：创建期零命中由前端挡（不成组）；手改请求带零命中组照建，形态与拉取期零命中一致（见下）
+- 匹配语义两端一致：前端/预览按字面 substring 高亮计数；派生侧 `regexp.QuoteMeta` 转义后写行——闸门 4b 实证不转义会误命中（`.` 元字符匹配任意字符，「IEPL 1.0」会吃进「IEPL 1x0」）；计数等价（字面计数 == 引擎组员数）闸门例 8 断言
+- `groupsJSON`（指纹与存储用规范化序列化）：键序固定 `name`→`keyword`→`urlTest`、无空白、空组为 `[]`
+
+### probe 模式（取名两段式：探测不建链、提交才建链）
+
+- 请求加 `"probe": true`：sidecar 走两段式**第一段**（代拉订阅 → 引擎 `target=mixed` 展开为节点 URI 列表）→ 逐条解析节点名 → 返回 `nodes`；**不执行第二步 target 转换、不探测、不算指纹、不写库**（零副作用）
+- 响应：`{ "ok": true, "target": <解析回显>, "preset": <解析回显>, "errorCode": null, "message": "", "link": null, "deepLink": null, "nodes": ["香港专线", "…"] }`——`link` / `deepLink` 恒 `null`（「link 永远非空」条款本模式豁免）；`ok:false` 时 `nodes` 恒 `[]`
+- **非 probe 响应 `nodes` 恒 `[]`**（节点名唯一出口是 probe，前端单一来源）
+- 节点名解析（SC-2，按 scheme）：`vmess://` base64 JSON 的 `ps`；`ss://` / `trojan://` 的 URL-encoded fragment 解码；其余 scheme 尽力（有 fragment 用之，无则该节点缺席列表）。契约承诺覆盖 vmess/ss/trojan 三类
+- D7 预校验照旧（`bad_url_*` 先于一切）；probe 请求带 `groups` 字段忽略之；预算与起算规则沿用 v1.4.0 两段式探测口径
+- 前端时序：粘贴订阅 → 展开「自定义分组」→ probe → 打词高亮/计数（防抖 substring）→ 建组确认（零命中不确认）→ 点「转换」→ 正常 preview（带 `groups` 不带 `probe`）→ link
+
+### 幂等与指纹 v2（X-C2）
+
+- 指纹 = SHA-256 of `v2|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}|{groupsJSON}`（v1 各字段规范化规则全部沿用）
+- **改组=新短链**：同订阅同参数不同 `groups` → 不同指纹 → 新码；同参数重转 → 复用既有码
+- v1 存量指纹记录不迁移（存量码照常 hit）；升级后无 groups 参数首建换新码（v1→v2 前缀差异，一次性影响，同 v1.3.0 config 变化先例）；`links` 表增 `groups TEXT` 列（`user_version` 1→2 幂等迁移），同码冻结语义延续
+
+### GET /s/{code} 拉取期派生（R2 / X-C1 / X-C2 / X-4）
+
+hit 且该码 `groups` 非空 → 拉取时派生，流程：
+
+1. 读该码冻结档位的**当前生效快照 ini**（`{DATA_DIR}/rules/` 内运行时改写产物——豁免/出树态建链期已被能力位挡，兜底撞上 → 502 `derive_error`）
+2. 解析 ini 既有 `custom_proxy_group=` 行的全部组名（模板组名单）
+3. 逐组生成行（关键词 `regexp.QuoteMeta` 转义；行内分隔符为反引号，模板原生形态）：
+   - `urlTest:false` → ``custom_proxy_group=`{name}`select`{escaped_keyword}` ``
+   - `urlTest:true` → ``custom_proxy_group=`{name}`url-test`{escaped_keyword}`http://www.gstatic.com/generate_204`300,,50` ``（模板默认外网测速 URL、间隔 300、tolerance 50——R5 定案：测速流量穿节点，勿换国内 URL）
+4. 撞名兜底（R3；闸门证有害形态：同名追加行被引擎静默吞、用户组丢失）：组名 ∈ 模板组名单或本次已生成组名 → 后缀带圈数字逐级递增（`{name}②`、`{name}③`…），撞穿全表 → 502 `derive_error`（极罕见）
+5. 插入位（X-2 default 阶梯，闸门三档 81 个模板组逐组点名验证成立）：`[custom]` 段内既有 `custom_proxy_group=` 行块之后、`enable_rule_generator=true` 之前
+6. 写 `${DATA_DIR}/derived/{code}.ini`（按短链 code 命名；**拉取时覆盖写**——快照刷新后下次拉取自动用新模板）
+7. 引擎调用的 `config=` 指派生文件的**容器内回环 URL**（`http://127.0.0.1:{SIDECAR_PORT}/internal/derived/{code}`，sidecar serve 该文件；仅容器内回环可达、nginx 不路由，同 `/internal/sub/{ref}` 模式但无 TTL——短链存活期内可重复拉取）——闸门发现：引擎 `config=` 只认 http URL，本地路径与 `file://` 均被当 opaque URL 拒 400
+8. 两段式链（clash/quanx）第二段 `config=` 同样指派生 URL；QX 追加组闸门实测保留（`[policy]` static 行完整），**无需按 target 隐藏入口**（R4 不触发）
+
+- **派生失败**（读快照/写盘失败等）→ HTTP 502，body `{"error":"derive_error"}`，fail-closed **不回退无组输出**（R2：配置不得静默偏离用户意图）；sidecar 日志脱敏摘要；502 内容协商（v1.3.1 人话页）对 `derive_error` 同 502 家族沿用
+- **拉取期零命中**（订阅更新后关键词不再命中任何节点）：组行无条件写入派生 ini（R3-6 单测口径），引擎原生退化 → 客户端可见形态 = **组仅含 DIRECT**（闸门例 3 实证 `proxies: [DIRECT]`，组不消失不空组）；v1 不做拉取期重评
+- **无 groups 短链**：派生路径完全旁路，产物与 v1.4.0 **逐字节一致**（T6 回归断言）
+- `DELETE /api/links/{code}` 同步删 `${DATA_DIR}/derived/{code}.ini`（X-4）
+
+### 闸门依据（2026-10-27，8 例全过）
+
+default 插入位成立（fallback 未触发）/ 撞名有害（吞行）→ 后缀②启用 / QX 保留组 → R4 不触发 / 零命中 = 仅含 DIRECT → 无需显式 `[]DIRECT` 兜底 / QuoteMeta 必要性实锤（4b 对照误命中）/ `config=` 只认 http URL → 派生走回环 serve。完整证据与产物路径：`docs/designs/custom-node-groups.md`「Gate Results (2026-10-27)」节。
 
 ## GET /api/health
 
