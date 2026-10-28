@@ -193,7 +193,9 @@ func hasLine(s, want string) bool {
 // 主组接线（用户裁决 B，2026-10-28）：三档真实模板首个 custom_proxy_group= 行（主组
 // 「🚀 节点选择」）行尾追加 []组引用——尾段 .*（ACL4SSR_Online）与 []DIRECT
 // （MultiMode/AdblockPlus）两形态均行尾追加；整行 = 原主组行 + 追加段（原成员无损）
-func TestDeriveGroupsINIMainGroupWiring(t *testing.T) {
+// 全 select 组接线（用户裁决 A）：每个 select 类模板组行尾按序追加组引用、原成员
+// 无损；url-test 组行不注入（保持原样）
+func TestDeriveGroupsINISelectWiring(t *testing.T) {
 	groups := []nodeGroup{
 		{Name: "专线组", Keywords: []string{"专线"}, URLTest: false},
 		{Name: "家宽组", Keywords: []string{"家宽"}, URLTest: true},
@@ -207,29 +209,37 @@ func TestDeriveGroupsINIMainGroupWiring(t *testing.T) {
 		if err != nil {
 			t.Fatalf("读 fixture %s: %v", fx, err)
 		}
-		main := ""
-		for _, ln := range strings.Split(string(b), "\n") {
-			if strings.HasPrefix(ln, "custom_proxy_group=") {
-				main = ln
-				break
-			}
-		}
-		if !strings.HasPrefix(main, "custom_proxy_group=🚀 节点选择`") {
-			t.Fatalf("%s：首个组行非主组「🚀 节点选择」:\n%s", fx, main)
-		}
 		out, err := deriveGroupsINI(b, groups)
 		if err != nil {
 			t.Fatalf("%s: %v", fx, err)
 		}
-		want := main + "`[]专线组`[]家宽组"
-		if !hasLine(string(out), want) {
-			t.Errorf("%s：主组行应原成员无损、行尾按序追加组引用:\nwant %s", fx, want)
+		s := string(out)
+		var selLines, autoLines int
+		for _, ln := range strings.Split(string(b), "\n") {
+			if !strings.HasPrefix(ln, "custom_proxy_group=") {
+				continue
+			}
+			if isSelectCPG(ln) {
+				selLines++
+				if !hasLine(s, ln+"`[]专线组`[]家宽组") {
+					t.Errorf("%s：select 组行应原成员无损、行尾按序追加组引用:\n%s", fx, ln)
+				}
+			} else {
+				autoLines++
+				if !hasLine(s, ln) {
+					t.Errorf("%s：非 select 组行应保持原样（不注入）:\n%s", fx, ln)
+				}
+			}
 		}
+		if selLines == 0 || autoLines == 0 {
+			t.Fatalf("%s：fixture 应同时含 select 与非 select 组行（sel=%d auto=%d）", fx, selLines, autoLines)
+		}
+		t.Logf("%s：select=%d 接线、auto=%d 不注入", fx, selLines, autoLines)
 	}
 }
 
-// 主组接线撞名联动：撞名组（🚀 节点选择 → ②）追加的是后缀名；多组按请求顺序追加
-func TestDeriveGroupsINIMainGroupWiringCollision(t *testing.T) {
+// 全 select 组接线撞名联动：撞名组（🚀 节点选择 → ②）追加的是后缀名；多组按请求顺序追加
+func TestDeriveGroupsINISelectWiringCollision(t *testing.T) {
 	out, err := deriveGroupsINI(fixtureACL4SSR(t), []nodeGroup{
 		{Name: "🚀 节点选择", Keywords: []string{"专线"}, URLTest: false},
 		{Name: "家宽", Keywords: []string{"家宽"}, URLTest: false},

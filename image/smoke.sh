@@ -561,8 +561,12 @@ want = sorted(["专线HK-01", "专线SG-02", "专线JP-03", "美国 A01 专线",
 assert sorted(groups["专线组"]) == want, "专线组成员=%s want=%s" % (groups["专线组"], want)
 assert "🚀 节点选择" in groups, "无主组「🚀 节点选择」"
 assert "专线组" in groups["🚀 节点选择"], "主组未接线（B 裁决）: %s" % groups["🚀 节点选择"]
+assert "🌍 国外媒体" in groups, "无 select 组「🌍 国外媒体」"
+assert "专线组" in groups["🌍 国外媒体"], "非主组 select 组未接线（A 裁决）: %s" % groups["🌍 国外媒体"]
+assert "♻️ 自动选择" in groups, "无 url-test 组「♻️ 自动选择」"
+assert "专线组" not in groups["♻️ 自动选择"], "url-test 自动组不应被注入: %s" % groups["♻️ 自动选择"]
 '; then
-            echo "PASS 分组产物：专线组成员 == 命中节点；主组「🚀 节点选择」含专线组（B 主组接线）"
+            echo "PASS 分组产物：专线组成员 == 命中节点；select 组全接线（主组+国外媒体含专线组、url-test 组不注入）（A 裁决）"
         else
             echo "FAIL 分组产物断言（组成员/主组接线）"
             rc=1

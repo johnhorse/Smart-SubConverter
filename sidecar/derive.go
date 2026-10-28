@@ -43,6 +43,17 @@ func parseProxyGroupName(line string) (string, bool) {
 	return rest[:j], true
 }
 
+// isSelectCPG custom_proxy_group= 行是否 select 类（名`select`…）——select 组有手动
+// 选择语义才注入自定义组；url-test/fallback 等自动组不注入（用户裁决 A）
+func isSelectCPG(line string) bool {
+	name, ok := parseProxyGroupName(line)
+	if !ok {
+		return false
+	}
+	rest := strings.TrimPrefix(line[len("custom_proxy_group="):], "`")
+	return strings.HasPrefix(rest[len(name):], "`select`")
+}
+
 // deriveGroupsINI 快照 ini + groups → 派生 ini。组行插入 [custom] 段内既有
 // custom_proxy_group= 行块之后（闸门 default 位，三档 81 模板组逐组点名验证）；
 // ini 无 [custom] 段或无既有组行 → 找不到锚点即报错（fail-closed，不发明插入位）。
@@ -55,7 +66,8 @@ func deriveGroupsINI(src []byte, groups []nodeGroup) ([]byte, error) {
 	}
 	lines := strings.Split(string(src), "\n")
 	taken := map[string]bool{} // 模板组名单 ∪ 本次已生成名
-	firstCPG, lastCPG := -1, -1
+	lastCPG := -1              // 既有组行块尾（插入位锚点）
+	var selectRows []int       // select 类模板组行（全接线，用户裁决 A）
 	inCustom := false
 	for i, line := range lines {
 		t := strings.TrimSpace(line)
@@ -68,8 +80,8 @@ func deriveGroupsINI(src []byte, groups []nodeGroup) ([]byte, error) {
 		}
 		if name, ok := parseProxyGroupName(t); ok {
 			taken[name] = true
-			if firstCPG < 0 {
-				firstCPG = i
+			if isSelectCPG(t) {
+				selectRows = append(selectRows, i)
 			}
 			lastCPG = i
 		}
@@ -114,9 +126,13 @@ func deriveGroupsINI(src []byte, groups []nodeGroup) ([]byte, error) {
 			gen = append(gen, "custom_proxy_group="+name+"`select`"+escaped)
 		}
 	}
-	// 主组接线：行尾追加（兼容尾段 .* 正则与 []DIRECT 两形态）；每次派生从原始 ini
-	// 全量重建、覆盖写，幂等天然成立
-	lines[firstCPG] += wire
+	// 全 select 组接线（用户裁决 A，2026-10-28）：自定义组追加到每个 select 类模板组行尾
+	// （名`select`行——手动选择语义处处可选，如 MultiMode 的 💬 Ai平台；兼容 .* 正则与
+	// []DIRECT 尾段两形态）；url-test 等自动组行不注入；每次派生从原始 ini 全量重建、
+	// 覆盖写，幂等天然成立。极端模板无 select 组行时不接线（组仍生成，GLOBAL 模式可用）
+	for _, i := range selectRows {
+		lines[i] += wire
+	}
 	out := make([]string, 0, len(lines)+len(gen))
 	out = append(out, lines[:lastCPG+1]...)
 	out = append(out, gen...)
