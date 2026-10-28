@@ -5,19 +5,23 @@ ARG BASE_IMAGE
 ARG S6_OVERLAY_VERSION=3.2.3.2
 
 # ---------- stage 1：编译 sidecar（CGO 关闭，静态单二进制，musl/glibc 通吃） ----------
-# 架构用 uname -m 自探测：兼容 classic builder（无 TARGETARCH 注入）；
-# buildx 多架构构建时本 stage 在模拟的目标架构内执行，uname 结果与 GOARCH 一致
-FROM golang:1.23-alpine AS build-sidecar
+# buildx 交叉构建：容器保持构建机原生架构（--platform=$BUILDPLATFORM），Go 原生交叉编译
+# GOARCH=TARGETARCH——qemu 模拟目标架构容器里跑 go compile 会段错误（2026-10-28 实测）；
+# classic builder 无 TARGETARCH 注入时回退 uname 自探测（此时容器架构=目标架构）
+FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS build-sidecar
+ARG TARGETARCH
 WORKDIR /src
 COPY sidecar/go.mod sidecar/go.sum* ./
 RUN go mod download
 COPY sidecar/ ./
 RUN set -eux; \
-    case "$(uname -m)" in \
-      x86_64) GOARCH=amd64 ;; \
-      aarch64) GOARCH=arm64 ;; \
-      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
-    esac; \
+    if [ -z "${TARGETARCH}" ]; then \
+      case "$(uname -m)" in \
+        x86_64) GOARCH=amd64 ;; \
+        aarch64) GOARCH=arm64 ;; \
+        *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+      esac; \
+    else GOARCH=${TARGETARCH}; fi; \
     CGO_ENABLED=0 GOOS=linux GOARCH=${GOARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/ssc-sidecar .
 
