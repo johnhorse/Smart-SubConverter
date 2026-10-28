@@ -17,3 +17,7 @@ frontend/dist/
 
 # sidecar 二进制产物（构建走 docker，见 Makefile build-sidecar）
 sidecar/ssc-sidecar
+
+
+# claude
+.claude
