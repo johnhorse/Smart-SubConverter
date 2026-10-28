@@ -220,7 +220,7 @@ describe('App 自定义分组接线（v1.5.0）', () => {
     })
   })
 
-  it('端到端：展开 → probe → 打词「专线」→ 已命中计数 → 成组 → 转换请求带 groups → 结果页', async () => {
+  it('端到端：展开 → probe → 打词「专线」→ 已命中计数 → 成组 → 命名（默认拼接）→ 转换请求带 groups → 结果页', async () => {
     vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
     vi.mocked(fetchPreview)
       .mockResolvedValueOnce({ ...okResponse, nodes: ['香港专线 01', '日本专线 02', '美国 IEPL 1.0'] })
@@ -235,13 +235,16 @@ describe('App 自定义分组接线（v1.5.0）', () => {
     await wrapper.find('input[aria-label="分组关键词"]').setValue('专线')
     // 打词防抖 250ms（real timers，waitFor 轮询等到计数出现）
     await vi.waitFor(() => expect(wrapper.find('.match-count').text()).toBe('已命中 2'))
-    await wrapper.find('.group-confirm').trigger('click')
+    await wrapper.find('.group-confirm').trigger('click') // 成组 → 命名步（默认名=词拼接）
+    await vi.waitFor(() => expect(wrapper.find('input[aria-label="分组名称"]').exists()).toBe(true))
+    expect((wrapper.find('input[aria-label="分组名称"]').element as HTMLInputElement).value).toBe('专线')
+    await wrapper.find('.group-confirm').trigger('click') // 命名确认 → 落组
     expect(wrapper.find('.group-chip').text()).toBe('专线 ×2')
 
     await wrapper.find('button[type="submit"]').trigger('submit')
     await vi.waitFor(() => {
       expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'default', {
-        groups: [{ name: '专线', keyword: '专线', urlTest: false }],
+        groups: [{ name: '专线', keywords: ['专线'], urlTest: false }],
       })
     })
     await vi.waitFor(() => expect(wrapper.find('.result').exists()).toBe(true))
@@ -274,7 +277,9 @@ describe('App 自定义分组接线（v1.5.0）', () => {
     await vi.waitFor(() => expect(wrapper.find('input[aria-label="分组关键词"]').exists()).toBe(true))
     await wrapper.find('input[aria-label="分组关键词"]').setValue('专线')
     await vi.waitFor(() => expect(wrapper.find('.match-count').text()).toBe('已命中 1'))
-    await wrapper.find('.group-confirm').trigger('click')
+    await wrapper.find('.group-confirm').trigger('click') // 成组 → 命名步
+    await vi.waitFor(() => expect(wrapper.find('input[aria-label="分组名称"]').exists()).toBe(true))
+    await wrapper.find('.group-confirm').trigger('click') // 命名确认 → 落组
     expect(wrapper.find('.group-chip').exists()).toBe(true)
 
     // 切到不支持档：GroupPanel 整体隐藏、提示行出现
@@ -305,7 +310,9 @@ describe('App 自定义分组接线（v1.5.0）', () => {
     await vi.waitFor(() => expect(wrapper.find('input[aria-label="分组关键词"]').exists()).toBe(true))
     await wrapper.find('input[aria-label="分组关键词"]').setValue('专线')
     await vi.waitFor(() => expect(wrapper.find('.match-count').text()).toBe('已命中 1'))
-    await wrapper.find('.group-confirm').trigger('click')
+    await wrapper.find('.group-confirm').trigger('click') // 成组 → 命名步
+    await vi.waitFor(() => expect(wrapper.find('input[aria-label="分组名称"]').exists()).toBe(true))
+    await wrapper.find('.group-confirm').trigger('click') // 命名确认 → 落组
 
     await wrapper.find('.advanced-toggle').trigger('click')
     const presetChips = wrapper.findAll('[aria-label="规则模板"] .chip')
@@ -322,7 +329,7 @@ describe('App 自定义分组接线（v1.5.0）', () => {
     await wrapper.find('button[type="submit"]').trigger('submit')
     await vi.waitFor(() => {
       expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'default', {
-        groups: [{ name: '专线', keyword: '专线', urlTest: false }],
+        groups: [{ name: '专线', keywords: ['专线'], urlTest: false }],
       })
     })
   })

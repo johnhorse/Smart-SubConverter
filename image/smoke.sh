@@ -16,6 +16,7 @@
 #   第五步  自定义分组（v1.5.0，容器2 default 档快照本地化 customGroups=true 上）：
 #           probe 探测 nodes 全量回传且 link=null（不建链零副作用）→ 带 groups 提交建链 →
 #           /s/ 拉取 clash 产物断言「专线组」成员 == 命中节点、主组「🚀 节点选择」
+#           含专线组 → 多词 AND（keywords=["美国","专线"]）成员恰「美国 A01 专线」
 #           含该组（B 裁决主组接线，规则流量可达）；零命中关键词 → 组仅 [DIRECT]；
 #           出树容器（DATA_DIR 挂树外）断言 capabilities.customGroups=false（出树降级）。
 #           derive_error fail-closed 由 sidecar 单测覆盖（冒烟触发需破坏容器内快照原料，不做）
@@ -495,15 +496,15 @@ print(json.load(sys.stdin)['link'])
     # ============ 第五步：自定义分组（v1.5.0）============
     # 容器2（BASE2）default 档快照本地化（customGroups=true）——容器1 的 fixture.ini
     # 组行非反引号格式，派生无锚点，故分组断言挂容器2；fixture-groups-sub.txt =
-    # 3 个「专线」节点 + 干扰（IPLC，不含专线词）+ 普通节点
+    # 5 个「专线」节点 + 干扰（IPLC美国-04，含美国不含专线）+ 普通节点 + 日本 A01 专线（AND 反例）
     GROUPS_SUB_URL="http://host.docker.internal:${FIXTURE_PORT}/fixture-groups-sub.txt"
-    GROUP_NODES='["专线HK-01","专线SG-02","专线JP-03","IPLC美国-04","通用HK-05"]'
+    GROUP_NODES='["专线HK-01","专线SG-02","专线JP-03","IPLC美国-04","通用HK-05","美国 A01 专线","日本 A01 专线"]'
 
     # ① probe 探测（不建链零副作用）：nodes 全量回传、link/deepLink 恒 null
     #    （请求带 groups 验「probe 忽略 groups」条款）
     if curl -s -m 60 -X POST "$BASE2/api/preview" \
         -H 'Content-Type: application/json' \
-        -d "{\"url\":\"$GROUPS_SUB_URL\",\"target\":\"clash\",\"probe\":true,\"groups\":[{\"name\":\"专线组\",\"keyword\":\"专线\",\"urlTest\":false}]}" | python3 -c "
+        -d "{\"url\":\"$GROUPS_SUB_URL\",\"target\":\"clash\",\"probe\":true,\"groups\":[{\"name\":\"专线组\",\"keywords\":[\"专线\"],\"urlTest\":false}]}" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 assert d['ok'] is True, 'ok=%s code=%s msg=%s' % (d['ok'], d['errorCode'], d['message'])
@@ -520,7 +521,7 @@ assert sorted(d['nodes']) == sorted(json.loads(sys.argv[1])), 'nodes=%s' % d['no
     #    「专线组」成员 == 订阅命中节点；主组「🚀 节点选择」成员含「专线组」（B 裁决主组接线）
     GLINK=$(curl -s -m 60 -X POST "$BASE2/api/preview" \
         -H 'Content-Type: application/json' \
-        -d "{\"url\":\"$GROUPS_SUB_URL\",\"target\":\"clash\",\"groups\":[{\"name\":\"专线组\",\"keyword\":\"专线\",\"urlTest\":false}]}" | python3 -c "
+        -d "{\"url\":\"$GROUPS_SUB_URL\",\"target\":\"clash\",\"groups\":[{\"name\":\"专线组\",\"keywords\":[\"专线\"],\"urlTest\":false}]}" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 assert d['ok'] is True, 'ok=%s code=%s msg=%s' % (d['ok'], d['errorCode'], d['message'])
@@ -556,7 +557,7 @@ for line in chunk.splitlines():
             continue
         collect = False
 assert "专线组" in groups, "proxy-groups 无 专线组: %s" % list(groups)
-want = sorted(["专线HK-01", "专线SG-02", "专线JP-03"])
+want = sorted(["专线HK-01", "专线SG-02", "专线JP-03", "美国 A01 专线", "日本 A01 专线"])
 assert sorted(groups["专线组"]) == want, "专线组成员=%s want=%s" % (groups["专线组"], want)
 assert "🚀 节点选择" in groups, "无主组「🚀 节点选择」"
 assert "专线组" in groups["🚀 节点选择"], "主组未接线（B 裁决）: %s" % groups["🚀 节点选择"]
@@ -574,7 +575,7 @@ assert "专线组" in groups["🚀 节点选择"], "主组未接线（B 裁决�
     # ③ 拉取期零命中：关键词不存在 → 组仅 [DIRECT]（引擎原生退化，组不消失不空组）
     ZLINK=$(curl -s -m 60 -X POST "$BASE2/api/preview" \
         -H 'Content-Type: application/json' \
-        -d "{\"url\":\"$GROUPS_SUB_URL\",\"target\":\"clash\",\"groups\":[{\"name\":\"零命中组\",\"keyword\":\"不存在的词xyz\",\"urlTest\":false}]}" | python3 -c "
+        -d "{\"url\":\"$GROUPS_SUB_URL\",\"target\":\"clash\",\"groups\":[{\"name\":\"零命中组\",\"keywords\":[\"不存在的词xyz\"],\"urlTest\":false}]}" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 assert d['ok'] is True, 'ok=%s code=%s msg=%s' % (d['ok'], d['errorCode'], d['message'])
@@ -619,7 +620,57 @@ assert groups["零命中组"] == ["DIRECT"], "零命中组成员=%s want=[DIRECT
         rc=1
     fi
 
-    # ④ 出树能力位（T8）：DATA_DIR 挂树外 → 快照本地化整体禁用、customGroups=false
+    # ④ 多词 AND（keywords 多词语义，v1.5.0 契约）：["美国","专线"] → 「美专线」成员
+    #    恰「美国 A01 专线」——日本 A01 专线（含专线缺美国）与 IPLC美国-04（含美国缺
+    #    专线）均不进组，AND 正反两面都验
+    ALINK=$(curl -s -m 60 -X POST "$BASE2/api/preview" \
+        -H 'Content-Type: application/json' \
+        -d "{\"url\":\"$GROUPS_SUB_URL\",\"target\":\"clash\",\"groups\":[{\"name\":\"美专线\",\"keywords\":[\"美国\",\"专线\"],\"urlTest\":false}]}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['ok'] is True, 'ok=%s code=%s msg=%s' % (d['ok'], d['errorCode'], d['message'])
+print(d['link'])
+") || ALINK=""
+    if [ -n "$ALINK" ]; then
+        if curl -s -m 60 -A "$CLASH_UA" "$ALINK" | python3 -c '
+import re, sys
+Q = chr(34) + chr(39)
+text = sys.stdin.read()
+assert "proxy-groups:" in text, "输出无 proxy-groups"
+chunk = text.split("proxy-groups:", 1)[1].split("\nrules:", 1)[0]
+groups, cur, collect = {}, None, False
+for line in chunk.splitlines():
+    m = re.match(r"\s*-\s+name:\s*(.*?)\s*$", line)
+    if m:
+        cur = m.group(1).strip(Q)
+        groups[cur] = []
+        collect = False
+        continue
+    if cur is None:
+        continue
+    if re.match(r"\s*proxies:\s*$", line):
+        collect = True
+        continue
+    if collect:
+        m = re.match(r"\s+-\s+(.*?)\s*$", line)
+        if m:
+            groups[cur].append(m.group(1).strip(Q))
+            continue
+        collect = False
+assert "美专线" in groups, "proxy-groups 无 美专线: %s" % list(groups)
+assert groups["美专线"] == ["美国 A01 专线"], "美专线成员=%s want=[美国 A01 专线]（AND：日本专线/IPLC美国均应排除）" % groups["美专线"]
+'; then
+            echo "PASS 多词 AND：美专线成员恰「美国 A01 专线」（美国∧专线，缺词节点均排除）"
+        else
+            echo "FAIL 多词 AND 断言（美专线成员）"
+            rc=1
+        fi
+    else
+        echo "FAIL 多词 AND 提交未生成短链"
+        rc=1
+    fi
+
+    # ⑤ 出树能力位（T8）：DATA_DIR 挂树外 → 快照本地化整体禁用、customGroups=false
     NAME5=ssc-smoke-outtree
     OUTTREE_DIR=$(mktemp -d)
     docker rm -f "$NAME5" >/dev/null 2>&1 || true

@@ -22,10 +22,10 @@ export interface ClientsResponse {
   capabilities?: { customGroups?: boolean }
 }
 
-// v1.5.0 分组意图（groupsJSON 键序 name→keyword→urlTest 由序列化保证）
+// v1.5.0 分组意图（groupsJSON 键序 name→keywords→urlTest 由序列化保证）
 export interface NodeGroup {
   name: string
-  keyword: string
+  keywords: string[]
   urlTest: boolean
 }
 

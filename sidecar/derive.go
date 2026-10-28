@@ -95,7 +95,15 @@ func deriveGroupsINI(src []byte, groups []nodeGroup) ([]byte, error) {
 		}
 		taken[name] = true
 		wire += "`[]" + name
-		escaped := regexp.QuoteMeta(g.Keyword)
+		// 关键词位 = 前瞻串联 AND（gate2 实证写法）：词 w1..wn 各 QuoteMeta 转义后拼
+		// (?=.*w1)(?=.*w2)…(?=.*wn)；单词同款写法（gate2 例 4 与裸词等价，不按词数分支）
+		var kb strings.Builder
+		for _, w := range g.Keywords {
+			kb.WriteString("(?=.*")
+			kb.WriteString(regexp.QuoteMeta(w))
+			kb.WriteString(")")
+		}
+		escaped := kb.String()
 		// 行格式 = 闸门实证形态（与 ACL4SSR 模板原生行同构，无前导反引号）：
 		// name`select`escaped / name`url-test`escaped`url`interval,,tolerance。
 		// 实证（2026-10-28 本机引擎复测）：前导反引号形态（=`name`select`k`）组被

@@ -206,15 +206,15 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 
 ```json
 { "url": "https://…", "target": "clash", "preset": "default",
-  "groups": [ { "name": "专线", "keyword": "专线", "urlTest": false } ] }
+  "groups": [ { "name": "⭐️美国专线", "keywords": ["美国", "专线"], "urlTest": false } ] }
 ```
 
 - `groups` 缺省 / `null` / `[]` = 无组（存量行为，v1.4.0 逐字节回归路径）
-- 每项三字段：`name`（组名）、`keyword`（关键词，**字面量 substring 语义，非正则**）、`urlTest`（`false`=select 组、`true`=url-test 组）
-- 校验（不过 → `bad_groups`，不调上游）：`name` / `keyword` trim 后非空；长度 ≤ 32 个 Unicode 字符（rune 数）；禁反引号 `` ` `` 与控制字符（U+0000–U+001F、U+007F）；`name` 组内不重复；`groups` ≤ 10 项
+- 每项三字段：`name`（组名，用户自定义，确认成组时默认=关键词拼接）、`keywords`（关键词数组，**多词 AND 语义**——节点名须同时含全部词才命中；字面量 substring，非正则）、`urlTest`（`false`=select 组、`true`=url-test 组）
+- 校验（不过 → `bad_groups`，不调上游）：`name` / 每个 keyword trim 后非空；长度各 ≤ 32 个 Unicode 字符（rune 数）；禁反引号 `` ` `` 与控制字符（U+0000–U+001F、U+007F）；`keywords` 1..5 个词；`name` 组内不重复；`groups` ≤ 10 项
 - **服务端不校验命中数**：创建期零命中由前端挡（不成组）；手改请求带零命中组照建，形态与拉取期零命中一致（见下）
-- 匹配语义两端一致：前端/预览按字面 substring 高亮计数；派生侧 `regexp.QuoteMeta` 转义后写行——闸门 4b 实证不转义会误命中（`.` 元字符匹配任意字符，「IEPL 1.0」会吃进「IEPL 1x0」）；计数等价（字面计数 == 引擎组员数）闸门例 8 断言
-- `groupsJSON`（指纹与存储用规范化序列化）：键序固定 `name`→`keyword`→`urlTest`、无空白、空组为 `[]`
+- 匹配语义两端一致：前端/预览按**全部词 AND 的字面 substring**高亮计数；派生侧每个词 `regexp.QuoteMeta` 转义后拼成前瞻正则 `(?=.*w1)(?=.*w2)…(?=.*wn)`（单词同款写法，gate2 例 4 实证与裸词等价）——多词 AND 的转义误命中防护同 gate1（例 2：`IEPL 1\.0` 转义点不匹配「IEPL专线」）；计数等价（前端 AND 计数 == 引擎组员数）gate2 例 1/2 断言
+- `groupsJSON`（指纹与存储用规范化序列化）：键序固定 `name`→`keywords`→`urlTest`、无空白、空组为 `[]`
 
 ### probe 模式（取名两段式：探测不建链、提交才建链）
 
@@ -237,9 +237,9 @@ hit 且该码 `groups` 非空 → 拉取时派生，流程：
 
 1. 读该码冻结档位的**当前生效快照 ini**（`{DATA_DIR}/rules/` 内运行时改写产物——豁免/出树态建链期已被能力位挡，兜底撞上 → 502 `derive_error`）
 2. 解析 ini 既有 `custom_proxy_group=` 行的全部组名（模板组名单）
-3. 逐组生成行（关键词 `regexp.QuoteMeta` 转义；行内分隔符为反引号，模板原生形态）：
-   - `urlTest:false` → ``custom_proxy_group={name}`select`{escaped_keyword}``
-   - `urlTest:true` → ``custom_proxy_group={name}`url-test`{escaped_keyword}`http://www.gstatic.com/generate_204`300,,50``（模板默认外网测速 URL、间隔 300、tolerance 50——R5 定案：测速流量穿节点，勿换国内 URL；行首 `=` 后直接组名、无前导反引号——模板原生形态，前导反引号形态引擎实测被静默吞）
+3. 逐组生成行（每个关键词 `regexp.QuoteMeta` 转义后拼**前瞻 AND 正则**：`(?=.*w1)(?=.*w2)…(?=.*wn)`，单词同款写法——gate2 例 4 实证与裸词等价；行内分隔符为反引号，模板原生形态）：
+   - `urlTest:false` → ``custom_proxy_group={name}`select`{前瞻正则}``
+   - `urlTest:true` → ``custom_proxy_group={name}`url-test`{前瞻正则}`http://www.gstatic.com/generate_204`300,,50``（模板默认外网测速 URL、间隔 300、tolerance 50——R5 定案：测速流量穿节点，勿换国内 URL；行首 `=` 后直接组名、无前导反引号——模板原生形态，前导反引号形态引擎实测被静默吞）
 4. 撞名兜底（R3；闸门证有害形态：同名追加行被引擎静默吞、用户组丢失）：组名 ∈ 模板组名单或本次已生成组名 → 后缀带圈数字逐级递增（`{name}②`、`{name}③`…），撞穿全表 → 502 `derive_error`（极罕见）
 5. 插入位（X-2 default 阶梯，闸门三档 81 个模板组逐组点名验证成立）：`[custom]` 段内既有 `custom_proxy_group=` 行块之后、`enable_rule_generator=true` 之前
 6. 主组接线（用户裁决 B，2026-10-28）：追加组行的同时，`[custom]` 段首个 `custom_proxy_group=` 行（主组，三档模板均为「🚀 节点选择」）行尾为每个自定义组追加 `` `[]{最终组名} `` 引用段（反引号分隔、[]组引用——模板原生形态，主组成员本就含 `[]♻️ 自动选择` 等；追加顺序 = groups 顺序；最终组名 = 撞名后缀解析后的名字，与生成的组行一致；兼容主组行尾 `.*` 正则段与 `[]DIRECT` 两形态）——**规则流量可达**：否则自定义组在规则模式下不通流量、仅摆设；接线后用户在客户端主组（如「🚀 节点选择」）里选中自定义组即让规则流量走该组命中节点
@@ -252,9 +252,11 @@ hit 且该码 `groups` 非空 → 拉取时派生，流程：
 - **无 groups 短链**：派生路径完全旁路，产物与 v1.4.0 **逐字节一致**（T6 回归断言）
 - `DELETE /api/links/{code}` 同步删 `${DATA_DIR}/derived/{code}.ini`（X-4）
 
-### 闸门依据（2026-10-27，8 例全过）
+### 闸门依据（gate1 2026-10-27 8 例全过；gate2 2026-10-28 多词 AND 5 例全过）
 
-default 插入位成立（fallback 未触发）/ 撞名有害（吞行）→ 后缀②启用 / QX 保留组 → R4 不触发 / 零命中 = 仅含 DIRECT → 无需显式 `[]DIRECT` 兜底 / QuoteMeta 必要性实锤（4b 对照误命中）/ `config=` 只认 http URL → 派生走回环 serve。完整证据与产物路径：`docs/designs/custom-node-groups.md`「Gate Results (2026-10-27)」节。主组接线（流程第 6 步）为 B 裁决后补——闸门 8 例未覆盖该行为，由派生单测与 S5 冒烟断言覆盖。
+gate1：default 插入位成立（fallback 未触发）/ 撞名有害（吞行）→ 后缀②启用 / QX 保留组 → R4 不触发 / 零命中 = 仅含 DIRECT → 无需显式 `[]DIRECT` 兜底 / QuoteMeta 必要性实锤（4b 对照误命中）/ `config=` 只认 http URL → 派生走回环 serve。完整证据与产物路径：`docs/designs/custom-node-groups.md`「Gate Results (2026-10-27)」节。主组接线（流程第 6 步）为 B 裁决后补——闸门 8 例未覆盖该行为，由派生单测与 S5 冒烟断言覆盖。
+
+gate2（多关键词 AND，前瞻写法）：引擎完整支持前瞻正则（5/5 PASS 零报错零吞组）——AND 主用例成员精确（不含单词命中者）/ QuoteMeta 组合转义点无误命中 / 多词零命中=仅 DIRECT / 单词前瞻与裸词等价（实现统一前瞻写法）/ QX 路径同样生效。证据：`/tmp/gate-custom-groups/gate2-report.md` 与 out/g2-* 产物。
 
 ## GET /api/health
 

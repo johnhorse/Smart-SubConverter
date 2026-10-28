@@ -39,7 +39,7 @@ func newCode() (string, error) {
 }
 
 // shortFingerprint 短链指纹 = SHA-256 of "v2|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}|{groupsJSON}"。
-// v1.5.0 升 v2：追加 groupsJSON（规范化序列化，键序 name→keyword→urlTest、无空白、
+// v1.5.0 升 v2：追加 groupsJSON（规范化序列化，键序 name→keywords→urlTest、无空白、
 // 空组 "[]"；groupsJSON 空串等价 "[]"）。v1→v2 前缀差异使存量指纹不再命中（契约
 // 「幂等与指纹 v2」：无 groups 首建换新码属预期一次性影响，v1 存量码照常 hit）。
 // 订阅 URL 规范化（契约级钉死，OH-8）：两端 trim、scheme/host 小写、去默认端口

@@ -33,8 +33,10 @@ export const PRECHECK_ERROR_CODES = new Set([
   'groups_disabled',
 ])
 
-// v1.5.0 分组上限与字段校验（对齐契约 bad_groups 规则：trim 非空 / ≤32 rune / 禁反引号与控制字符）
+// v1.5.0 分组上限与字段校验（对齐契约 bad_groups 规则：trim 非空 / ≤32 rune / 禁反引号与控制字符；
+// 组名与每个关键词共用同一条规则）
 export const GROUPS_MAX = 10
+export const KEYWORDS_MAX = 5
 const GROUP_BAD_CHARS = /[\u0000-\u001F\u007F`]/
 
 export function groupFieldInvalid(value: string): boolean {

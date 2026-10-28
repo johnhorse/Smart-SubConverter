@@ -332,7 +332,7 @@ describe('useConverter 自定义分组（v1.5.0）', () => {
     const conv = setup()
     await conv.loadClients()
     conv.inputUrl.value = 'https://example.com/sub'
-    const intent = [{ name: '专线', keyword: '专线', urlTest: false }]
+    const intent = [{ name: '专线', keywords: ['专线'], urlTest: false }]
 
     vi.mocked(fetchPreview).mockResolvedValueOnce(okResponse)
     await conv.submit()
@@ -359,7 +359,7 @@ describe('useConverter 自定义分组（v1.5.0）', () => {
     const conv = setup()
     await conv.loadClients()
     conv.inputUrl.value = 'https://example.com/sub'
-    conv.groups.value = [{ name: '专线', keyword: '专线', urlTest: false }]
+    conv.groups.value = [{ name: '专线', keywords: ['专线'], urlTest: false }]
     vi.mocked(fetchPreview).mockResolvedValueOnce({ ...okResponse, ok: false, errorCode: code })
 
     await conv.submit()
@@ -403,7 +403,7 @@ describe('useConverter 自定义分组（v1.5.0）', () => {
     conv.inputUrl.value = 'https://example.com/sub'
     vi.mocked(fetchPreview).mockResolvedValueOnce({ ...okResponse, nodes: ['N1'] })
     conv.groupsOpen.value = true
-    const intent = [{ name: '专线', keyword: '专线', urlTest: false }]
+    const intent = [{ name: '专线', keywords: ['专线'], urlTest: false }]
     conv.groups.value = intent
     await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
 
@@ -428,7 +428,7 @@ describe('useConverter 自定义分组（v1.5.0）', () => {
     const conv = setup()
     await conv.loadClients()
     conv.inputUrl.value = 'https://example.com/sub'
-    const intent = [{ name: '专线', keyword: '专线', urlTest: false }]
+    const intent = [{ name: '专线', keywords: ['专线'], urlTest: false }]
     conv.groups.value = intent
 
     conv.selectPreset('full_multimode') // 能力位变 false，组残留

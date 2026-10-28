@@ -565,6 +565,80 @@ body {
   color: var(--ink-faint);
 }
 
+/* 打词步骤：词 chips + 输入框 + 加词按钮 一行内 wrap */
+.group-kw-fields {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  padding: 3px 6px 3px 10px;
+}
+
+.kw-chip-x {
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.kw-chip-x:hover {
+  color: var(--danger);
+}
+
+.group-add-kw {
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 8px 12px;
+  cursor: pointer;
+  flex: none;
+}
+
+.group-add-kw:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.group-add-kw:disabled {
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+.group-cancel {
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  font: inherit;
+  font-size: 13px;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+.group-cancel:hover {
+  color: var(--ink);
+}
+
 .match-count {
   font-size: 13px;
   color: var(--accent-ink);

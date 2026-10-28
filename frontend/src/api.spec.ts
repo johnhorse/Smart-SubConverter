@@ -128,10 +128,10 @@ describe('fetchPreview options（v1.5.0 probe / groups 请求形状）', () => {
     )
   })
 
-  it('options.groups 非空 → body 带 groups（键序 name→keyword→urlTest，与 groupsJSON 规范一致）', async () => {
+  it('options.groups 非空 → body 带 groups（键序 name→keywords→urlTest，与 groupsJSON 规范一致）', async () => {
     stubOk({ ok: true, target: 'clash', preset: null, errorCode: null, message: '', link: 'http://x/s/Ab3xY9qZ', deepLink: null })
     await fetchPreview('https://example.com/sub', 'auto', 'default', {
-      groups: [{ name: '专线', keyword: '专线', urlTest: false }],
+      groups: [{ name: '专线', keywords: ['专线'], urlTest: false }],
     })
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       '/api/preview',
@@ -140,7 +140,7 @@ describe('fetchPreview options（v1.5.0 probe / groups 请求形状）', () => {
           url: 'https://example.com/sub',
           target: 'auto',
           preset: 'default',
-          groups: [{ name: '专线', keyword: '专线', urlTest: false }],
+          groups: [{ name: '专线', keywords: ['专线'], urlTest: false }],
         }),
       }),
     )

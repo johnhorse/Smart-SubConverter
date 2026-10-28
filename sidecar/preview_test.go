@@ -961,7 +961,7 @@ func TestPreviewProbeMode(t *testing.T) {
 
 	for _, body := range []string{
 		`{"url":"` + subURL + `","probe":true}`,
-		`{"url":"` + subURL + `","probe":true,"groups":[{"name":"专线","keyword":"专线","urlTest":false}]}`,
+		`{"url":"` + subURL + `","probe":true,"groups":[{"name":"专线","keywords":["专线"],"urlTest":false}]}`,
 	} {
 		resp := postProbe(t, s, body)
 		if !resp.OK || resp.ErrorCode != nil || resp.Message != "" {
@@ -1051,20 +1051,22 @@ func TestPreviewBadGroupsMatrix(t *testing.T) {
 	rune33 := strings.Repeat("专", 33)
 	var many []string
 	for i := 0; i < 11; i++ {
-		many = append(many, fmt.Sprintf(`{"name":"组%d","keyword":"k%d","urlTest":false}`, i, i))
+		many = append(many, fmt.Sprintf(`{"name":"组%d","keywords":["k%d"],"urlTest":false}`, i, i))
 	}
 	bad := []string{
-		`[{"name":"","keyword":"k"}]`,
-		`[{"name":"   ","keyword":"k"}]`,
-		`[{"name":"n","keyword":""}]`,
-		`[{"name":"n","keyword":"  "}]`,
-		`[{"name":"` + rune33 + `","keyword":"k"}]`,
-		`[{"name":"n","keyword":"` + rune33 + `"}]`,
-		`[{"name":"n` + "`" + `","keyword":"k"}]`,
-		`[{"name":"n","keyword":"k` + "`" + `"}]`,
-		`[{"name":"n\u0000","keyword":"k"}]`,
-		`[{"name":"n","keyword":"k\u007f"}]`,
-		`[{"name":"a","keyword":"k"},{"name":"a","keyword":"k2"}]`,
+		`[{"name":"","keywords":["k"]}]`,
+		`[{"name":"   ","keywords":["k"]}]`,
+		`[{"name":"n","keywords":[""]}]`,
+		`[{"name":"n","keywords":["  "]}]`,
+		`[{"name":"` + rune33 + `","keywords":["k"]}]`,
+		`[{"name":"n","keywords":["` + rune33 + `"]}]`,
+		`[{"name":"n` + "`" + `","keywords":["k"]}]`,
+		`[{"name":"n","keywords":["k` + "`" + `"]}]`,
+		`[{"name":"n\u0000","keywords":["k"]}]`,
+		`[{"name":"n","keywords":["k\u007f"]}]`,
+		`[{"name":"n","keywords":[]}]`,
+		`[{"name":"n","keywords":["a","b","c","d","e","f"]}]`,
+		`[{"name":"a","keywords":["k"]},{"name":"a","keywords":["k2"]}]`,
 		"[" + strings.Join(many, ",") + "]",
 	}
 	for _, g := range bad {
@@ -1096,11 +1098,11 @@ func TestPreviewGroupsValidBoundaries(t *testing.T) {
 
 	var ten []string
 	for i := 0; i < 10; i++ {
-		ten = append(ten, fmt.Sprintf(`{"name":"组%d","keyword":"词%d","urlTest":false}`, i, i))
+		ten = append(ten, fmt.Sprintf(`{"name":"组%d","keywords":["词%d"],"urlTest":false}`, i, i))
 	}
 	name32 := strings.Repeat("组", 32)
 	bodies := []string{
-		`{"url":"` + subURL + `","groups":[{"name":"` + name32 + `","keyword":"` + name32 + `","urlTest":true}]}`,
+		`{"url":"` + subURL + `","groups":[{"name":"` + name32 + `","keywords":["` + name32 + `"],"urlTest":true}]}`,
 		`{"url":"` + subURL + `","groups":[` + strings.Join(ten, ",") + `]}`,
 	}
 	for _, body := range bodies {
@@ -1110,17 +1112,37 @@ func TestPreviewGroupsValidBoundaries(t *testing.T) {
 		}
 	}
 	// trim 归一化：请求带空格 → 存库为 trim 后的规范化 JSON
-	resp, _ := postPreview(t, s, `{"url":"`+subURL+`","groups":[{"name":"  专线  ","keyword":" 专线 ","urlTest":false}]}`, "h:1", "")
+	resp, _ := postPreview(t, s, `{"url":"`+subURL+`","groups":[{"name":"  专线  ","keywords":[" 专线 "],"urlTest":false}]}`, "h:1", "")
 	if !resp.OK {
 		t.Fatalf("trim 归一化响应 = %+v", resp)
 	}
-	if lnk := storedFor(t, s, resp.Link); lnk.Groups != `[{"name":"专线","keyword":"专线","urlTest":false}]` {
+	if lnk := storedFor(t, s, resp.Link); lnk.Groups != `[{"name":"专线","keywords":["专线"],"urlTest":false}]` {
 		t.Errorf("存库 groups = %s，应为 trim 后规范化 JSON", lnk.Groups)
 	}
 	// 幂等：同 groups（未 trim 形态重发）→ 同码
-	resp2, _ := postPreview(t, s, `{"url":"`+subURL+`","groups":[{"name":"专线","keyword":"专线","urlTest":false}]}`, "h:1", "")
+	resp2, _ := postPreview(t, s, `{"url":"`+subURL+`","groups":[{"name":"专线","keywords":["专线"],"urlTest":false}]}`, "h:1", "")
 	if resp2.Link != resp.Link {
 		t.Errorf("同参数同 groups 应复用同码：%s vs %s", resp.Link, resp2.Link)
+	}
+}
+
+// 旧格式容错（试运行期存量）：请求带旧 keyword 单字段 → 当单词组建链，
+// 存库 groups 为新格式 keywords（写入侧只写新格式）
+func TestPreviewGroupsLegacyKeyword(t *testing.T) {
+	subURL, extURL, _ := twoStageEnv(t, "clash", "proxies:\n  - {name: node-a}\n")
+	vcfg := testConfig(t, extURL)
+	vcfg.presetURL = defaultPresetURL
+	s := mustServer(t, vcfg)
+	enableSnap(t, s)
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+	resp, _ := postPreview(t, s, `{"url":"`+subURL+`","groups":[{"name":"专线","keyword":"专线","urlTest":false}]}`, "h:1", "")
+	if !resp.OK || resp.ErrorCode != nil {
+		t.Fatalf("旧格式 keyword 应容错建链 = %+v", resp)
+	}
+	if lnk := storedFor(t, s, resp.Link); lnk.Groups != `[{"name":"专线","keywords":["专线"],"urlTest":false}]` {
+		t.Errorf("存库 groups = %s，应规范化为新格式 keywords", lnk.Groups)
 	}
 }
 
@@ -1133,7 +1155,7 @@ func TestPreviewGroupsDisabled(t *testing.T) {
 		_, _ = w.Write([]byte("[General]\nx"))
 	}))
 	defer ext.Close()
-	groupsBody := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+	groupsBody := `[{"name":"专线","keywords":["专线"],"urlTest":false}]`
 
 	// 部署级：出树（testConfig tmp 天然 snap==nil）
 	s := mustServer(t, testConfig(t, ext.URL))

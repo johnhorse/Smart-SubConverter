@@ -319,9 +319,9 @@ func TestShortFingerprintV2Groups(t *testing.T) {
 	if shortFingerprint(base, "clash", "https://c.example/i", "") != shortFingerprint(base, "clash", "https://c.example/i", "[]") {
 		t.Error("空串与 [] 应等价（空组规范化）")
 	}
-	g1 := `[{"name":"专线","keyword":"专线","urlTest":false}]`
-	g2 := `[{"name":"专线","keyword":"专线","urlTest":true}]`
-	g3 := `[{"name":"家宽","keyword":"家宽","urlTest":false}]`
+	g1 := `[{"name":"专线","keywords":["专线"],"urlTest":false}]`
+	g2 := `[{"name":"专线","keywords":["专线"],"urlTest":true}]`
+	g3 := `[{"name":"家宽","keywords":["家宽"],"urlTest":false}]`
 	fp0 := shortFingerprint(base, "clash", "https://c.example/i", "")
 	fp1 := shortFingerprint(base, "clash", "https://c.example/i", g1)
 	if fp1 == fp0 {
@@ -342,8 +342,8 @@ func TestShortFingerprintV2Groups(t *testing.T) {
 func TestGetOrCreateGroupsRoundtrip(t *testing.T) {
 	st := openTestStore(t)
 	sub, cfgURL := "https://sub.example.com/l", "https://c.example/i"
-	g1 := `[{"name":"专线","keyword":"专线","urlTest":false}]`
-	g2 := `[{"name":"家宽","keyword":"家宽","urlTest":true}]`
+	g1 := `[{"name":"专线","keywords":["专线"],"urlTest":false}]`
+	g2 := `[{"name":"家宽","keywords":["家宽"],"urlTest":true}]`
 
 	c0, err := st.getOrCreateLink(sub, "clash", "default", cfgURL, "")
 	if err != nil {

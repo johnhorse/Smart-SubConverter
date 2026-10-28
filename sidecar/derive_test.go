@@ -25,16 +25,16 @@ func fixtureACL4SSR(t *testing.T) []byte {
 func TestDeriveGroupsINIRealFixture(t *testing.T) {
 	src := fixtureACL4SSR(t)
 	groups := []nodeGroup{
-		{Name: "专线", Keyword: "专线", URLTest: false},
-		{Name: "家宽", Keyword: "家宽", URLTest: true},
+		{Name: "专线", Keywords: []string{"专线"}, URLTest: false},
+		{Name: "家宽", Keywords: []string{"家宽"}, URLTest: true},
 	}
 	out, err := deriveGroupsINI(src, groups)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(out)
-	wantSelect := "custom_proxy_group=专线`select`专线"
-	wantURLTest := "custom_proxy_group=家宽`url-test`家宽`http://www.gstatic.com/generate_204`300,,50"
+	wantSelect := "custom_proxy_group=专线`select`(?=.*专线)"
+	wantURLTest := "custom_proxy_group=家宽`url-test`(?=.*家宽)`http://www.gstatic.com/generate_204`300,,50"
 	if !strings.Contains(s, wantSelect) {
 		t.Errorf("select 行缺失或格式错:\n%s", wantSelect)
 	}
@@ -72,22 +72,22 @@ func TestDeriveGroupsINIRealFixture(t *testing.T) {
 
 // QuoteMeta：元字符关键词转义（闸门 4b 实证不转义会误命中 IEPL 1x0）
 func TestDeriveGroupsINIQuoteMeta(t *testing.T) {
-	out, err := deriveGroupsINI(fixtureACL4SSR(t), []nodeGroup{{Name: "IEPL", Keyword: "IEPL 1.0", URLTest: false}})
+	out, err := deriveGroupsINI(fixtureACL4SSR(t), []nodeGroup{{Name: "IEPL", Keywords: []string{"IEPL 1.0"}, URLTest: false}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "custom_proxy_group=IEPL`select`IEPL 1\\.0") {
+	if !strings.Contains(string(out), "custom_proxy_group=IEPL`select`(?=.*IEPL 1\\.0)") {
 		t.Errorf("QuoteMeta 转义缺失:\n%s", string(out))
 	}
 }
 
 // 撞名：模板组名单 → 后缀带圈数字单级；模板已占 ② → 多级递增；同批已生成名同样回避
 func TestDeriveGroupsINICollision(t *testing.T) {
-	out, err := deriveGroupsINI(fixtureACL4SSR(t), []nodeGroup{{Name: "🚀 节点选择", Keyword: "专线", URLTest: false}})
+	out, err := deriveGroupsINI(fixtureACL4SSR(t), []nodeGroup{{Name: "🚀 节点选择", Keywords: []string{"专线"}, URLTest: false}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "custom_proxy_group=🚀 节点选择②`select`专线") {
+	if !strings.Contains(string(out), "custom_proxy_group=🚀 节点选择②`select`(?=.*专线)") {
 		t.Errorf("撞名应后缀②:\n%s", string(out))
 	}
 
@@ -97,24 +97,24 @@ func TestDeriveGroupsINICollision(t *testing.T) {
 		"custom_proxy_group=`节点选择②`select`[]DIRECT`\n" +
 		"custom_proxy_group=`节点选择③`select`[]DIRECT`\n" +
 		"enable_rule_generator=true\n"
-	out, err = deriveGroupsINI([]byte(tpl), []nodeGroup{{Name: "节点选择", Keyword: "k", URLTest: false}})
+	out, err = deriveGroupsINI([]byte(tpl), []nodeGroup{{Name: "节点选择", Keywords: []string{"k"}, URLTest: false}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "custom_proxy_group=节点选择④`select`k") {
+	if !strings.Contains(string(out), "custom_proxy_group=节点选择④`select`(?=.*k)") {
 		t.Errorf("②③已占应取④:\n%s", string(out))
 	}
 
 	// 同批已生成名回避：组 [A, A]（校验层禁重名，但派生层自守）→ 第二个取 A②
 	tpl2 := "[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\nenable_rule_generator=true\n"
 	out, err = deriveGroupsINI([]byte(tpl2), []nodeGroup{
-		{Name: "A", Keyword: "k1", URLTest: false},
-		{Name: "A", Keyword: "k2", URLTest: false},
+		{Name: "A", Keywords: []string{"k1"}, URLTest: false},
+		{Name: "A", Keywords: []string{"k2"}, URLTest: false},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "custom_proxy_group=A`select`k1") || !strings.Contains(string(out), "custom_proxy_group=A②`select`k2") {
+	if !strings.Contains(string(out), "custom_proxy_group=A`select`(?=.*k1)") || !strings.Contains(string(out), "custom_proxy_group=A②`select`(?=.*k2)") {
 		t.Errorf("同批撞名应后缀②:\n%s", string(out))
 	}
 }
@@ -128,7 +128,7 @@ func TestDeriveGroupsINICollisionExhausted(t *testing.T) {
 		b.WriteString("custom_proxy_group=`X" + string(r) + "`select`[]DIRECT`\n")
 	}
 	b.WriteString("enable_rule_generator=true\n")
-	if _, err := deriveGroupsINI([]byte(b.String()), []nodeGroup{{Name: "X", Keyword: "k", URLTest: false}}); err == nil {
+	if _, err := deriveGroupsINI([]byte(b.String()), []nodeGroup{{Name: "X", Keywords: []string{"k"}, URLTest: false}}); err == nil {
 		t.Error("撞穿全表应报错")
 	}
 }
@@ -141,8 +141,8 @@ func TestDeriveGroupsININoAnchor(t *testing.T) {
 		src    string
 		groups []nodeGroup
 	}{
-		{"无 [custom] 段", "; no sections here\nruleset=whatever\n", []nodeGroup{{Name: "A", Keyword: "k"}}},
-		{"有段无组行", "[custom]\nenable_rule_generator=true\n", []nodeGroup{{Name: "A", Keyword: "k"}}},
+		{"无 [custom] 段", "; no sections here\nruleset=whatever\n", []nodeGroup{{Name: "A", Keywords: []string{"k"}}}},
+		{"有段无组行", "[custom]\nenable_rule_generator=true\n", []nodeGroup{{Name: "A", Keywords: []string{"k"}}}},
 		{"空 groups", "[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\n", nil},
 	}
 	for _, c := range cases {
@@ -156,9 +156,9 @@ func TestDeriveGroupsININoAnchor(t *testing.T) {
 func TestDeriveGroupsINIMultiAndZeroHit(t *testing.T) {
 	tpl := "[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\nenable_rule_generator=true\n"
 	groups := []nodeGroup{
-		{Name: "一", Keyword: "不存在的词xyz", URLTest: false},
-		{Name: "二", Keyword: "二", URLTest: true},
-		{Name: "三", Keyword: "三", URLTest: false},
+		{Name: "一", Keywords: []string{"不存在的词xyz"}, URLTest: false},
+		{Name: "二", Keywords: []string{"二"}, URLTest: true},
+		{Name: "三", Keywords: []string{"三"}, URLTest: false},
 	}
 	out, err := deriveGroupsINI([]byte(tpl), groups)
 	if err != nil {
@@ -166,9 +166,9 @@ func TestDeriveGroupsINIMultiAndZeroHit(t *testing.T) {
 	}
 	s := string(out)
 	for _, want := range []string{
-		"custom_proxy_group=一`select`不存在的词xyz",
-		"custom_proxy_group=二`url-test`二`http://www.gstatic.com/generate_204`300,,50",
-		"custom_proxy_group=三`select`三",
+		"custom_proxy_group=一`select`(?=.*不存在的词xyz)",
+		"custom_proxy_group=二`url-test`(?=.*二)`http://www.gstatic.com/generate_204`300,,50",
+		"custom_proxy_group=三`select`(?=.*三)",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("缺行:\n%s", want)
@@ -195,8 +195,8 @@ func hasLine(s, want string) bool {
 // （MultiMode/AdblockPlus）两形态均行尾追加；整行 = 原主组行 + 追加段（原成员无损）
 func TestDeriveGroupsINIMainGroupWiring(t *testing.T) {
 	groups := []nodeGroup{
-		{Name: "专线组", Keyword: "专线", URLTest: false},
-		{Name: "家宽组", Keyword: "家宽", URLTest: true},
+		{Name: "专线组", Keywords: []string{"专线"}, URLTest: false},
+		{Name: "家宽组", Keywords: []string{"家宽"}, URLTest: true},
 	}
 	for _, fx := range []string{
 		"ACL4SSR_Online.ini",
@@ -231,8 +231,8 @@ func TestDeriveGroupsINIMainGroupWiring(t *testing.T) {
 // 主组接线撞名联动：撞名组（🚀 节点选择 → ②）追加的是后缀名；多组按请求顺序追加
 func TestDeriveGroupsINIMainGroupWiringCollision(t *testing.T) {
 	out, err := deriveGroupsINI(fixtureACL4SSR(t), []nodeGroup{
-		{Name: "🚀 节点选择", Keyword: "专线", URLTest: false},
-		{Name: "家宽", Keyword: "家宽", URLTest: false},
+		{Name: "🚀 节点选择", Keywords: []string{"专线"}, URLTest: false},
+		{Name: "家宽", Keywords: []string{"家宽"}, URLTest: false},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +273,7 @@ func TestBootstrapPreRewrites(t *testing.T) {
 // 原始 ini + 规则集）→ 当场补产物派生成功；原料不齐 → 仍 derive_error；
 // 非内置档 URL（豁免档自定义远端）→ 维持 derive_error
 func TestPrepareDerivedConfigBootstrapsRewritten(t *testing.T) {
-	groupsJSON := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+	groupsJSON := `[{"name":"专线","keywords":["专线"],"urlTest":false}]`
 	newSV := func() (*server, *snapshotManager) {
 		cfg := testConfig(t, "http://unused")
 		cfg.presetURL = defaultPresetURL // default 档本地化（不豁免）
@@ -301,7 +301,7 @@ func TestPrepareDerivedConfigBootstrapsRewritten(t *testing.T) {
 		t.Error("兜底补生成后改写产物应存在")
 	}
 	derived := readTB(t, filepath.Join(s.cfg.dataDir, "derived", "code1.ini"))
-	if !strings.Contains(derived, "custom_proxy_group=专线`select`专线") {
+	if !strings.Contains(derived, "custom_proxy_group=专线`select`(?=.*专线)") {
 		t.Errorf("派生文件缺组行:\n%s", derived)
 	}
 
@@ -317,5 +317,75 @@ func TestPrepareDerivedConfigBootstrapsRewritten(t *testing.T) {
 	s3, _ := newSV()
 	if _, err := s3.prepareDerivedConfig("code3", "https://deploy.example.com/custom.ini", groupsJSON); err == nil {
 		t.Error("非内置档 URL 应维持 derive_error")
+	}
+}
+
+// 多词 AND 前瞻写法（gate2）：词各 QuoteMeta 后拼 (?=.*w1)(?=.*w2)…；单词同款不分支
+// （与既有断言形态一致）；5 词上限组合；元字符词转义点不丢
+func TestDeriveGroupsINIMultiKeywords(t *testing.T) {
+	tpl := "[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\nenable_rule_generator=true\n"
+	groups := []nodeGroup{
+		{Name: "美专线", Keywords: []string{"美国", "专线"}, URLTest: false},
+		{Name: "五词上限", Keywords: []string{"a", "b", "c", "d", "e"}, URLTest: false},
+		{Name: "IEPL", Keywords: []string{"专线", "IEPL 1.0"}, URLTest: false},
+	}
+	out, err := deriveGroupsINI([]byte(tpl), groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{
+		"custom_proxy_group=美专线`select`(?=.*美国)(?=.*专线)",
+		"custom_proxy_group=五词上限`select`(?=.*a)(?=.*b)(?=.*c)(?=.*d)(?=.*e)",
+		"custom_proxy_group=IEPL`select`(?=.*专线)(?=.*IEPL 1\\.0)",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("缺行:\n%s", want)
+		}
+	}
+}
+
+// 词数校验边界：0 词拒、6 词拒、恰 5 词过
+func TestValidateGroupsKeywordCount(t *testing.T) {
+	five := []string{"a", "b", "c", "d", "e"}
+	if err := validateGroups([]nodeGroup{{Name: "n", Keywords: five}}); err != nil {
+		t.Errorf("恰 5 词应过: %v", err)
+	}
+	if err := validateGroups([]nodeGroup{{Name: "n", Keywords: nil}}); err == nil {
+		t.Error("0 词应拒")
+	}
+	if err := validateGroups([]nodeGroup{{Name: "n", Keywords: append([]string{"f"}, five...)}}); err == nil {
+		t.Error("6 词应拒")
+	}
+}
+
+// 旧格式容错（试运行期存量）：keyword 单字段且无 keywords → 当单词组；库存旧 JSON
+// 解析与请求解码共用 nodeGroup.UnmarshalJSON
+func TestParseGroupsJSONLegacyKeyword(t *testing.T) {
+	gs, err := parseGroupsJSON(`[{"name":"专线","keyword":"专线","urlTest":false}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gs) != 1 || gs[0].Name != "专线" || len(gs[0].Keywords) != 1 || gs[0].Keywords[0] != "专线" || gs[0].URLTest {
+		t.Errorf("旧格式解析 = %+v，应当单词组", gs)
+	}
+	// keywords 与 keyword 并存：keywords 优先，keyword 忽略
+	gs2, err := parseGroupsJSON(`[{"name":"n","keywords":["a","b"],"keyword":"c","urlTest":true}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gs2[0].Keywords) != 2 || gs2[0].Keywords[0] != "a" || gs2[0].Keywords[1] != "b" {
+		t.Errorf("并存时应取 keywords = %v", gs2[0].Keywords)
+	}
+}
+
+// groupsJSON 键序 name→keywords→urlTest、无空白、空组 "[]"（契约钉死件）
+func TestCanonicalGroupsJSONKeyOrder(t *testing.T) {
+	got := canonicalGroupsJSON([]nodeGroup{{Name: "美专线", Keywords: []string{"美国", "专线"}, URLTest: false}})
+	if want := `[{"name":"美专线","keywords":["美国","专线"],"urlTest":false}]`; got != want {
+		t.Errorf("groupsJSON = %s，want %s", got, want)
+	}
+	if got := canonicalGroupsJSON(nil); got != "[]" {
+		t.Errorf("空组 = %s，want []", got)
 	}
 }

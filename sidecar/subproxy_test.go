@@ -929,7 +929,7 @@ func TestShortLinkGroupsDeriveSingleStage(t *testing.T) {
 	defer ext.Close()
 	s := mustServer(t, testConfig(t, ext.URL))
 	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
-	groups := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+	groups := `[{"name":"专线","keywords":["专线"],"urlTest":false}]`
 	code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", cfgPath, groups)
 	if err != nil {
 		t.Fatal(err)
@@ -951,13 +951,13 @@ func TestShortLinkGroupsDeriveSingleStage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("派生文件未落盘: %v", err)
 	}
-	if !strings.Contains(string(data), "custom_proxy_group=专线`select`专线") {
+	if !strings.Contains(string(data), "custom_proxy_group=专线`select`(?=.*专线)") {
 		t.Errorf("派生文件缺组行:\n%s", data)
 	}
 	dr := get(t, ts.URL+"/internal/derived/"+code)
 	dbody, _ := io.ReadAll(dr.Body)
 	dr.Body.Close()
-	if dr.StatusCode != http.StatusOK || !strings.Contains(string(dbody), "custom_proxy_group=专线`select`专线") {
+	if dr.StatusCode != http.StatusOK || !strings.Contains(string(dbody), "custom_proxy_group=专线`select`(?=.*专线)") {
 		t.Errorf("内部端点 serve 异常: %d %s", dr.StatusCode, dbody)
 	}
 }
@@ -991,7 +991,7 @@ func TestShortLinkGroupsDeriveTwoStage(t *testing.T) {
 	defer ext.Close()
 	s := mustServer(t, testConfig(t, ext.URL))
 	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
-	groups := `[{"name":"家宽","keyword":"家宽","urlTest":true}]`
+	groups := `[{"name":"家宽","keywords":["家宽"],"urlTest":true}]`
 	code, err := s.store.getOrCreateLink(airport.URL+"/sub", "clash", "default", cfgPath, groups)
 	if err != nil {
 		t.Fatal(err)
@@ -1020,7 +1020,7 @@ func TestShortLinkGroupsDeriveTwoStage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "custom_proxy_group=家宽`url-test`家宽`http://www.gstatic.com/generate_204`300,,50") {
+	if !strings.Contains(string(data), "custom_proxy_group=家宽`url-test`(?=.*家宽)`http://www.gstatic.com/generate_204`300,,50") {
 		t.Errorf("派生文件缺 url-test 行:\n%s", data)
 	}
 }
@@ -1031,7 +1031,7 @@ func TestShortLinkDeriveError(t *testing.T) {
 	s := mustServer(t, testConfig(t, "http://unused"))
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
-	groups := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+	groups := `[{"name":"专线","keywords":["专线"],"urlTest":false}]`
 
 	cases := []struct {
 		name string
@@ -1082,7 +1082,7 @@ func TestDeleteLinkRemovesDerivedFile(t *testing.T) {
 	defer ext.Close()
 	s := mustServer(t, testConfig(t, ext.URL))
 	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
-	groups := `[{"name":"专线","keyword":"专线","urlTest":false}]`
+	groups := `[{"name":"专线","keywords":["专线"],"urlTest":false}]`
 	code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", cfgPath, groups)
 	if err != nil {
 		t.Fatal(err)
