@@ -28,7 +28,7 @@ func TestDeriveGroupsINIRealFixture(t *testing.T) {
 		{Name: "专线", Keywords: []string{"专线"}, URLTest: false},
 		{Name: "家宽", Keywords: []string{"家宽"}, URLTest: true},
 	}
-	out, err := deriveGroupsINI(src, groups)
+	out, err := deriveINI(src, groups, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestDeriveGroupsINIRealFixture(t *testing.T) {
 
 // QuoteMeta：元字符关键词转义（闸门 4b 实证不转义会误命中 IEPL 1x0）
 func TestDeriveGroupsINIQuoteMeta(t *testing.T) {
-	out, err := deriveGroupsINI(fixtureACL4SSR(t), []nodeGroup{{Name: "IEPL", Keywords: []string{"IEPL 1.0"}, URLTest: false}})
+	out, err := deriveINI(fixtureACL4SSR(t), []nodeGroup{{Name: "IEPL", Keywords: []string{"IEPL 1.0"}, URLTest: false}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestDeriveGroupsINIQuoteMeta(t *testing.T) {
 
 // 撞名：模板组名单 → 后缀带圈数字单级；模板已占 ② → 多级递增；同批已生成名同样回避
 func TestDeriveGroupsINICollision(t *testing.T) {
-	out, err := deriveGroupsINI(fixtureACL4SSR(t), []nodeGroup{{Name: "🚀 节点选择", Keywords: []string{"专线"}, URLTest: false}})
+	out, err := deriveINI(fixtureACL4SSR(t), []nodeGroup{{Name: "🚀 节点选择", Keywords: []string{"专线"}, URLTest: false}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestDeriveGroupsINICollision(t *testing.T) {
 		"custom_proxy_group=`节点选择②`select`[]DIRECT`\n" +
 		"custom_proxy_group=`节点选择③`select`[]DIRECT`\n" +
 		"enable_rule_generator=true\n"
-	out, err = deriveGroupsINI([]byte(tpl), []nodeGroup{{Name: "节点选择", Keywords: []string{"k"}, URLTest: false}})
+	out, err = deriveINI([]byte(tpl), []nodeGroup{{Name: "节点选择", Keywords: []string{"k"}, URLTest: false}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,10 +107,10 @@ func TestDeriveGroupsINICollision(t *testing.T) {
 
 	// 同批已生成名回避：组 [A, A]（校验层禁重名，但派生层自守）→ 第二个取 A②
 	tpl2 := "[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\nenable_rule_generator=true\n"
-	out, err = deriveGroupsINI([]byte(tpl2), []nodeGroup{
+	out, err = deriveINI([]byte(tpl2), []nodeGroup{
 		{Name: "A", Keywords: []string{"k1"}, URLTest: false},
 		{Name: "A", Keywords: []string{"k2"}, URLTest: false},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,13 +128,12 @@ func TestDeriveGroupsINICollisionExhausted(t *testing.T) {
 		b.WriteString("custom_proxy_group=`X" + string(r) + "`select`[]DIRECT`\n")
 	}
 	b.WriteString("enable_rule_generator=true\n")
-	if _, err := deriveGroupsINI([]byte(b.String()), []nodeGroup{{Name: "X", Keywords: []string{"k"}, URLTest: false}}); err == nil {
+	if _, err := deriveINI([]byte(b.String()), []nodeGroup{{Name: "X", Keywords: []string{"k"}, URLTest: false}}, nil); err == nil {
 		t.Error("撞穿全表应报错")
 	}
 }
 
-// 无锚点 fail-closed：无 [custom] 段 / 有段无既有组行 → error（不发明插入位）；
-// 空 groups → error（调用方应旁路派生）
+// 无锚点 fail-closed：无 [custom] 段 / 有段无既有组行 → error（不发明插入位）
 func TestDeriveGroupsININoAnchor(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -143,10 +142,9 @@ func TestDeriveGroupsININoAnchor(t *testing.T) {
 	}{
 		{"无 [custom] 段", "; no sections here\nruleset=whatever\n", []nodeGroup{{Name: "A", Keywords: []string{"k"}}}},
 		{"有段无组行", "[custom]\nenable_rule_generator=true\n", []nodeGroup{{Name: "A", Keywords: []string{"k"}}}},
-		{"空 groups", "[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\n", nil},
 	}
 	for _, c := range cases {
-		if _, err := deriveGroupsINI([]byte(c.src), c.groups); err == nil {
+		if _, err := deriveINI([]byte(c.src), c.groups, nil); err == nil {
 			t.Errorf("%s：应 fail-closed 报错", c.name)
 		}
 	}
@@ -160,7 +158,7 @@ func TestDeriveGroupsINIMultiAndZeroHit(t *testing.T) {
 		{Name: "二", Keywords: []string{"二"}, URLTest: true},
 		{Name: "三", Keywords: []string{"三"}, URLTest: false},
 	}
-	out, err := deriveGroupsINI([]byte(tpl), groups)
+	out, err := deriveINI([]byte(tpl), groups, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +207,7 @@ func TestDeriveGroupsINISelectWiring(t *testing.T) {
 		if err != nil {
 			t.Fatalf("读 fixture %s: %v", fx, err)
 		}
-		out, err := deriveGroupsINI(b, groups)
+		out, err := deriveINI(b, groups, nil)
 		if err != nil {
 			t.Fatalf("%s: %v", fx, err)
 		}
@@ -240,10 +238,10 @@ func TestDeriveGroupsINISelectWiring(t *testing.T) {
 
 // 全 select 组接线撞名联动：撞名组（🚀 节点选择 → ②）追加的是后缀名；多组按请求顺序追加
 func TestDeriveGroupsINISelectWiringCollision(t *testing.T) {
-	out, err := deriveGroupsINI(fixtureACL4SSR(t), []nodeGroup{
+	out, err := deriveINI(fixtureACL4SSR(t), []nodeGroup{
 		{Name: "🚀 节点选择", Keywords: []string{"专线"}, URLTest: false},
 		{Name: "家宽", Keywords: []string{"家宽"}, URLTest: false},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +298,7 @@ func TestPrepareDerivedConfigBootstrapsRewritten(t *testing.T) {
 	writeTB(t, filepath.Join(m.rulesDir, "ACL4SSR_Online.ini"),
 		"[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\nruleset=DIRECT,http://up/a.list\n")
 	writeTB(t, filepath.Join(m.rulesDir, "a.list"), "a-content")
-	u, err := s.prepareDerivedConfig("code1", defaultPresetURL, groupsJSON)
+	u, err := s.prepareDerivedConfig("code1", defaultPresetURL, groupsJSON, "")
 	if err != nil {
 		t.Fatalf("原料齐备应当场补产物派生成功: %v", err)
 	}
@@ -319,13 +317,13 @@ func TestPrepareDerivedConfigBootstrapsRewritten(t *testing.T) {
 	s2, m2 := newSV()
 	writeTB(t, filepath.Join(m2.rulesDir, "ACL4SSR_Online.ini"),
 		"[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\nruleset=DIRECT,http://up/b.list\n")
-	if _, err := s2.prepareDerivedConfig("code2", defaultPresetURL, groupsJSON); err == nil {
+	if _, err := s2.prepareDerivedConfig("code2", defaultPresetURL, groupsJSON, ""); err == nil {
 		t.Error("原料不齐应维持 derive_error")
 	}
 
 	// 豁免档自定义远端 URL：无本地原料可补 → derive_error
 	s3, _ := newSV()
-	if _, err := s3.prepareDerivedConfig("code3", "https://deploy.example.com/custom.ini", groupsJSON); err == nil {
+	if _, err := s3.prepareDerivedConfig("code3", "https://deploy.example.com/custom.ini", groupsJSON, ""); err == nil {
 		t.Error("非内置档 URL 应维持 derive_error")
 	}
 }
@@ -339,7 +337,7 @@ func TestDeriveGroupsINIMultiKeywords(t *testing.T) {
 		{Name: "五词上限", Keywords: []string{"a", "b", "c", "d", "e"}, URLTest: false},
 		{Name: "IEPL", Keywords: []string{"专线", "IEPL 1.0"}, URLTest: false},
 	}
-	out, err := deriveGroupsINI([]byte(tpl), groups)
+	out, err := deriveINI([]byte(tpl), groups, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,5 +395,160 @@ func TestCanonicalGroupsJSONKeyOrder(t *testing.T) {
 	}
 	if got := canonicalGroupsJSON(nil); got != "[]" {
 		t.Errorf("空组 = %s，want []", got)
+	}
+}
+
+// ---- v1.5.0 增补：模板群组删减（exclude）----
+
+// 删业务组（有 ruleset，非锁定）：组行移除、规则回退到 🚀 节点选择；其余行零改动
+func TestDeriveExcludeBusinessGroup(t *testing.T) {
+	src := readFixture(t, "ACL4SSR_Online.ini")
+	out, err := deriveINI(src, nil, []string{"🌍 国外媒体"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if hasLine(s, "custom_proxy_group=🌍 国外媒体`select`[]🚀 节点选择`[]♻️ 自动选择`[]🎯 全球直连`.*") {
+		t.Error("被删组定义行应移除")
+	}
+	if !hasLine(s, "ruleset=🚀 节点选择,https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ProxyMedia.list") {
+		t.Errorf("ProxyMedia ruleset 目标应回退 🚀 节点选择（首成员非直连类）:\n%s", s)
+	}
+	if n, want := len(strings.Split(s, "\n")), len(strings.Split(string(src), "\n"))-1; n != want {
+		t.Errorf("行数 = %d，应恰少 1 行（只删组行）", n)
+	}
+	// 其余组行逐行原样（未被删组未被引用）
+	for _, ln := range strings.Split(string(src), "\n") {
+		if strings.HasPrefix(ln, "custom_proxy_group=") && ln != "custom_proxy_group=🌍 国外媒体`select`[]🚀 节点选择`[]♻️ 自动选择`[]🎯 全球直连`.*" && !hasLine(s, ln) {
+			t.Errorf("无关组行被改动: %s", ln)
+		}
+	}
+}
+
+// 删直连类业务组（首成员 DIRECT）：规则回退 🎯 全球直连（国内媒体类流量不绕代理）
+func TestDeriveExcludeDirectClassGroup(t *testing.T) {
+	src := readFixture(t, "ACL4SSR_Online_Full_MultiMode.ini")
+	out, err := deriveINI(src, nil, []string{"🌏 国内媒体"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "custom_proxy_group=🌏 国内媒体") {
+		t.Error("被删组定义行应移除")
+	}
+	if !hasLine(s, "ruleset=🎯 全球直连,https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ChinaMedia.list") {
+		t.Errorf("ChinaMedia ruleset 目标应回退 🎯 全球直连:\n%s", s)
+	}
+}
+
+// 删地区组（url-test，无 ruleset）：组行移除 + 其余组行成员引用连前导反引号摘净
+func TestDeriveExcludeRegionGroupStripsRefs(t *testing.T) {
+	src := readFixture(t, "ACL4SSR_Online_Full_MultiMode.ini")
+	out, err := deriveINI(src, nil, []string{"🇰🇷 韩国节点"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "🇰🇷 韩国节点") {
+		t.Errorf("被删组名不应有任何残留（定义/引用）:\n%s", s)
+	}
+	wantMain := "custom_proxy_group=🚀 节点选择`select`[]♻️ 自动选择`[]🔯 故障转移`[]🔮 负载均衡`[]🇭🇰 香港节点`[]🇨🇳 台湾节点`[]🇸🇬 狮城节点`[]🇯🇵 日本节点`[]🇺🇲 美国节点`[]🚀 手动切换`[]DIRECT"
+	if !hasLine(s, wantMain) {
+		t.Errorf("主组应只摘除韩国成员、其余成员与顺序不变:\n%s", wantMain)
+	}
+	if strings.Contains(s, "``") {
+		t.Error("摘引用不应留空成员（``）")
+	}
+}
+
+// 锁定组（规则骨架/内联目标）与模板中不存在的名：静默忽略，产物逐字节不变
+func TestDeriveExcludeLockedAndMissingIgnored(t *testing.T) {
+	src := readFixture(t, "ACL4SSR_Online.ini")
+	out, err := deriveINI(src, nil, []string{"🚀 节点选择", "🎯 全球直连", "🐟 漏网之鱼", "不存在的组"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != string(src) {
+		t.Error("锁定组/不存在名应静默忽略，产物应逐字节不变")
+	}
+}
+
+// 仅 exclude（groups 空）：跳过生成/撞名/接线，只删减 + 自检；groups 与 exclude 均空时
+// deriveINI 原样返回（该组合由调用方前置校验旁路，见 prepareDerivedConfig）
+func TestDeriveExcludeOnly(t *testing.T) {
+	src := readFixture(t, "ACL4SSR_Online.ini")
+	out, err := deriveINI(src, nil, []string{"🌍 国外媒体"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "custom_proxy_group=🌍 国外媒体`") {
+		t.Error("仅 exclude 应删组行")
+	}
+	if strings.Contains(string(out), "select`(?=.*") {
+		t.Error("groups 为空不应生成组行")
+	}
+	same, err := deriveINI(src, nil, nil)
+	if err != nil {
+		t.Fatalf("空 groups+空 exclude 不应报错: %v", err)
+	}
+	if string(same) != string(src) {
+		t.Error("空 groups+空 exclude 应原样返回")
+	}
+}
+
+// 撞名取删减前原始名单：用户组复用被删组名 → 后缀②（避免与删减自检冲突）
+func TestDeriveExcludeCollisionUsesOriginalNames(t *testing.T) {
+	src := readFixture(t, "ACL4SSR_Online.ini")
+	out, err := deriveINI(src, []nodeGroup{{Name: "🌍 国外媒体", Keywords: []string{"专线"}, URLTest: false}}, []string{"🌍 国外媒体"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !hasLine(s, "custom_proxy_group=🌍 国外媒体②`select`(?=.*专线)") {
+		t.Errorf("用户组复用被删组名应取后缀②:\n%s", s)
+	}
+	if hasLine(s, "custom_proxy_group=🌍 国外媒体`select`(?=.*专线)") {
+		t.Error("不得复用被删组原名的定义行")
+	}
+	// 接线只追加最终组名（②），不出现裸名引用
+	if !strings.Contains(s, "`[]🌍 国外媒体②") {
+		t.Error("select 组接线应用最终组名")
+	}
+}
+
+// groups + exclude 同提交：两组动作都生效（删组/摘引用/回退 + 生成/接线）
+func TestDeriveExcludeAndGroupsTogether(t *testing.T) {
+	src := readFixture(t, "ACL4SSR_Online_Full_MultiMode.ini")
+	out, err := deriveINI(src, []nodeGroup{{Name: "专线", Keywords: []string{"专线"}, URLTest: false}}, []string{"🇰🇷 韩国节点"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "🇰🇷 韩国节点") {
+		t.Error("exclude 未生效")
+	}
+	if !hasLine(s, "custom_proxy_group=专线`select`(?=.*专线)") {
+		t.Error("groups 未生成")
+	}
+	// 接线：每个 select 模板组行尾追加（含主组）
+	if !strings.Contains(s, "custom_proxy_group=🚀 节点选择`select`") || !strings.Contains(s, "`[]专线") {
+		t.Error("select 组接线缺失")
+	}
+}
+
+// 无 exclude（nil 与空切片等价）：deriveINI 输出逐字节一致（回归）
+func TestDeriveININoExcludeByteIdentical(t *testing.T) {
+	src := readFixture(t, "ACL4SSR_Online.ini")
+	groups := []nodeGroup{{Name: "专线", Keywords: []string{"专线"}, URLTest: false}}
+	a, err := deriveINI(src, groups, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := deriveINI(src, groups, []string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(a) != string(b) {
+		t.Error("nil 与空切片 exclude 应等价（逐字节一致）")
 	}
 }

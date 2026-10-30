@@ -7,12 +7,20 @@ export interface ClientEntry {
   verified: boolean
 }
 
+// v1.5.0 增补：模板自带组清单条目（locked = 路由骨架/安全组/回退目标，不可删）
+export interface PresetGroup {
+  name: string
+  locked: boolean
+}
+
 export interface PresetInfo {
   id: string
   name: string
   url: string
   // v1.5.0 能力位：快照本地化档 true / 豁免档 false；字段缺席 = 旧 sidecar，按 false 降级
   customGroups?: boolean
+  // v1.5.0 增补：模板自带组清单（模板原序）；豁免档或快照不可用 → []；字段缺席按 [] 降级
+  groups?: PresetGroup[]
 }
 
 export interface ClientsResponse {
@@ -45,6 +53,9 @@ export interface PreviewResponse {
   deepLink: string | null
   // v1.5.0 probe 模式返回节点名列表；非 probe 恒 []；旧 sidecar 字段缺席按 [] 容错
   nodes?: string[]
+  // v1.5.0 增补：probe 模式模板组命中数（仅自带节点正则的组）；ok:false/能力位 false 恒 {}；
+  // 旧 sidecar 字段缺席按 {} 容错
+  groupHits?: Record<string, number>
 }
 
 export type PresetStatus = 'fresh' | 'stale' | 'unknown'

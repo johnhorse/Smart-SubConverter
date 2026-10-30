@@ -146,9 +146,49 @@ describe('fetchPreview options（v1.5.0 probe / groups 请求形状）', () => {
     )
   })
 
+  it('options.exclude 非空 → body 带 exclude（模板组删减请求形状）', async () => {
+    stubOk({ ok: true, target: 'clash', preset: null, errorCode: null, message: '', link: 'http://x/s/Ab3xY9qZ', deepLink: null })
+    await fetchPreview('https://example.com/sub', 'auto', 'default', {
+      exclude: ['🇰🇷 韩国节点', '💬 Ai平台'],
+    })
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      '/api/preview',
+      expect.objectContaining({
+        body: JSON.stringify({
+          url: 'https://example.com/sub',
+          target: 'auto',
+          preset: 'default',
+          exclude: ['🇰🇷 韩国节点', '💬 Ai平台'],
+        }),
+      }),
+    )
+  })
+
+  it('options.groups 与 exclude 同时非空 → body 两者都带', async () => {
+    stubOk({ ok: true, target: 'clash', preset: null, errorCode: null, message: '', link: 'http://x/s/Ab3xY9qZ', deepLink: null })
+    await fetchPreview('https://example.com/sub', 'auto', 'default', {
+      groups: [{ name: '专线', keywords: ['专线'], urlTest: false }],
+      exclude: ['💬 Ai平台'],
+    })
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      '/api/preview',
+      expect.objectContaining({
+        body: JSON.stringify({
+          url: 'https://example.com/sub',
+          target: 'auto',
+          preset: 'default',
+          groups: [{ name: '专线', keywords: ['专线'], urlTest: false }],
+          exclude: ['💬 Ai平台'],
+        }),
+      }),
+    )
+  })
+
   it.each([
     ['无 options', undefined],
     ['空 groups', { groups: [] }],
+    ['空 exclude', { exclude: [] }],
+    ['空 groups + 空 exclude', { groups: [], exclude: [] }],
   ])('%s → body 恰三字段（存量请求字节不变，v1.4.0 逐字节回归路径）', async (_label, options) => {
     stubOk({ ok: true, target: 'clash', preset: null, errorCode: null, message: '', link: 'http://x/s/Ab3xY9qZ', deepLink: null })
     await fetchPreview('https://example.com/sub', 'auto', 'default', options as PreviewOptions | undefined)

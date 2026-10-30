@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import GroupPanel from './GroupPanel.vue'
-import type { NodeGroup } from '../types'
+import type { NodeGroup, PresetGroup } from '../types'
 
 // 文件级 fake timers：打词防抖 250ms 用 advanceTimersByTime 驱动（无时间依赖的用例不受影响）
 beforeEach(() => {
@@ -28,11 +28,13 @@ function mountPanel(props: Partial<PanelProps> = {}) {
   return mount(GroupPanel, {
     props: {
       available: true,
-      url: 'https://example.com/sub',
       open: true,
       modelValue: [],
       probeState: 'ready',
       nodes: NODES,
+      templateGroups: [],
+      excluded: [],
+      groupHits: {},
       ...props,
     } as PanelProps,
   })
@@ -61,17 +63,14 @@ describe('GroupPanel 入口与 probe 态', () => {
     expect(wrapper.find('.groups').exists()).toBe(false)
   })
 
-  it('入口矩阵：url 空 → 渲染但置灰；url 非空 → 可点并 emit update:open true', async () => {
-    const empty = mountPanel({ open: false, url: '' })
-    const entry = empty.find('.groups-entry')
-    expect(entry.exists()).toBe(true)
-    expect(entry.attributes('disabled')).toBeDefined()
-
-    const filled = mountPanel({ open: false })
-    const btn = filled.find('.groups-entry')
+  it('入口不依赖订阅链接：模板组清单本地可得，未粘 URL 也可点开', async () => {
+    const wrapper = mountPanel({ open: false })
+    const btn = wrapper.find('.groups-entry')
+    expect(btn.exists()).toBe(true)
     expect(btn.attributes('disabled')).toBeUndefined()
+    expect(btn.text()).toContain('分组管理')
     await btn.trigger('click')
-    expect(filled.emitted('update:open')).toEqual([[true]])
+    expect(wrapper.emitted('update:open')).toEqual([[true]])
   })
 
   it('展开态 probe loading / idle / failed 分支文案（ready 之外不渲染节点列表）', () => {
@@ -446,5 +445,140 @@ describe('GroupPanel 组管理与上限', () => {
     vi.advanceTimersByTime(250)
     await nextTick()
     expect(wrapper.find('.group-confirm').attributes('disabled')).toBeDefined()
+  })
+})
+
+describe('GroupPanel 模板自带群组删减（v1.5.0 增补）', () => {
+  const TEMPLATE: PresetGroup[] = [
+    { name: '🚀 节点选择', locked: true },
+    { name: '♻️ 自动选择', locked: false },
+    { name: '🇰🇷 韩国节点', locked: false },
+    { name: '💬 Ai平台', locked: false },
+  ]
+  const HITS: Record<string, number> = {
+    '🚀 节点选择': 0, // 锁定组即便 0 命中也不标记
+    '♻️ 自动选择': 3,
+    '🇰🇷 韩国节点': 0,
+    '💬 Ai平台': 0,
+  }
+
+  function prunePanel(props: Partial<PanelProps> = {}) {
+    return mountPanel({ templateGroups: TEMPLATE, groupHits: HITS, ...props })
+  }
+
+  // jsdom 的属性选择器不认非 BMP 字符（emoji）：按类名 + 属性比对定位 ×
+  function findX(wrapper: ReturnType<typeof mountPanel>, name: string) {
+    return wrapper.findAll('.tpl-x').find((b) => b.attributes('aria-label') === `剔除组 ${name}`)!
+  }
+
+  it('上区按模板原序渲染：锁定组 🔒 无删除入口 + 规则入口提示，可删组带 ×', () => {
+    const wrapper = prunePanel()
+    const chips = wrapper.findAll('.tpl-chip')
+    expect(chips.map((c) => c.find('.tpl-chip-name').text())).toEqual([
+      '🚀 节点选择',
+      '♻️ 自动选择',
+      '🇰🇷 韩国节点',
+      '💬 Ai平台',
+    ])
+    const locked = chips[0]
+    expect(locked.find('.tpl-lock').text()).toContain('🔒')
+    expect(locked.find('.tpl-lock').attributes('aria-label')).toBe('规则入口，必须保留')
+    expect(locked.attributes('title')).toBe('规则入口，必须保留')
+    expect(locked.find('.tpl-x').exists()).toBe(false)
+    for (const chip of chips.slice(1)) {
+      expect(chip.find('.tpl-x').exists()).toBe(true)
+    }
+  })
+
+  it('0 节点标记：仅可删且命中数为 0 的组标黄；锁定组与有命中的组不标', () => {
+    const wrapper = prunePanel()
+    const chips = wrapper.findAll('.tpl-chip')
+    expect(chips[0].find('.tpl-zero').exists()).toBe(false) // locked（即便 hits 0）
+    expect(chips[1].find('.tpl-zero').exists()).toBe(false) // 有命中
+    expect(chips[2].find('.tpl-zero').text()).toBe('(0 节点)')
+    expect(chips[3].find('.tpl-zero').text()).toBe('(0 节点)')
+  })
+
+  it('groupHits 缺席（旧 sidecar / 未 probe）：不标 0 节点', () => {
+    const wrapper = mountPanel({ templateGroups: TEMPLATE })
+    expect(wrapper.findAll('.tpl-zero')).toHaveLength(0)
+  })
+
+  it('点 ×：emit update:excluded 追加该组名', async () => {
+    const wrapper = prunePanel()
+    await findX(wrapper, '💬 Ai平台').trigger('click')
+    expect(wrapper.emitted('update:excluded')).toEqual([[['💬 Ai平台']]])
+  })
+
+  it('已剔除区按模板原序渲染灰 chips；点 ＋ 加回（emit 去掉该名）', async () => {
+    const wrapper = prunePanel({ excluded: ['💬 Ai平台', '♻️ 自动选择'] })
+    expect(wrapper.findAll('.tpl-chip .tpl-chip-name').map((n) => n.text())).toEqual([
+      '🚀 节点选择',
+      '🇰🇷 韩国节点',
+    ])
+    const excluded = wrapper.findAll('.excluded-chip')
+    expect(excluded.map((c) => c.text())).toEqual(['＋ ♻️ 自动选择', '＋ 💬 Ai平台'])
+    await excluded[0].trigger('click')
+    expect(wrapper.emitted('update:excluded')).toEqual([[['💬 Ai平台']]])
+  })
+
+  it('模板中已不存在的剔除名不渲染（状态里仍保留）', () => {
+    const wrapper = prunePanel({ excluded: ['不存在的组'] })
+    expect(wrapper.find('.excluded-zone').exists()).toBe(false)
+    expect(wrapper.findAll('.tpl-chip')).toHaveLength(TEMPLATE.length)
+  })
+
+  it('一键剔除空群组：probe 未完成时禁用', () => {
+    for (const probeState of ['idle', 'loading', 'failed'] as const) {
+      const wrapper = prunePanel({ probeState })
+      expect(wrapper.find('.prune-empty').attributes('disabled')).toBeDefined()
+    }
+    expect(prunePanel().find('.prune-empty').attributes('disabled')).toBeUndefined()
+  })
+
+  it('一键剔除空群组：没有空群组时禁用', () => {
+    const wrapper = prunePanel({ groupHits: { '🇰🇷 韩国节点': 2, '💬 Ai平台': 1 } })
+    expect(wrapper.find('.prune-empty').attributes('disabled')).toBeDefined()
+  })
+
+  it('一键剔除：静默移入全部空群组 + 轻提示，2.5s 自动消失', async () => {
+    const wrapper = prunePanel()
+    await wrapper.find('.prune-empty').trigger('click')
+    expect(wrapper.emitted('update:excluded')).toEqual([[['🇰🇷 韩国节点', '💬 Ai平台']]])
+    expect(wrapper.find('.prune-toast').text()).toBe('已剔除 2 个空群组（随时点下方标签加回）')
+
+    vi.advanceTimersByTime(2500)
+    await nextTick()
+    expect(wrapper.find('.prune-toast').exists()).toBe(false)
+  })
+
+  it('一键剔除与现有 excluded 合并（不重复加入）', async () => {
+    const wrapper = prunePanel({ excluded: ['💬 Ai平台'] })
+    await wrapper.find('.prune-empty').trigger('click')
+    expect(wrapper.emitted('update:excluded')).toEqual([[['💬 Ai平台', '🇰🇷 韩国节点']]])
+  })
+
+  it('提示定时器在组件卸载时清理（卸载后推进时间不报错且无残留定时器）', async () => {
+    const wrapper = prunePanel()
+    await wrapper.find('.prune-empty').trigger('click')
+    wrapper.unmount()
+    vi.advanceTimersByTime(2500)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('恢复默认：excluded 空时禁用；非空时点击 emit 空数组', async () => {
+    expect(prunePanel().find('.restore-default').attributes('disabled')).toBeDefined()
+    const wrapper = prunePanel({ excluded: ['💬 Ai平台'] })
+    const btn = wrapper.find('.restore-default')
+    expect(btn.attributes('disabled')).toBeUndefined()
+    await btn.trigger('click')
+    expect(wrapper.emitted('update:excluded')).toEqual([[[]]])
+  })
+
+  it('模板组清单为空（字段缺席/豁免档降级）：上下两区都不渲染，打词区照常', () => {
+    const wrapper = mountPanel()
+    expect(wrapper.find('.tpl-zone').exists()).toBe(false)
+    expect(wrapper.find('.excluded-zone').exists()).toBe(false)
+    expect(wrapper.find('input[aria-label="分组关键词"]').exists()).toBe(true)
   })
 })

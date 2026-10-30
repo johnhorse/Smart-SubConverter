@@ -11,7 +11,8 @@ import StatusBadge from './components/StatusBadge.vue'
 const {
   phase, inputUrl, selectedTarget, selectedPreset, advancedOpen, submitting,
   convertError, result, clients, presets, customGroupsAvailable,
-  groupsOpen, groups, nodes, probeState, loadClients, probeNodes, submit,
+  groupsOpen, groups, nodes, probeState, excluded, groupHits, templateGroups,
+  loadClients, probeNodes, submit,
   selectClient, selectPreset, escapeToClash, restart,
 } = useConverter()
 
@@ -85,16 +86,20 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- v1.5.0 自定义分组：能力位（部署 × 选中档）全真才渲染入口；probe 失败只影响面板内可用性 -->
+        <!-- v1.5.0 自定义分组 + 模板组删减：能力位（部署 × 选中档）全真才渲染入口；
+             probe 失败只影响面板内可用性 -->
         <GroupPanel
           :available="customGroupsAvailable"
-          :url="inputUrl"
           :open="groupsOpen"
           :model-value="groups"
           :probe-state="probeState"
           :nodes="nodes"
+          :template-groups="templateGroups"
+          :excluded="excluded"
+          :group-hits="groupHits"
           @update:open="groupsOpen = $event"
           @update:model-value="groups = $event"
+          @update:excluded="excluded = $event"
           @retry="probeNodes"
         />
         <!-- 能力位失效（切到不支持档）但组已建：面板隐藏，残留组以提示行可见——

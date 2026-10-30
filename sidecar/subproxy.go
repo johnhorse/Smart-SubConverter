@@ -59,11 +59,11 @@ func (s *server) handleShortLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// v1.5.0 拉取期派生：该码带 groups → 读冻结档位当前生效快照 ini 派生，引擎
-	// config= 改指派生文件的容器内回环 URL（两段式链第二段与单段链同样生效——第一段
+	// v1.5.0 拉取期派生：该码带 groups 或 exclude → 读冻结档位当前生效快照 ini 派生，
+	// 引擎 config= 改指派生文件的容器内回环 URL（两段式链第二段与单段链同样生效——第一段
 	// mixed 无 config 参数）。失败 fail-closed 502 derive_error（不回退无组输出，R2）
-	if lnk.Groups != "" {
-		derived, err := s.prepareDerivedConfig(code, configURL, lnk.Groups)
+	if lnk.Groups != "" || lnk.Exclude != "" {
+		derived, err := s.prepareDerivedConfig(code, configURL, lnk.Groups, lnk.Exclude)
 		if err != nil {
 			log.Printf("s/ hit code=%s*** status=%d latency=%s derive_error: %v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
 			writeSubError(w, r, http.StatusBadGateway, "derive_error", deriveErrTitle, deriveErrDetail)

@@ -35,6 +35,8 @@ export interface PreviewOptions {
   probe?: boolean
   // 分组意图；空组不带字段（存量请求字节不变）
   groups?: NodeGroup[]
+  // 要删减的模板自带组名；空数组不带字段（存量请求字节不变）
+  exclude?: string[]
 }
 
 export function fetchPreview(
@@ -46,6 +48,7 @@ export function fetchPreview(
   const body: Record<string, unknown> = { url, target, preset }
   if (options.probe) body.probe = true
   if (options.groups && options.groups.length > 0) body.groups = options.groups
+  if (options.exclude && options.exclude.length > 0) body.exclude = options.exclude
   return fetchJson<PreviewResponse>(
     '/api/preview',
     {

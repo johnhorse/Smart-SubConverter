@@ -1,25 +1,29 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { GROUPS_MAX, KEYWORDS_MAX, groupFieldInvalid } from '../constants'
-import type { NodeGroup } from '../types'
+import type { NodeGroup, PresetGroup } from '../types'
 import type { ProbeState } from '../useConverter'
 
 const props = defineProps<{
   available: boolean
-  url: string
   open: boolean
   modelValue: NodeGroup[]
   probeState: ProbeState
   nodes: string[]
+  templateGroups: PresetGroup[]
+  excluded: string[]
+  groupHits: Record<string, number>
 }>()
 const emit = defineEmits<{
   (e: 'update:open', open: boolean): void
   (e: 'update:modelValue', groups: NodeGroup[]): void
+  (e: 'update:excluded', names: string[]): void
   (e: 'retry'): void
 }>()
 
 // 防抖 250ms：高亮/计数按防抖后草稿词刷新（打字不逐字重渲染列表）；已加 chips 即时参与
 const KEYWORD_DEBOUNCE_MS = 250
+const TOAST_MS = 2500
 
 // 打词步骤：已加词 chips + 输入草稿；确认成组后进命名步骤（默认名 = 全部词拼接，可改）
 const words = ref<string[]>([])
@@ -32,7 +36,54 @@ watch(kwInput, (v) => {
     kwDebounced.value = v
   }, KEYWORD_DEBOUNCE_MS)
 })
-onBeforeUnmount(() => clearTimeout(debounceTimer))
+
+// 轻提示：一键剔除空群组后短暂展示，自动消失；卸载时清定时器
+const toast = ref('')
+let toastTimer: ReturnType<typeof setTimeout> | undefined
+function showToast(msg: string) {
+  toast.value = msg
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toast.value = ''
+  }, TOAST_MS)
+}
+
+onBeforeUnmount(() => {
+  clearTimeout(debounceTimer)
+  clearTimeout(toastTimer)
+})
+
+// ---- 模板组删减 ----
+const excludedSet = computed(() => new Set(props.excluded))
+// 上区按模板原序渲染未剔除组；下区同理渲染已剔除组（模板中已不存在的名字不渲染）
+const visibleTemplate = computed(() => props.templateGroups.filter((g) => !excludedSet.value.has(g.name)))
+const visibleExcluded = computed(() => props.templateGroups.filter((g) => excludedSet.value.has(g.name)))
+
+// 0 节点标记：仅可删组（锁定组不标）；groupHits 缺席（无正则/未 probe）不算
+function isEmptyGroup(g: PresetGroup): boolean {
+  return !g.locked && props.groupHits[g.name] === 0
+}
+
+const prunableEmpty = computed(() =>
+  visibleTemplate.value.filter((g) => isEmptyGroup(g)).map((g) => g.name),
+)
+const canPruneEmpty = computed(() => props.probeState === 'ready' && prunableEmpty.value.length > 0)
+
+function excludeGroup(name: string) {
+  if (excludedSet.value.has(name)) return
+  emit('update:excluded', [...props.excluded, name])
+}
+
+function restoreGroup(name: string) {
+  emit('update:excluded', props.excluded.filter((n) => n !== name))
+}
+
+function pruneEmpty() {
+  if (!canPruneEmpty.value) return
+  const names = prunableEmpty.value
+  emit('update:excluded', [...props.excluded, ...names])
+  showToast(`已剔除 ${names.length} 个空群组（随时点下方标签加回）`)
+}
 
 const naming = ref(false)
 const nameInput = ref('')
@@ -163,21 +214,84 @@ function focusInput() {
 
 <template>
   <div v-if="available" class="groups">
-    <!-- 收起入口（虚线）：未粘贴订阅置灰不可点 -->
-    <button
-      v-if="!open"
-      type="button"
-      class="groups-entry"
-      :disabled="!url.trim()"
-      @click="emit('update:open', true)"
-    >
-      ＋ 自定义分组<span class="groups-entry-sub">给节点打词，自动归成一组</span>
+    <!-- 收起入口（虚线）：模板组清单不依赖订阅，入口不要求先粘 URL -->
+    <button v-if="!open" type="button" class="groups-entry" @click="emit('update:open', true)">
+      ⚙️ 分组管理<span class="groups-entry-sub">删减模板自带群组，或打词新建自己的组</span>
     </button>
 
     <div v-else class="groups-body">
       <div class="groups-head">
-        <span>自定义分组</span>
+        <span>分组管理</span>
         <button type="button" class="groups-collapse" @click="emit('update:open', false)">收起</button>
+      </div>
+
+      <!-- 上区：模板自带群组（清单来自 /api/clients，未粘订阅也可删减） -->
+      <section v-if="templateGroups.length" class="tpl-zone" aria-label="模板自带群组">
+        <div class="zone-head">
+          <span class="zone-title">模板自带群组</span>
+          <button
+            type="button"
+            class="prune-empty"
+            :disabled="!canPruneEmpty"
+            @click="pruneEmpty"
+          >
+            一键剔除空群组
+          </button>
+          <button
+            type="button"
+            class="restore-default"
+            :disabled="excluded.length === 0"
+            @click="emit('update:excluded', [])"
+          >
+            ↺ 恢复默认
+          </button>
+        </div>
+        <div class="tpl-chips">
+          <span
+            v-for="g in visibleTemplate"
+            :key="g.name"
+            class="tpl-chip"
+            :title="g.locked ? '规则入口，必须保留' : undefined"
+          >
+            <span v-if="g.locked" class="tpl-lock" aria-label="规则入口，必须保留">🔒</span>
+            <span class="tpl-chip-name">{{ g.name }}</span>
+            <span v-if="isEmptyGroup(g)" class="tpl-zero">(0 节点)</span>
+            <button
+              v-if="!g.locked"
+              type="button"
+              class="tpl-x"
+              :aria-label="`剔除组 ${g.name}`"
+              @click="excludeGroup(g.name)"
+            >
+              ×
+            </button>
+          </span>
+        </div>
+        <p v-if="toast" class="prune-toast" role="status">{{ toast }}</p>
+      </section>
+
+      <!-- 下区：已剔除池（点 ＋ 加回；按模板原序，模板中已不存在的名字不渲染） -->
+      <section v-if="visibleExcluded.length" class="excluded-zone" aria-label="已剔除">
+        <div class="zone-head">
+          <span class="zone-title">已剔除</span>
+        </div>
+        <div class="tpl-chips">
+          <button
+            v-for="g in visibleExcluded"
+            :key="g.name"
+            type="button"
+            class="excluded-chip"
+            :aria-label="`加回组 ${g.name}`"
+            @click="restoreGroup(g.name)"
+          >
+            ＋ {{ g.name }}
+          </button>
+        </div>
+      </section>
+
+      <!-- 打词成组（现有 v1.5.0 流程） -->
+      <div class="zone-head">
+        <span class="zone-title">自定义分组</span>
       </div>
 
       <p v-if="probeState === 'loading'" class="groups-status">正在拉取节点名单…</p>

@@ -46,6 +46,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 - presets 顺序即返回顺序（`default` 永远第一，前端默认选中）；三个 url 均为 2026-10-24 实测 200。`full_multimode` 含按地区分组（港日美台新韩）+ 💬 Ai平台 组，Ai平台候选含全部地区组——ChatGPT / Claude / Gemini 等可定向走指定地区（在客户端的 Ai平台组里选地区即可，无需重新生成订阅）
 - env `PRESET_URL` 仅覆盖 `default` 档的 url（冒烟测试用），覆盖时 `id/name` 不变，其余两档不受影响
 - **v1.5.0 起**：顶层增 `"capabilities": { "customGroups": <bool> }`（部署级：出树 `DATA_DIR` → false）；`presets[]` 每档增 `"customGroups": <bool>`（档位级：快照本地化档 true、豁免档 false——派生需读本地 ini）。语义见「自定义分组（v1.5.0）」节
+- **v1.5.0 增补（2026-10-30，模板群组删减）**：`presets[]` 每档再增 `"groups": [{ "name": "<组名>", "locked": <bool> }]`——模板自带组清单，模板原序，供前端渲染可删减清单；豁免档或快照不可用 → `[]`。**锁定判定**（2026-10-30 修正：字面「被 ruleset 指向即锁」会把业务组全部锁死，与裁决矛盾）：组 g 锁定 ⇔ 有 ruleset 目标且满足任一——① 该 ruleset 为内联规则（url 段以 `[]` 开头，如 `[]FINAL` / `[]GEOIP`；兼容裸 `FINAL`）② 首成员为 `[]REJECT`（拦截/净化安全组）③ 被其他组行以 `[]g` 成员引用（路由骨架）；另 `🚀 节点选择` / `🎯 全球直连`（规则回退目标常量）恒锁。其余全部可删（含被 ruleset 指向的业务组——删除时规则按第 2b 步回退）。语义见「自定义分组（v1.5.0）」节「模板群组删减」小节
 
 ## POST /api/preview
 
@@ -61,6 +62,8 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 
 **v1.5.0 增两个可选字段**（语义详见「自定义分组（v1.5.0）」节）：`groups`（组意图数组，转换提交时携带）；`probe`（`true` = 探测模式：返回节点名列表、**不建链零副作用**，此时「link 永远非空」豁免）。
 
+**v1.5.0 增补字段**：`exclude`（要删减的模板自带组名数组，缺省/`[]` = 不删减；校验同 `bad_groups`：≤ 64 项、每名 trim 非空、≤ 64 rune、禁反引号与控制字符，重复名去重；模板中不存在的名字与 `locked` 组静默忽略——上游模板改名容错、UI 正常流程点不出）。语义详见「模板群组删减」小节。
+
 响应恒为 HTTP 200（sidecar 处理的错误都体现在字段里）：
 
 ```json
@@ -75,7 +78,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 }
 ```
 
-- **`link` 永远非空**（D4 定案）：`ok:false` 时照常返回，前端仍展示并标注「未通过校验，仍可试用」。v1.2.0 起 link 为短链（见「短链」节）；两个降级为 `/sub` 长链的场景：① `store_error`（存储失败）② `bad_url_*`（URL 未过预校验**不落库**——私网 URL 落库后经 `/s/` 持久重放会绕过 D7 准入闸门，OH-13 放大）。`bad_preset` URL 合法，仍走短链（default 档）。**v1.5.0 唯一豁免**：`probe:true` 模式 `link` 恒 `null`（探测建链无副作用即目的）；`bad_groups` / `groups_disabled` 时 link 对齐 `bad_preset` 语义——丢 groups 照常建短链
+- **`link` 永远非空**（D4 定案）：`ok:false` 时照常返回，前端仍展示并标注「未通过校验，仍可试用」。v1.2.0 起 link 为短链（见「短链」节）；两个降级为 `/sub` 长链的场景：① `store_error`（存储失败）② `bad_url_*`（URL 未过预校验**不落库**——私网 URL 落库后经 `/s/` 持久重放会绕过 D7 准入闸门，OH-13 放大）。`bad_preset` URL 合法，仍走短链（default 档）。**v1.5.0 唯一豁免**：`probe:true` 模式 `link` 恒 `null`（探测建链无副作用即目的）；`bad_groups` / `groups_disabled` 时 link 对齐 `bad_preset` 语义——丢 groups/exclude 照常建短链
 - `preset`：本次生效的档位（id + name）。`bad_preset` 时为 `null`；其余情况（含 `ok:false`）恒回显解析后的合法档位，前端结果页据此标注「模板：{name}」
 - `ok:false` 时 `target` 为探测用的 target（auto → "clash"），`errorCode` 与 `message` 必填
 - `link` 由 sidecar 服务端拼接，前端一律直接使用该字段，不自行拼接
@@ -122,8 +125,8 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 | `upstream_timeout` | sidecar→Extended 10s 超时 | 等太久没等到结果，再试一次看看？ |
 | `backend_down` | Extended 连不上 | 转换引擎暂时没响应，稍后再试 |
 | `store_error` | 短链写入存储失败（磁盘满/库损坏等运维态） | 短链生成失败了——这次给的是普通链接（含订阅信息，注意别转发）；请部署者检查 /data 卷 |
-| `bad_groups` | `groups` 校验失败（v1.5.0；空名/超长/含反引号或控制字符/组内重名/超 10 组） | 分组信息有误——组名和关键词不超过 32 字，别用特殊符号，同名分组只留一个 |
-| `groups_disabled` | `groups` 非空但部署（出树 `DATA_DIR`）或所选档（豁免档）不支持分组（v1.5.0；UI 正常流程点不出，防手改请求） | 当前部署或所选模板不支持自定义分组 |
+| `bad_groups` | `groups` 或 `exclude` 校验失败（v1.5.0；空名/超长/含反引号或控制字符/组内重名/超 10 组；exclude：超 64 项、单名超 64 rune） | 分组信息有误——组名和关键词不超过 32 字，别用特殊符号，同名分组只留一个 |
+| `groups_disabled` | `groups` / `exclude` 非空但部署（出树 `DATA_DIR`）或所选档（豁免档）不支持分组（v1.5.0；UI 正常流程点不出，防手改请求） | 当前部署或所选模板不支持自定义分组 |
 | `api_unreachable` | **前端侧专用**：fetch /api/preview 失败/超时（15s AbortController）/非 200 | 服务暂时够不着，稍后再试 |
 
 Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤ 实测）：未知 UA + `target=auto` → 400 + body「Invalid request: unsupported target value. 无效请求：不支持的 target 参数值。」——该文案出现时前端提示优先给「展开指定客户端」指引。
@@ -135,20 +138,20 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 ### 存储
 
 - SQLite，`modernc.org/sqlite`（纯 Go 无 cgo）；文件 `${DATA_DIR}/state.db`，权限 0600；首次启动自动建目录建库
-- `links` 表：`code TEXT PRIMARY KEY`、`fingerprint TEXT UNIQUE`、`source_url TEXT`、`target TEXT`、`preset_id TEXT`、`config_url TEXT`、`created_at INTEGER`（unix 秒）；**v1.5.0 增 `groups TEXT`**（NULL=无组；非 NULL=规范化 JSON，序列化同指纹 v2 的 groupsJSON——见「自定义分组（v1.5.0）」节；`user_version` 1→2 幂等迁移，同码冻结语义：代理时永远用存的值）
-- schema 版本用 `PRAGMA user_version`（初值 1，v1.5.0 起 2），启动时按序幂等迁移；**同码冻结创建时参数**：`source_url` / `target` / `config_url` 存的是创建时刻的解析结果，代理时永远用存的值，不重新解析（防 env 改 `PRESET_URL` 后同码内容漂移）
+- `links` 表：`code TEXT PRIMARY KEY`、`fingerprint TEXT UNIQUE`、`source_url TEXT`、`target TEXT`、`preset_id TEXT`、`config_url TEXT`、`created_at INTEGER`（unix 秒）；**v1.5.0 增 `groups TEXT`**（NULL=无组；非 NULL=规范化 JSON，序列化同指纹 v2 的 groupsJSON——见「自定义分组（v1.5.0）」节；`user_version` 1→2 幂等迁移，同码冻结语义：代理时永远用存的值）；**v1.5.0 增补增 `exclude TEXT`**（NULL=不删减；非 NULL=规范化 JSON 数组——去重升序、无空白，空等价 NULL；`user_version` 2→3 幂等迁移，同码冻结语义同上）
+- schema 版本用 `PRAGMA user_version`（初值 1，v1.5.0 起 3：1→2 groups 列、2→3 exclude 列），启动时按序幂等迁移；**同码冻结创建时参数**：`source_url` / `target` / `config_url` 存的是创建时刻的解析结果，代理时永远用存的值，不重新解析（防 env 改 `PRESET_URL` 后同码内容漂移）
 - **库损坏（打不开/校验失败，非「文件不存在」）→ sidecar 拒绝启动**，错误信息指引「先备份 /data/state.db 再排查，勿直接删除」；绝不自动清空
 
 ### 幂等与指纹
 
-- 指纹 = SHA-256 of `v1|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}`，其中订阅 URL 规范化规则：两端 trim、scheme/host 转小写、去默认端口（http:80 / https:443）、path 为空补 `/`、query 原样保留、fragment 丢弃；`target` 为请求原样值（auto 或指定）；`config_url` 为**解析后的档位 URL**（不用 preset id——同 id 被 `PRESET_URL` 覆盖时指纹自然区分）。**v1.5.0 起升 v2**：`v2|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}|{groupsJSON}`（前缀与尾段变化，中间字段规范化规则全部沿用；groupsJSON 见「自定义分组（v1.5.0）」节）——「改组=新短链」由此成立
+- 指纹 = SHA-256 of `v1|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}`，其中订阅 URL 规范化规则：两端 trim、scheme/host 转小写、去默认端口（http:80 / https:443）、path 为空补 `/`、query 原样保留、fragment 丢弃；`target` 为请求原样值（auto 或指定）；`config_url` 为**解析后的档位 URL**（不用 preset id——同 id 被 `PRESET_URL` 覆盖时指纹自然区分）。**v1.5.0 起升 v2**：`v2|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}|{groupsJSON}`（前缀与尾段变化，中间字段规范化规则全部沿用；groupsJSON 见「自定义分组（v1.5.0）」节）——「改组=新短链」由此成立。**v1.5.0 增补再升 v3**：`v3|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}|{groupsJSON}|{excludeJSON}`（excludeJSON = 去重升序 JSON 数组、无空白、空为 `[]`）——「改删减=新短链」；v1/v2 存量记录不迁移（存量码照常 hit），升级后同参数首建换新码属预期一次性影响（同 v1→v2 先例）
 - 同指纹 → 永远复用既有短码；删除后同参数重建 → 指纹相同但插入新随机码（即轮换语义）
 - 短码：8 字符 base62（大小写字母+数字），`crypto/rand`；插入的两类唯一约束失败分开处理：**指纹冲突 → 重查返回既有码**；**码碰撞 → 重新生成码再插**（上限 5 次）；单测覆盖两类
 
 ### GET /s/{code}（订阅代理端点，nginx 路由到 sidecar）
 
 1. 查表 miss → HTTP 404，body `{"error":"not_found"}`（客户端能展示，朋友侧表现为「订阅更新失败」）；查表运行时 DB 错误 → HTTP 500，body `{"error":"internal"}`（罕见运维态，不在预定义错误内）
-2. hit → 容器内 GET `${EXTENDED_BASE}/sub?target={存的target}&url={enc source_url}&config={enc config_url}`（`SUB_TOKEN` 非空时追加 `&token=…`——token 只在容器内注入，朋友的短链不带 token），响应**流式透传**给客户端（不整包缓冲；响应头只透传 `Content-Type`，长度类头由 Go 按流自动处理）。**v1.5.0**：该码存有 `groups` 时，`config=` 改指派生产物（`/internal/derived/{code}` 回环 URL），详见「自定义分组（v1.5.0）」节——无 groups 短链零变化（产物与 v1.4.0 逐字节一致，回归断言）
+2. hit → 容器内 GET `${EXTENDED_BASE}/sub?target={存的target}&url={enc source_url}&config={enc config_url}`（`SUB_TOKEN` 非空时追加 `&token=…`——token 只在容器内注入，朋友的短链不带 token），响应**流式透传**给客户端（不整包缓冲；响应头只透传 `Content-Type`，长度类头由 Go 按流自动处理）。**v1.5.0**：该码存有 `groups` 或 `exclude` 时，`config=` 改指派生产物（`/internal/derived/{code}` 回环 URL），详见「自定义分组（v1.5.0）」节——两者皆无的短链零变化（产物与 v1.4.0 逐字节一致，回归断言）
 3. **UA 透传**：客户端 UA 原样传给 Extended（`target=auto` 识别依赖它）。UA 显式 Set（空 UA 设为空串——Go Transport 对未设置 UA 会补 `Go-http-client/1.1`，破坏识别）；已知边界：直连 /sub 的「无 UA header」与空串 header 在 Extended 侧行为可能有差异，未知客户端本就 fallback
 4. **两段式服务端代取（v1.3.3 QX；v1.3.5 改内部回环代拉；v1.4.0 扩展到 clash）**：链 target=quanx 或 clash（显式恒走），或 target=auto 且请求 UA 宽匹配 `quantumult` / clash 系词表（`clash`、`mihomo`、`shellcrash`，小写包含；路由决策，权威识别仍在引擎）时，/s/ 代理改为：**sidecar 代拉订阅源**（Go 抓取；`SUBSCRIPTION_PROXY` 非空时走代理）→ 内容注册内部端点 `/internal/sub/{ref}`（随机 ref、60s TTL、仅容器内回环可达，nginx 不路由）→ 引擎 `target=mixed` 从回环拉内容转通用节点 URI 列表 → `target=<归一后的链 target>&url=<URI|URI>` 明文节点列表转换（显式链原样；auto 链按 UA 家族归一为 quanx/clash，与 v1.3.3 auto+quantumult 第二段固定 quanx 的既有行为同构） → 输出内联明文节点（quanx：`[server_local]`；clash：`proxies` 内联数组），客户端零二次拉取。动机：① Extended 对 quanx+http 订阅默认 native server_remote（机场原始 URL 塞给客户端自拉），而「机场输出 QX 解析不了」恰是本服务目标用户场景（pref 无 quanx 开关）；② 机场 WAF 按 **TLS 指纹**拦引擎直拉（实测：busybox/libcurl 指纹 403、curl/Go 指纹 200，UA 无关，同 IP）——代拉换 Go 指纹 + 可选代理出口；③（v1.4.0）Extended 对 clash 输出 proxy-providers 形态（0 内联节点、节点列表 url=机场原始订阅、客户端自拉）——客户端网络够不到机场时节点永远 0（2026-10-26 实证：腾讯 AS45090 被机场 CF 按 ASN 封 1005；且 mihomo 自拉 provider 走宿主直连、不经自身代理链，服务端代理通道救不了它），服务端代取内联是唯一解。`SUBSCRIPTION_PROXY` 语义（v1.3.5）：sidecar 代拉走代理（引擎 pref `proxy_subscription` 的改写保留兜底）。两段各分得 `SUB_PROXY_TIMEOUT` 一半；代拉非 200 / 第一段空节点列表 → 502 `upstream_unavailable`
 5. 超时 `${SUB_PROXY_TIMEOUT}`（默认 120s，v1.3.0 起；订阅生成可能慢于 preview）；Extended 非 200 / 连接失败 / 超时 → HTTP 502，body `{"error":"upstream_unavailable"}`（两段式路径同码）
@@ -199,8 +202,8 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 
 - `GET /api/clients` 顶层 `"capabilities": { "customGroups": <bool> }`：`DATA_DIR` 在 /base 树内（快照本地化启用）→ `true`；出树 → `false`。出树态启动警告并入既有快照禁用警告行
 - `presets[]` 每档 `"customGroups": <bool>`：快照本地化档 `true`；豁免档（`PRESET_URL` 覆盖的 default 档）`false`——派生需要读本地 ini，豁免档没有
-- 前端入口显隐 = `capabilities.customGroups && 选中档 customGroups`；未粘贴订阅入口置灰
-- 服务端兜底：请求带非空 `groups` 且部署级或所选档任一能力位为 `false` → `groups_disabled`（预校验错，不调上游；UI 正常流程点不出，防手改请求）。**优先级：`bad_url_*` > `bad_preset` > `groups_disabled` > `bad_groups`**（preset 无效时档位未知，`groups_disabled` 判不了）
+- 前端入口显隐 = `capabilities.customGroups && 选中档 customGroups`；入口点击**不要求已粘贴订阅**（模板组清单来自 `/api/clients`，未粘 URL 也可删减；打词成组的节点名单仍需 probe，未粘 URL 时面板内显示提示文案）
+- 服务端兜底：请求带非空 `groups` 或 `exclude` 且部署级或所选档任一能力位为 `false` → `groups_disabled`（预校验错，不调上游；UI 正常流程点不出，防手改请求）。**优先级：`bad_url_*` > `bad_preset` > `groups_disabled` > `bad_groups`**（preset 无效时档位未知，`groups_disabled` 判不了）
 
 ### groups 请求字段与归一化（CQ-3/R3-3）
 
@@ -219,7 +222,7 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 ### probe 模式（取名两段式：探测不建链、提交才建链）
 
 - 请求加 `"probe": true`：sidecar 走两段式**第一段**（代拉订阅 → 引擎 `target=mixed` 展开为节点 URI 列表）→ 逐条解析节点名 → 返回 `nodes`；**不执行第二步 target 转换、不探测、不算指纹、不写库**（零副作用）
-- 响应：`{ "ok": true, "target": <解析回显>, "preset": <解析回显>, "errorCode": null, "message": "", "link": null, "deepLink": null, "nodes": ["香港专线", "…"] }`——`link` / `deepLink` 恒 `null`（「link 永远非空」条款本模式豁免）；`ok:false` 时 `nodes` 恒 `[]`
+- 响应：`{ "ok": true, "target": <解析回显>, "preset": <解析回显>, "errorCode": null, "message": "", "link": null, "deepLink": null, "nodes": ["香港专线", "…"], "groupHits": { "🇰🇷 韩国节点": 0 } }`——`link` / `deepLink` 恒 `null`（「link 永远非空」条款本模式豁免）；`ok:false` 时 `nodes` 恒 `[]`。**v1.5.0 增补**：`groupHits` = 模板组命中数（`{组名: 节点数}`），仅对「自带节点匹配正则」的模板组计算（url-test / fallback / load-balance 组，以及带正则段的 select 组如 `🎥 奈飞节点`；后端与派生同一套 Go 正则，编译失败或不带正则的组不出现在对象里）；`ok:false` 或能力位 false 时恒 `{}`；`exclude` 在 probe 模式忽略
 - **非 probe 响应 `nodes` 恒 `[]`**（节点名唯一出口是 probe，前端单一来源）
 - 节点名解析（SC-2，按 scheme）：`vmess://` base64 JSON 的 `ps`；`ss://` / `trojan://` 的 URL-encoded fragment 解码；其余 scheme 尽力（有 fragment 用之，无则该节点缺席列表）。契约承诺覆盖 vmess/ss/trojan 三类
 - D7 预校验照旧（`bad_url_*` 先于一切）；probe 请求带 `groups` 字段忽略之；预算与起算规则沿用 v1.4.0 两段式探测口径
@@ -231,32 +234,51 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 - **改组=新短链**：同订阅同参数不同 `groups` → 不同指纹 → 新码；同参数重转 → 复用既有码
 - v1 存量指纹记录不迁移（存量码照常 hit）；升级后无 groups 参数首建换新码（v1→v2 前缀差异，一次性影响，同 v1.3.0 config 变化先例）；`links` 表增 `groups TEXT` 列（`user_version` 1→2 幂等迁移），同码冻结语义延续
 
+### 模板群组删减（v1.5.0 增补，2026-10-30）
+
+需求：模板自带组对当前机场无用（无对应节点 / 节点不可用），支持在页面上手动删减。设计裁决（2026-10-30 逐条敲定，全部 A 案）：
+
+- **交互**：「＋ 自定义分组」入口改为「⚙️ 分组管理」，上下两区。上区【模板自带群组】= `presets[].groups` 全量 chips（模板原序）：`locked` 组显示 🔒、无删除入口；可删组点 `×` 踢入「已剔除」池；`groupHits` 为 0 的可删组标黄「(0 节点)」，并提供「一键剔除空群组」（静默移入 + 轻提示，不弹窗）；上区右上「↺ 恢复默认」清空剔除。下区【已剔除】灰 chips（点 `＋` 加回）+ 现有打词成组。
+- **时机**：模板组清单不依赖订阅（`/api/clients` 即得，未粘 URL 也可删）；命中数与一键剔除以 probe 完成为前提。**切换模板 → 剔除清单清空**（按新模板重新呈现）；能力位 false → 面板整体不显示（沿用现有口径）。
+- **锁定范围**（2026-10-30 修正，定义见 `GET /api/clients` 条）：路由骨架与安全组——`🚀 节点选择`、`🎯 全球直连`、拦截/净化类（首成员 REJECT 或承载内联规则的组）、`🐟` 漏网之鱼（`[]FINAL` 目标）、被其他组以 `[]X` 引用的骨架组不可删；自动策略组（`♻️ 自动选择` / `🔯 故障转移` / `🔮 负载均衡` / `🚀 手动切换`，无 ruleset 目标）、地区组、业务组（含被 ruleset 指向的 `💬 Ai平台` / `🌍 国外媒体` 等）均可删。
+- **删除的三步派生 + 自检**：见「GET /s/{code} 拉取期派生」第 2b 步——删组行 / 摘成员引用 / 规则回退（原组首成员直连类 → `🎯 全球直连`，否则 → `🚀 节点选择`；国内媒体类流量不绕代理）；残留被删组名 → 502 `derive_error`（自检 fail-closed，引擎不做兜底）。
+- **分享语义**：`exclude` 进指纹 v3 与 `links.exclude` 冻结——改删减 = 新短链；分享出去对方导入即同样精简版。
+- **0 节点识别**：仅对自带节点正则的组由后端计数（`groupHits`），前端只展示；业务组不做联动推导，由用户按喜好手动删。
+- **闸门依据**：gate3 2026-10-30，引擎 `aethersailor/subconverter-extended:latest`（2da8f8d9d139），7/7 PASS——删业务组+规则回退 / 删地区组不摘引用（负面对照：引擎 200 且 13 处悬空成员引用原样输出 → 摘引用必需）/ 删地区组+摘引用 / 直连类回退 / 删四个自动策略组+摘引用 / QX 目标删组+回退 / 删无规则引用组。证据：`docs/designs/custom-node-groups.md`「Gate Results (2026-10-30)」节。
+
 ### GET /s/{code} 拉取期派生（R2 / X-C1 / X-C2 / X-4）
 
-hit 且该码 `groups` 非空 → 拉取时派生，流程：
+hit 且该码 `groups` 或 `exclude` 非空 → 拉取时派生（`exclude` 单独非空、`groups` 为空时跳过第 3–6 步直接写盘），流程：
 
 1. 读该码冻结档位的**当前生效快照 ini**（`{DATA_DIR}/rules/` 内运行时改写产物——豁免/出树态建链期已被能力位挡，兜底撞上 → 502 `derive_error`）
-2. 解析 ini 既有 `custom_proxy_group=` 行的全部组名（模板组名单）
+2. 解析 ini 既有 `custom_proxy_group=` 行的全部组名（模板组名单；**删减前**原始名单，撞名判定也用它）
+2b. **模板组删减（v1.5.0 增补，`exclude` 非空时）**：锁定判定见 `GET /api/clients` 条（骨架+安全组 + 回退目标常量恒锁）；`exclude` 中的锁定名与模板中不存在的名静默忽略。然后依次：
+   - 删组行：被删组的 `custom_proxy_group=` 整行移除
+   - 摘引用：其余组行成员引用 `` `[]{被删组名} ``（**连前导反引号**整体摘除，防止留空成员）——gate3 T2 实证：不摘则引擎 200 且把悬空成员引用原样写进产物（不报错、不清理），摘引用为必需步骤
+   - 规则回退：`ruleset={被删组名},<url>` 行的目标组改写——被删组首成员（`[]X` 或裸成员；`.*` 等正则段不算）属直连类（`DIRECT` / `REJECT` / `🎯 全球直连` / 拦截净化类组名）→ 改写为 `🎯 全球直连`，否则 → `🚀 节点选择`
+   - 自检（fail-closed）：产物中不允许再出现被删组名作为 `custom_proxy_group=` 定义、`ruleset=` 目标或 `` `[] `` 成员引用；且发生规则改写时，所用回退目标组（`🚀 节点选择` / `🎯 全球直连`）必须存在于产物组集合中（上游模板改名/删除的防护——引擎不校验规则目标）；任一不满足 → 502 `derive_error`（gate3 T2：引擎不做兜底，自检是最后防线）
 3. 逐组生成行（每个关键词 `regexp.QuoteMeta` 转义后拼**前瞻 AND 正则**：`(?=.*w1)(?=.*w2)…(?=.*wn)`，单词同款写法——gate2 例 4 实证与裸词等价；行内分隔符为反引号，模板原生形态）：
    - `urlTest:false` → ``custom_proxy_group={name}`select`{前瞻正则}``
    - `urlTest:true` → ``custom_proxy_group={name}`url-test`{前瞻正则}`http://www.gstatic.com/generate_204`300,,50``（模板默认外网测速 URL、间隔 300、tolerance 50——R5 定案：测速流量穿节点，勿换国内 URL；行首 `=` 后直接组名、无前导反引号——模板原生形态，前导反引号形态引擎实测被静默吞）
-4. 撞名兜底（R3；闸门证有害形态：同名追加行被引擎静默吞、用户组丢失）：组名 ∈ 模板组名单或本次已生成组名 → 后缀带圈数字逐级递增（`{name}②`、`{name}③`…），撞穿全表 → 502 `derive_error`（极罕见）
+4. 撞名兜底（R3；闸门证有害形态：同名追加行被引擎静默吞、用户组丢失）：组名 ∈ 模板组名单（**删减前原始名单**，含被删名——用户组不得复用被删组名，避免与第 2b 步自检冲突）或本次已生成组名 → 后缀带圈数字逐级递增（`{name}②`、`{name}③`…），撞穿全表 → 502 `derive_error`（极罕见）
 5. 插入位（X-2 default 阶梯，闸门三档 81 个模板组逐组点名验证成立）：`[custom]` 段内既有 `custom_proxy_group=` 行块之后、`enable_rule_generator=true` 之前
 6. 全 select 组接线（用户裁决 B→A，2026-10-28）：追加组行的同时，`[custom]` 段**每个 select 类模板组行**（`名\`select\`…` 形态）行尾为每个自定义组追加 `` `[]{最终组名} `` 引用段（反引号分隔、[]组引用——模板原生形态，模板组员本就含 `[]♻️ 自动选择` 等；追加顺序 = groups 顺序；最终组名 = 撞名后缀解析后的名字；兼容行尾 `.*` 正则段与 `[]DIRECT` 两形态）——**规则流量可达 + 处处可选**：接线前自定义组在规则模式下不通流量、且仅主组可选；接线后用户在客户端任何手动选择组（「🚀 节点选择」、MultiMode 的「💬 Ai平台」等）里都能选中自定义组。url-test 等自动组行不注入（无手动选择语义）；极端模板无 select 组行时不接线（组仍生成，GLOBAL 模式可用）
 7. 写 `${DATA_DIR}/derived/{code}.ini`（按短链 code 命名；**拉取时覆盖写**——快照刷新后下次拉取自动用新模板）
-8. 引擎调用的 `config=` 指派生文件的**容器内回环 URL**（`http://127.0.0.1:{SIDECAR_PORT}/internal/derived/{code}`，sidecar serve 该文件；仅容器内回环可达、nginx 不路由，同 `/internal/sub/{ref}` 模式但无 TTL——短链存活期内可重复拉取）——闸门发现：引擎 `config=` 只认 http URL，本地路径与 `file://` 均被当 opaque URL 拒 400
+8. 引擎调用的 `config=` 指派生文件的**容器内回环 URL**（`http://127.0.0.1:{SIDECAR_PORT}/internal/derived/{code}`，sidecar serve 该文件；仅容器内回环可达、nginx 不路由，同 `/internal/sub/{ref}` 模式但无 TTL——短链存活期内可重复拉取）——闸门发现：引擎 `config=` 本地路径与 `file://` 均被当 opaque URL 拒 400（gate3 2026-10-30 复测更正：容器内 `/base` 树内**已存在**的本地路径也可用，须带完整文件名；产品路径仍走回环 http URL，结论不变）
 9. 两段式链（clash/quanx）第二段 `config=` 同样指派生 URL；QX 追加组闸门实测保留（`[policy]` static 行完整），**无需按 target 隐藏入口**（R4 不触发）
 
 - **派生失败**（读快照/写盘失败等）→ HTTP 502，body `{"error":"derive_error"}`，fail-closed **不回退无组输出**（R2：配置不得静默偏离用户意图）；sidecar 日志脱敏摘要；502 内容协商（v1.3.1 人话页）对 `derive_error` 同 502 家族沿用
 - **拉取期零命中**（订阅更新后关键词不再命中任何节点）：组行无条件写入派生 ini（R3-6 单测口径），引擎原生退化 → 客户端可见形态 = **组仅含 DIRECT**（闸门例 3 实证 `proxies: [DIRECT]`，组不消失不空组）；v1 不做拉取期重评
-- **无 groups 短链**：派生路径完全旁路，产物与 v1.4.0 **逐字节一致**（T6 回归断言）
+- **无 groups 且无 exclude 短链**：派生路径完全旁路，产物与 v1.4.0 **逐字节一致**（T6 回归断言）
 - `DELETE /api/links/{code}` 同步删 `${DATA_DIR}/derived/{code}.ini`（X-4）
 
-### 闸门依据（gate1 2026-10-27 8 例全过；gate2 2026-10-28 多词 AND 5 例全过）
+### 闸门依据（gate1 2026-10-27 8 例全过；gate2 2026-10-28 多词 AND 5 例全过；gate3 2026-10-30 模板组删减 7 例全过）
 
 gate1：default 插入位成立（fallback 未触发）/ 撞名有害（吞行）→ 后缀②启用 / QX 保留组 → R4 不触发 / 零命中 = 仅含 DIRECT → 无需显式 `[]DIRECT` 兜底 / QuoteMeta 必要性实锤（4b 对照误命中）/ `config=` 只认 http URL → 派生走回环 serve。完整证据与产物路径：`docs/designs/custom-node-groups.md`「Gate Results (2026-10-27)」节。主组接线（流程第 6 步）为 B 裁决后补——闸门 8 例未覆盖该行为，由派生单测与 S5 冒烟断言覆盖。
 
 gate2（多关键词 AND，前瞻写法）：引擎完整支持前瞻正则（5/5 PASS 零报错零吞组）——AND 主用例成员精确（不含单词命中者）/ QuoteMeta 组合转义点无误命中 / 多词零命中=仅 DIRECT / 单词前瞻与裸词等价（实现统一前瞻写法）/ QX 路径同样生效。证据：`/tmp/gate-custom-groups/gate2-report.md` 与 out/g2-* 产物。
+
+gate3（模板组删减，7/7 PASS）：删业务组+规则回退逐条生效（T1）/ **负面对照：只删组行不摘引用 → 引擎 200、13 处悬空成员引用原样输出**（T2，摘引用必需）/ 删地区组+摘引用干净（T3）/ 直连类组 ruleset 回退到 `🎯 全球直连`（T4）/ 删四个自动策略组+摘引用后主组成员完整（T5）/ QX 目标删组+回退（T6）/ 无规则引用组删除（T7）。证据：`/tmp/gate2-prune/`（`./gate.sh` 复现，report 与产物在 out/、logs/）；`config=` 本地路径结论更正见流程第 8 步。
 
 ## GET /api/health
 

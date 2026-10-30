@@ -43,10 +43,17 @@ type capabilitiesInfo struct {
 	CustomGroups bool `json:"customGroups"`
 }
 
+// presetGroupInfo 模板自带组清单项（v1.5.0 增补）：locked=true = 锁定组（不可删）
+type presetGroupInfo struct {
+	Name   string `json:"name"`
+	Locked bool   `json:"locked"`
+}
+
 // presetWithCaps 档位级能力位（v1.5.0）：快照本地化档 true、豁免档 false（派生需读本地 ini）
 type presetWithCaps struct {
 	presetEntry
-	CustomGroups bool `json:"customGroups"`
+	CustomGroups bool              `json:"customGroups"`
+	Groups       []presetGroupInfo `json:"groups"` // v1.5.0 增补：模板组清单（模板原序；不可用 → []）
 }
 
 type clientsResponse struct {
@@ -88,16 +95,18 @@ type previewResponse struct {
 
 // probePreviewResponse probe 模式响应（v1.5.0）：与 previewResponse 同形，唯 link /
 // deepLink 恒 null（「link 永远非空」条款本模式豁免——探测建链无副作用即目的），
-// nodes 为节点名列表（ok:false 时恒 []）
+// nodes 为节点名列表（ok:false 时恒 []）；groupHits = 模板组命中数（v1.5.0 增补，
+// 仅 probe 响应携带；ok:false / 能力位 false 时恒 {}）
 type probePreviewResponse struct {
-	OK        bool       `json:"ok"`
-	Target    string     `json:"target"`
-	Preset    *presetRef `json:"preset"`
-	ErrorCode *string    `json:"errorCode"`
-	Message   string     `json:"message"`
-	Link      *string    `json:"link"`
-	DeepLink  *string    `json:"deepLink"`
-	Nodes     []string   `json:"nodes"`
+	OK        bool           `json:"ok"`
+	Target    string         `json:"target"`
+	Preset    *presetRef     `json:"preset"`
+	ErrorCode *string        `json:"errorCode"`
+	Message   string         `json:"message"`
+	Link      *string        `json:"link"`
+	DeepLink  *string        `json:"deepLink"`
+	Nodes     []string       `json:"nodes"`
+	GroupHits map[string]int `json:"groupHits"`
 }
 
 // 客户端注册表（契约冻结：顺序即 chips 顺序，auto 永远第一；verified 随真机实测置 true）
@@ -295,7 +304,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func (s *server) handleClients(w http.ResponseWriter, r *http.Request) {
 	ps := make([]presetWithCaps, len(s.presets))
 	for i, p := range s.presets {
-		ps[i] = presetWithCaps{presetEntry: p, CustomGroups: s.presetCustomGroups(p)}
+		ps[i] = presetWithCaps{
+			presetEntry:  p,
+			CustomGroups: s.presetCustomGroups(p),
+			Groups:       s.presetGroups(p),
+		}
 	}
 	writeJSON(w, http.StatusOK, clientsResponse{
 		Clients:      registry,

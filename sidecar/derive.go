@@ -54,32 +54,66 @@ func isSelectCPG(line string) bool {
 	return strings.HasPrefix(rest[len(name):], "`select`")
 }
 
-// deriveGroupsINI 快照 ini + groups → 派生 ini。组行插入 [custom] 段内既有
-// custom_proxy_group= 行块之后（闸门 default 位，三档 81 模板组逐组点名验证）；
-// ini 无 [custom] 段或无既有组行 → 找不到锚点即报错（fail-closed，不发明插入位）。
-// 组行无条件写入——零命中由引擎原生退化（组仅含 DIRECT，闸门例 3），派生层不特判。
-// 主组接线（用户裁决 B，2026-10-28）：首个 custom_proxy_group= 行（主组）行尾为每组
-// 追加 []组引用段，规则流量可达自定义组（否则组在规则模式下不通流量、仅摆设）。
-func deriveGroupsINI(src []byte, groups []nodeGroup) ([]byte, error) {
-	if len(groups) == 0 {
-		return nil, fmt.Errorf("空 groups（调用方应旁路派生）")
-	}
+// deriveINI 派生总入口（v1.5.0 增补承载 exclude）：先删减模板组（exclude 非空时：删组行 /
+// 摘成员引用 / 规则回退 / fail-closed 自检），再追加自定义组行并接线。groups 为空仅
+// exclude 非空 → 跳过第 3–6 步（生成/撞名/接线），只做删减+自检（契约第 2b 步）。
+func deriveINI(src []byte, groups []nodeGroup, exclude []string) ([]byte, error) {
 	lines := strings.Split(string(src), "\n")
-	taken := map[string]bool{} // 模板组名单 ∪ 本次已生成名
-	lastCPG := -1              // 既有组行块尾（插入位锚点）
-	var selectRows []int       // select 类模板组行（全接线，用户裁决 A）
+	info := analyzeTemplate(src)
+	removed := map[string]bool{}
+	for _, name := range exclude {
+		if _, ok := info.byName[name]; !ok || info.locked(name) {
+			continue // 模板中不存在的名与 locked 组静默忽略（上游改名容错，契约第 2b 步）
+		}
+		removed[name] = true
+	}
+	requiredTargets := map[string]bool{} // 规则改写用到的回退目标组（自检要求产物中存在）
+	for name := range removed {
+		if info.ruleTargets[name] {
+			requiredTargets[fallbackRuleTarget(info, name)] = true
+		}
+	}
+	if len(removed) > 0 {
+		lines = pruneTemplateGroups(lines, info, removed)
+	}
+	if len(groups) > 0 {
+		var err error
+		lines, err = appendGroups(lines, groups, info)
+		if err != nil {
+			return nil, err
+		}
+	}
+	out := []byte(strings.Join(lines, "\n"))
+	if len(removed) > 0 {
+		if err := selfCheckPruned(out, removed, requiredTargets); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// appendGroups 组行生成 + 撞名兜底 + 插入位 + 全 select 组接线（契约第 3–6 步）。
+// taken 用删减前模板原始名单（含被删名——用户组不得复用被删组名，避免与删减自检
+// 冲突，契约第 4 步）；主组接线（用户裁决 B，2026-10-28）：每个 select 类模板组行
+// 行尾为每组追加 []组引用段，规则流量可达自定义组。
+func appendGroups(lines []string, groups []nodeGroup, info templateInfo) ([]string, error) {
+	taken := make(map[string]bool, len(info.groups))
+	for _, g := range info.groups {
+		taken[g.Name] = true
+	}
+	lastCPG := -1        // 既有组行块尾（插入位锚点；删减后行集）
+	var selectRows []int // select 类模板组行（全接线，用户裁决 A）
 	inCustom := false
 	for i, line := range lines {
 		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
-			inCustom = t == "[custom]"
+		if name, ok := sectionName(t); ok {
+			inCustom = name == "custom"
 			continue
 		}
 		if !inCustom {
 			continue
 		}
-		if name, ok := parseProxyGroupName(t); ok {
-			taken[name] = true
+		if _, ok := parseProxyGroupName(t); ok {
 			if isSelectCPG(t) {
 				selectRows = append(selectRows, i)
 			}
@@ -137,20 +171,24 @@ func deriveGroupsINI(src []byte, groups []nodeGroup) ([]byte, error) {
 	out = append(out, lines[:lastCPG+1]...)
 	out = append(out, gen...)
 	out = append(out, lines[lastCPG+1:]...)
-	return []byte(strings.Join(out, "\n")), nil
+	return out, nil
 }
 
 // prepareDerivedConfig /s/ 拉取期派生入口：读冻结档位当前生效本地 ini（豁免/出树态
-// 建链期已被能力位挡，兜底撞上在此失败）→ 派生 → 写 {DATA_DIR}/derived/{code}.ini
-// （拉取时覆盖写——快照刷新后下次拉取自动用新模板）→ 返回引擎可用的回环 URL。
-// 任一步失败返回错误（上层 502 derive_error）。
-func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON string) (string, error) {
+// 建链期已被能力位挡，兜底撞上在此失败）→ 派生（groups 追加 + exclude 删减）→ 写
+// {DATA_DIR}/derived/{code}.ini（拉取时覆盖写——快照刷新后下次拉取自动用新模板）→
+// 返回引擎可用的回环 URL。任一步失败返回错误（上层 502 derive_error）。
+func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON, excludeJSON string) (string, error) {
 	groups, err := parseGroupsJSON(groupsJSON)
 	if err != nil {
 		return "", err
 	}
-	if len(groups) == 0 {
-		return "", fmt.Errorf("groups 为空，不应进入派生路径")
+	exclude, err := parseExcludeJSON(excludeJSON)
+	if err != nil {
+		return "", err
+	}
+	if len(groups) == 0 && len(exclude) == 0 {
+		return "", fmt.Errorf("groups 与 exclude 均为空，不应进入派生路径")
 	}
 	if !strings.HasPrefix(frozenConfigURL, "/") {
 		// v1.5.0 兜底（评审 F3）：改写产物缺（bootstrap 预生成原料不齐、产物被删等残余
@@ -169,7 +207,7 @@ func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON string) 
 	if err != nil {
 		return "", fmt.Errorf("读快照失败: %w", err)
 	}
-	out, err := deriveGroupsINI(src, groups)
+	out, err := deriveINI(src, groups, exclude)
 	if err != nil {
 		return "", err
 	}

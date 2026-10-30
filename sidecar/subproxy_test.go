@@ -21,7 +21,7 @@ import (
 // newLink 建一条短链并返回短码
 func newLink(t *testing.T, s *server, subURL, target, presetID, configURL string) string {
 	t.Helper()
-	code, err := s.store.getOrCreateLink(subURL, target, presetID, configURL, "")
+	code, err := s.store.getOrCreateLink(subURL, target, presetID, configURL, "", "")
 	if err != nil {
 		t.Fatalf("getOrCreateLink: %v", err)
 	}
@@ -930,7 +930,7 @@ func TestShortLinkGroupsDeriveSingleStage(t *testing.T) {
 	s := mustServer(t, testConfig(t, ext.URL))
 	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
 	groups := `[{"name":"专线","keywords":["专线"],"urlTest":false}]`
-	code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", cfgPath, groups)
+	code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", cfgPath, groups, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -992,7 +992,7 @@ func TestShortLinkGroupsDeriveTwoStage(t *testing.T) {
 	s := mustServer(t, testConfig(t, ext.URL))
 	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
 	groups := `[{"name":"家宽","keywords":["家宽"],"urlTest":true}]`
-	code, err := s.store.getOrCreateLink(airport.URL+"/sub", "clash", "default", cfgPath, groups)
+	code, err := s.store.getOrCreateLink(airport.URL+"/sub", "clash", "default", cfgPath, groups, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1041,7 +1041,7 @@ func TestShortLinkDeriveError(t *testing.T) {
 		{"本地快照缺失", filepath.Join(s.cfg.dataDir, "rules", "missing.rewritten.ini")},
 	}
 	for _, c := range cases {
-		code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", c.path, groups)
+		code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", c.path, groups, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1060,7 +1060,7 @@ func TestShortLinkDeriveError(t *testing.T) {
 		}
 	}
 	// 浏览器直开（Accept text/html）→ 人话页
-	code, err := s.store.getOrCreateLink("https://sub.example.com/l2", "surge", "default", "https://example.com/preset.ini", groups)
+	code, err := s.store.getOrCreateLink("https://sub.example.com/l2", "surge", "default", "https://example.com/preset.ini", groups, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1083,7 +1083,7 @@ func TestDeleteLinkRemovesDerivedFile(t *testing.T) {
 	s := mustServer(t, testConfig(t, ext.URL))
 	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
 	groups := `[{"name":"专线","keywords":["专线"],"urlTest":false}]`
-	code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", cfgPath, groups)
+	code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", cfgPath, groups, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1173,5 +1173,91 @@ func TestShortLinkNoGroupsByteIdentical(t *testing.T) {
 	}
 	if q2.Get("url") != uriA+"|"+uriB || q2.Get("config") != "https://example.com/preset.ini" {
 		t.Errorf("两段第二段 query = %v，应与冻结参数一致", q2)
+	}
+}
+
+// ---- v1.5.0 增补：exclude（模板组删减）拉取期派生 ----
+
+// 仅 exclude（groups 空）短链：命中派生路径 → 删组行 + 规则回退写盘，引擎 config= 指派生 URL；
+// 派生文件无该组、ProxyMedia 规则目标回退 🚀 节点选择，且不生成任何用户组行
+func TestShortLinkExcludeOnlyDerive(t *testing.T) {
+	var gotConfig string
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotConfig = r.URL.Query().Get("config")
+		_, _ = w.Write([]byte("[General]\nloglevel = notify"))
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
+	code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", cfgPath, "", `["🌍 国外媒体"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	resp := get(t, ts.URL+"/s/"+code)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/s/ 状态码 = %d body=%s", resp.StatusCode, body)
+	}
+	if want := ts.URL + "/internal/derived/" + code; gotConfig != want {
+		t.Errorf("引擎 config= = %q，应指派生 URL %q", gotConfig, want)
+	}
+	data, err := os.ReadFile(derivedPath(s, code))
+	if err != nil {
+		t.Fatalf("派生文件未落盘: %v", err)
+	}
+	derived := string(data)
+	if strings.Contains(derived, "custom_proxy_group=🌍 国外媒体`") {
+		t.Errorf("派生文件不应含被删组定义:\n%s", derived)
+	}
+	if !strings.Contains(derived, "ruleset=🚀 节点选择,https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ProxyMedia.list") {
+		t.Errorf("ProxyMedia ruleset 目标应回退 🚀 节点选择:\n%s", derived)
+	}
+	if strings.Contains(derived, "select`(?=.*") {
+		t.Errorf("仅 exclude 不应生成用户组行:\n%s", derived)
+	}
+}
+
+// groups + exclude 同提交：派生文件两组动作都生效（删组/回退 + 生成/接线）
+func TestShortLinkGroupsAndExcludeDerive(t *testing.T) {
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("[General]\nloglevel = notify"))
+	}))
+	defer ext.Close()
+	s := mustServer(t, testConfig(t, ext.URL))
+	cfgPath := writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
+	groups := `[{"name":"专线","keywords":["专线"],"urlTest":false}]`
+	code, err := s.store.getOrCreateLink("https://sub.example.com/l", "surge", "default", cfgPath, groups, `["🌍 国外媒体"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+	resp := get(t, ts.URL+"/s/"+code)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/s/ 状态码 = %d", resp.StatusCode)
+	}
+	data, err := os.ReadFile(derivedPath(s, code))
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived := string(data)
+	if strings.Contains(derived, "custom_proxy_group=🌍 国外媒体`") {
+		t.Error("exclude 未生效")
+	}
+	if !strings.Contains(derived, "custom_proxy_group=专线`select`(?=.*专线)") {
+		t.Errorf("groups 未生成:\n%s", derived)
+	}
+	if !strings.Contains(derived, "`[]专线") {
+		t.Error("select 组接线缺失")
+	}
+	if !strings.Contains(derived, "ruleset=🚀 节点选择,https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ProxyMedia.list") {
+		t.Error("规则回退未生效")
 	}
 }

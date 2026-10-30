@@ -31,6 +31,14 @@ export function useConverter() {
   const nodes = ref<string[]>([])
   const probeState = ref<ProbeState>('idle')
 
+  // v1.5.0 增补：模板组删减（excluded 保持加入顺序、去重）+ probe 回传的模板组命中数
+  const excluded = ref<string[]>([])
+  const groupHits = ref<Record<string, number>>({})
+  // 当前选中档的模板自带组清单（模板原序；字段缺席按 [] 降级——豁免档/旧 sidecar）
+  const templateGroups = computed(
+    () => presets.value.find((p) => p.id === selectedPreset.value)?.groups ?? [],
+  )
+
   // 入口显隐 = 部署能力位 && 选中档能力位（契约 R1/D2；字段缺席按 false 降级，老 sidecar 不显示入口）
   const customGroupsAvailable = computed(
     () =>
@@ -50,35 +58,64 @@ export function useConverter() {
   }
 
   let probeSeq = 0
-  // 上次成功 probe 的 url：同 url 重新展开面板时复用结果不重发（F6）
+  // 上次成功 probe 的 url / 模板档：同 url 同档重新展开面板时复用结果不重发（F6）；
+  // 任一不匹配（含换档、清空 URL）都重新探测，不复用旧档结果
   let probedUrl = ''
+  let probedPreset = ''
+
+  // 清空探针状态并作废在途响应（F2/F5）：旧链接/旧模板的名单与命中数一律不得残留
+  function resetProbe() {
+    probeSeq++
+    nodes.value = []
+    groupHits.value = {}
+    probeState.value = 'idle'
+    probedUrl = ''
+    probedPreset = ''
+  }
+
   async function probeNodes() {
     if (!groupsOpen.value) return // 双保险：收起/restart 清了定时器后，在途回调不得再发
-    if (!inputUrl.value.trim()) return
+    if (!inputUrl.value.trim()) {
+      resetProbe() // 空 URL 重开面板：上一订阅的 ready 结果残留会误导面板（F5）
+      return
+    }
     const seq = ++probeSeq
+    const url = inputUrl.value // F3：归属按请求时的 URL 记账，不取响应时的当前值
+    const preset = selectedPreset.value
     probeState.value = 'loading'
+    groupHits.value = {} // 旧命中数属旧名单/旧模板，探测期间不展示
     try {
-      const res = await fetchPreview(inputUrl.value, selectedTarget.value, selectedPreset.value, { probe: true })
-      if (seq !== probeSeq) return // 过期响应丢弃（换 url 后旧 probe 慢回）
+      const res = await fetchPreview(url, selectedTarget.value, preset, { probe: true })
+      if (seq !== probeSeq) return // 过期响应丢弃（换 url / 换档后旧 probe 慢回）
       if (res.ok && Array.isArray(res.nodes)) {
         nodes.value = res.nodes
+        groupHits.value = res.groupHits && typeof res.groupHits === 'object' ? res.groupHits : {}
         probeState.value = 'ready'
-        probedUrl = inputUrl.value
+        probedUrl = url
+        probedPreset = preset
       } else {
         probeState.value = 'failed'
+        groupHits.value = {}
       }
     } catch {
       if (seq !== probeSeq) return
       probeState.value = 'failed'
+      groupHits.value = {}
     }
   }
 
-  // 展开分组面板 → probe（url 非空才发；同 url 已 ready 复用不重发）；收起 → 清
+  // 展开分组面板 → probe（url 非空才发；同 url 同档已 ready 复用不重发）；收起 → 清
   // pending 防抖（收起后 400ms 内不得再触发 probe / 重置面板状态）
   let reprobeTimer: ReturnType<typeof setTimeout> | undefined
   watch(groupsOpen, (open) => {
     if (open) {
-      if (probeState.value === 'ready' && probedUrl === inputUrl.value) return
+      if (
+        probeState.value === 'ready' &&
+        probedUrl === inputUrl.value &&
+        probedPreset === selectedPreset.value
+      ) {
+        return
+      }
       void probeNodes()
       return
     }
@@ -96,8 +133,7 @@ export function useConverter() {
       clearTimeout(reprobeTimer)
       reprobeTimer = setTimeout(() => {
         if (!inputUrl.value.trim()) {
-          nodes.value = []
-          probeState.value = 'idle'
+          resetProbe()
           return
         }
         void probeNodes()
@@ -106,6 +142,17 @@ export function useConverter() {
     { flush: 'sync' },
   )
 
+  // 切换模板 → 剔除清单与命中数按新模板重置（不按组名继承）；作废在途 probe——旧模板
+  // 的命中数不得落到新档；面板开着且新档支持分组则重 probe，让 0 节点标记/一键剔除跟随新模板
+  watch(selectedPreset, () => {
+    excluded.value = []
+    groupHits.value = {}
+    probedUrl = ''
+    probedPreset = ''
+    probeSeq++
+    if (groupsOpen.value && customGroupsAvailable.value) void probeNodes()
+  })
+
   async function submit() {
     if (submitting.value) return
     submitting.value = true
@@ -113,14 +160,16 @@ export function useConverter() {
     advancedOpen.value = true
     convertError.value = null
     try {
-      // 空组不带第 4 参（存量请求字节不变）；能力位失效（切到不支持档）时剔除 groups
+      // 空组不带第 4 参（存量请求字节不变）；能力位失效（切到不支持档）时剔除 groups / exclude
       // 发送——等价无组转换正常成功，残留组不会撞 groups_disabled 锁死（F1）
       const sendGroups = customGroupsAvailable.value ? groups.value : []
+      const sendExclude = customGroupsAvailable.value ? excluded.value : []
+      const options: { groups?: NodeGroup[]; exclude?: string[] } = {}
+      if (sendGroups.length > 0) options.groups = sendGroups
+      if (sendExclude.length > 0) options.exclude = sendExclude
       const res =
-        sendGroups.length > 0
-          ? await fetchPreview(inputUrl.value, selectedTarget.value, selectedPreset.value, {
-              groups: sendGroups,
-            })
+        Object.keys(options).length > 0
+          ? await fetchPreview(inputUrl.value, selectedTarget.value, selectedPreset.value, options)
           : await fetchPreview(inputUrl.value, selectedTarget.value, selectedPreset.value)
       // 预校验类错误（bad_url_* / bad_preset / bad_groups / groups_disabled）：输入本身有问题，
       // 给链接无意义——停留状态②，展示文案可修改重试
@@ -161,9 +210,9 @@ export function useConverter() {
     phase.value = 'idle'
     result.value = null
     convertError.value = null
-    // 节点名单属旧链接：清掉并收起面板（重开即对新链接重 probe）；组意图保留（换链接打词仍适用）
-    nodes.value = []
-    probeState.value = 'idle'
+    // 节点名单属旧链接：清掉并收起面板（重开即对新链接重 probe）；组意图与剔除清单保留
+    //（换链接打词/删减仍适用）
+    resetProbe()
     groupsOpen.value = false
     clearTimeout(reprobeTimer) // pending 防抖不得在 restart 后触发、重置已清空的状态
   }
@@ -184,6 +233,9 @@ export function useConverter() {
     groups,
     nodes,
     probeState,
+    excluded,
+    groupHits,
+    templateGroups,
     loadClients,
     probeNodes,
     submit,

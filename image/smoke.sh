@@ -14,11 +14,14 @@
 #           GitHub config URL → /s/ 运行时映射本地产物；数据源 image/rules-snapshot/
 #           缺失时整段 SKIP（vendor 出厂层落地后自动生效）
 #   第五步  自定义分组（v1.5.0，容器2 default 档快照本地化 customGroups=true 上）：
-#           probe 探测 nodes 全量回传且 link=null（不建链零副作用）→ 带 groups 提交建链 →
-#           /s/ 拉取 clash 产物断言「专线组」成员 == 命中节点、主组「🚀 节点选择」
-#           含专线组 → 多词 AND（keywords=["美国","专线"]）成员恰「美国 A01 专线」
-#           含该组（B 裁决主组接线，规则流量可达）；零命中关键词 → 组仅 [DIRECT]；
-#           出树容器（DATA_DIR 挂树外）断言 capabilities.customGroups=false（出树降级）。
+#           probe 探测 nodes 全量回传且 link=null（不建链零副作用）+ groupHits 模板组命中数
+#           → 带 groups 提交建链 → /s/ 拉取 clash 产物断言「专线组」成员 == 命中节点、
+#           主组「🚀 节点选择」含专线组 → 多词 AND（keywords=["美国","专线"]）成员恰
+#           「美国 A01 专线」含该组（B 裁决主组接线，规则流量可达）；零命中关键词 →
+#           组仅 [DIRECT]；模板群组删减（v1.5.0 增补）：仅 exclude 删「🌍 国外媒体」→
+#           产物无该组定义、ProxyMedia RULE-SET 目标回退「🚀 节点选择」（摘引用 + 规则
+#           回退）；groups+exclude 同提交两组动作都生效；出树容器（DATA_DIR 挂树外）断言
+#           capabilities.customGroups=false（出树降级）。
 #           derive_error fail-closed 由 sidecar 单测覆盖（冒烟触发需破坏容器内快照原料，不做）
 # fixture 全本地（订阅节点为 RFC 5737 测试地址，无需真实出网）
 # 用法: smoke.sh <image> [host-port]（默认 18080）
@@ -500,8 +503,8 @@ print(json.load(sys.stdin)['link'])
     GROUPS_SUB_URL="http://host.docker.internal:${FIXTURE_PORT}/fixture-groups-sub.txt"
     GROUP_NODES='["专线HK-01","专线SG-02","专线JP-03","IPLC美国-04","通用HK-05","美国 A01 专线","日本 A01 专线"]'
 
-    # ① probe 探测（不建链零副作用）：nodes 全量回传、link/deepLink 恒 null
-    #    （请求带 groups 验「probe 忽略 groups」条款）
+    # ① probe 探测（不建链零副作用）：nodes 全量回传、link/deepLink 恒 null、
+    #    groupHits 模板组命中数（v1.5.0 增补；请求带 groups 验「probe 忽略 groups」条款）
     if curl -s -m 60 -X POST "$BASE2/api/preview" \
         -H 'Content-Type: application/json' \
         -d "{\"url\":\"$GROUPS_SUB_URL\",\"target\":\"clash\",\"probe\":true,\"groups\":[{\"name\":\"专线组\",\"keywords\":[\"专线\"],\"urlTest\":false}]}" | python3 -c "
@@ -510,6 +513,8 @@ d = json.load(sys.stdin)
 assert d['ok'] is True, 'ok=%s code=%s msg=%s' % (d['ok'], d['errorCode'], d['message'])
 assert d['link'] is None and d['deepLink'] is None, 'link=%s deepLink=%s 应恒 null' % (d['link'], d['deepLink'])
 assert sorted(d['nodes']) == sorted(json.loads(sys.argv[1])), 'nodes=%s' % d['nodes']
+assert d['groupHits'].get('♻️ 自动选择') == 7, 'groupHits 自动选择=%s（.* 正则应命中全部 7 节点）' % d['groupHits'].get('♻️ 自动选择')
+assert '🎯 全球直连' not in d['groupHits'], 'groupHits 不应含无正则段组: %s' % d['groupHits']
 " "$GROUP_NODES"; then
         echo "PASS probe 探测：nodes 全量回传、link=null（探测不建链零副作用，groups 字段被忽略）"
     else
@@ -674,7 +679,91 @@ assert groups["美专线"] == ["美国 A01 专线"], "美专线成员=%s want=[�
         rc=1
     fi
 
-    # ⑤ 出树能力位（T8）：DATA_DIR 挂树外 → 快照本地化整体禁用、customGroups=false
+    # ⑤ 模板群组删减（v1.5.0 增补）：仅 exclude（groups 空）删「🌍 国外媒体」（有 ruleset，
+    #    ProxyMedia）→ 派生删组行 + 摘引用 + 规则回退；clash 产物无该组、ProxyMedia
+    #    RULE-SET 目标 = 🚀 节点选择
+    EXLINK=$(curl -s -m 60 -X POST "$BASE2/api/preview" \
+        -H 'Content-Type: application/json' \
+        -d "{\"url\":\"$GROUPS_SUB_URL\",\"target\":\"clash\",\"exclude\":[\"🌍 国外媒体\"]}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['ok'] is True, 'ok=%s code=%s msg=%s' % (d['ok'], d['errorCode'], d['message'])
+print(d['link'])
+") || EXLINK=""
+    if [ -n "$EXLINK" ]; then
+        if curl -s -m 60 -A "$CLASH_UA" "$EXLINK" | python3 -c '
+import re, sys
+text = sys.stdin.read()
+assert "proxy-groups:" in text, "输出无 proxy-groups"
+assert "🌍 国外媒体" not in text, "被删组名残留（定义/成员引用/规则目标）"
+targets = re.findall(r"^\s*-\s+RULE-SET,ProxyMedia \([^)]*\),([^,\n]+)", text, re.M)
+assert targets, "无 ProxyMedia RULE-SET 规则（规则集未产出）"
+assert all(t.strip() == "🚀 节点选择" for t in targets), "ProxyMedia 规则目标=%s want=🚀 节点选择（首成员非直连类）" % targets
+'; then
+            echo "PASS 仅 exclude：🌍 国外媒体 组删除 + ProxyMedia 规则回退 🚀 节点选择"
+        else
+            echo "FAIL 仅 exclude 断言（组残留或规则目标未回退）"
+            rc=1
+        fi
+    else
+        echo "FAIL 仅 exclude 提交未生成短链"
+        rc=1
+    fi
+
+    # ⑥ groups + exclude 同提交：打词成组/接线 与 删组/规则回退 两组动作都生效
+    XGLINK=$(curl -s -m 60 -X POST "$BASE2/api/preview" \
+        -H 'Content-Type: application/json' \
+        -d "{\"url\":\"$GROUPS_SUB_URL\",\"target\":\"clash\",\"groups\":[{\"name\":\"专线组\",\"keywords\":[\"专线\"],\"urlTest\":false}],\"exclude\":[\"🌍 国外媒体\"]}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['ok'] is True, 'ok=%s code=%s msg=%s' % (d['ok'], d['errorCode'], d['message'])
+print(d['link'])
+") || XGLINK=""
+    if [ -n "$XGLINK" ]; then
+        if curl -s -m 60 -A "$CLASH_UA" "$XGLINK" | python3 -c '
+import re, sys
+Q = chr(34) + chr(39)
+text = sys.stdin.read()
+assert "🌍 国外媒体" not in text, "被删组名残留（exclude 未生效）"
+assert "proxy-groups:" in text, "输出无 proxy-groups"
+chunk = text.split("proxy-groups:", 1)[1].split("\nrules:", 1)[0]
+groups, cur, collect = {}, None, False
+for line in chunk.splitlines():
+    m = re.match(r"\s*-\s+name:\s*(.*?)\s*$", line)
+    if m:
+        cur = m.group(1).strip(Q)
+        groups[cur] = []
+        collect = False
+        continue
+    if cur is None:
+        continue
+    if re.match(r"\s*proxies:\s*$", line):
+        collect = True
+        continue
+    if collect:
+        m = re.match(r"\s+-\s+(.*?)\s*$", line)
+        if m:
+            groups[cur].append(m.group(1).strip(Q))
+            continue
+        collect = False
+assert "专线组" in groups, "proxy-groups 无 专线组: %s" % list(groups)
+want = sorted(["专线HK-01", "专线SG-02", "专线JP-03", "美国 A01 专线", "日本 A01 专线"])
+assert sorted(groups["专线组"]) == want, "专线组成员=%s want=%s" % (groups["专线组"], want)
+assert "专线组" in groups.get("🚀 节点选择", []), "主组未接线: %s" % groups.get("🚀 节点选择")
+targets = re.findall(r"^\s*-\s+RULE-SET,ProxyMedia \([^)]*\),([^,\n]+)", text, re.M)
+assert targets and all(t.strip() == "🚀 节点选择" for t in targets), "ProxyMedia 规则目标=%s" % targets
+'; then
+            echo "PASS groups+exclude 同提交：专线组成组接线 + 国外媒体删除/规则回退"
+        else
+            echo "FAIL groups+exclude 同提交断言"
+            rc=1
+        fi
+    else
+        echo "FAIL groups+exclude 提交未生成短链"
+        rc=1
+    fi
+
+    # ⑦ 出树能力位（T8）：DATA_DIR 挂树外 → 快照本地化整体禁用、customGroups=false
     NAME5=ssc-smoke-outtree
     OUTTREE_DIR=$(mktemp -d)
     docker rm -f "$NAME5" >/dev/null 2>&1 || true

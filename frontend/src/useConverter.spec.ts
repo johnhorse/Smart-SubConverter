@@ -523,3 +523,273 @@ describe('useConverter 自定义分组（v1.5.0）', () => {
     expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub2', 'auto', 'default', { probe: true })
   })
 })
+
+describe('useConverter 模板组删减（v1.5.0 增补）', () => {
+  const capableClients = {
+    clients: [],
+    presets: [
+      {
+        id: 'default',
+        name: '默认',
+        url: 'https://a.ini',
+        customGroups: true,
+        groups: [
+          { name: '🚀 节点选择', locked: true },
+          { name: '🇰🇷 韩国节点', locked: false },
+        ],
+      },
+      {
+        id: 'full_multimode',
+        name: '分组',
+        url: 'https://b.ini',
+        customGroups: true,
+        groups: [{ name: '💬 Ai平台', locked: false }],
+      },
+    ],
+    capabilities: { customGroups: true },
+  }
+
+  beforeEach(() => {
+    vi.mocked(fetchPreview).mockReset()
+    vi.mocked(fetchClients).mockReset().mockResolvedValue({ clients: [], presets: [] })
+  })
+
+  it('templateGroups 取选中档 groups（模板原序）；切档跟随', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    expect(conv.templateGroups.value).toEqual([
+      { name: '🚀 节点选择', locked: true },
+      { name: '🇰🇷 韩国节点', locked: false },
+    ])
+
+    conv.selectPreset('full_multimode')
+    expect(conv.templateGroups.value).toEqual([{ name: '💬 Ai平台', locked: false }])
+  })
+
+  it('groups 字段缺席（旧 sidecar / 豁免档）→ templateGroups 为空数组', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce({
+      clients: [],
+      presets: [{ id: 'default', name: '默认', url: 'https://a.ini', customGroups: true }],
+      capabilities: { customGroups: true },
+    })
+    const conv = setup()
+    await conv.loadClients()
+    expect(conv.templateGroups.value).toEqual([])
+  })
+
+  it('probe 成功写入 groupHits；响应缺字段（旧 sidecar）按 {} 降级', async () => {
+    const conv = setup()
+    conv.inputUrl.value = 'https://example.com/sub'
+    vi.mocked(fetchPreview).mockResolvedValueOnce({
+      ...okResponse,
+      nodes: ['A'],
+      groupHits: { '🇰🇷 韩国节点': 0 },
+    })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+    expect(conv.groupHits.value).toEqual({ '🇰🇷 韩国节点': 0 })
+
+    conv.groupsOpen.value = false
+    await nextTick()
+    conv.inputUrl.value = 'https://example.com/sub2'
+    await nextTick()
+    vi.mocked(fetchPreview).mockResolvedValueOnce({ ...okResponse, nodes: ['B'] })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+    expect(conv.groupHits.value).toEqual({})
+  })
+
+  it('probe 失败（ok:false / 网络异常）→ groupHits 清空', async () => {
+    const conv = setup()
+    conv.inputUrl.value = 'not-a-url'
+    conv.groupHits.value = { '🇰🇷 韩国节点': 0 }
+    vi.mocked(fetchPreview).mockResolvedValueOnce({ ...okResponse, ok: false, errorCode: 'bad_url_format', nodes: [] })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('failed'))
+    expect(conv.groupHits.value).toEqual({})
+  })
+
+  it('submit：exclude 非空才带；与 groups 可同时携带', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = 'https://example.com/sub'
+
+    conv.excluded.value = ['🇰🇷 韩国节点']
+    vi.mocked(fetchPreview).mockResolvedValueOnce(okResponse)
+    await conv.submit()
+    expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'default', {
+      exclude: ['🇰🇷 韩国节点'],
+    })
+
+    const intent = [{ name: '专线', keywords: ['专线'], urlTest: false }]
+    conv.groups.value = intent
+    vi.mocked(fetchPreview).mockResolvedValueOnce(okResponse)
+    await conv.submit()
+    expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'default', {
+      groups: intent,
+      exclude: ['🇰🇷 韩国节点'],
+    })
+  })
+
+  it('切档：excluded 与 groupHits 清空（不按组名继承）；面板收起时不重 probe', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.excluded.value = ['🇰🇷 韩国节点']
+    conv.groupHits.value = { '🇰🇷 韩国节点': 0 }
+
+    conv.selectPreset('full_multimode')
+    await nextTick()
+    expect(conv.excluded.value).toEqual([])
+    expect(conv.groupHits.value).toEqual({})
+    expect(fetchPreview).not.toHaveBeenCalled()
+  })
+
+  it('面板开着切档：以新档重 probe，groupHits 跟随新模板', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = 'https://example.com/sub'
+    vi.mocked(fetchPreview).mockResolvedValue({
+      ...okResponse,
+      nodes: ['A'],
+      groupHits: { '🇰🇷 韩国节点': 0 },
+    })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+    expect(fetchPreview).toHaveBeenCalledTimes(1)
+
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'], groupHits: { '💬 Ai平台': 0 } })
+    conv.selectPreset('full_multimode')
+    await vi.waitFor(() => expect(fetchPreview).toHaveBeenCalledTimes(2))
+    expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'full_multimode', {
+      probe: true,
+    })
+    await vi.waitFor(() => expect(conv.groupHits.value).toEqual({ '💬 Ai平台': 0 }))
+  })
+
+  it('F1 同类：切到不支持分组的档位时 submit 不发送 exclude（残留在状态里，切回恢复）', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce({
+      clients: [],
+      presets: [
+        { id: 'default', name: '默认', url: 'https://a.ini', customGroups: true },
+        { id: 'full_multimode', name: '分组', url: 'https://b.ini', customGroups: false },
+      ],
+      capabilities: { customGroups: true },
+    })
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = 'https://example.com/sub'
+    conv.excluded.value = ['🇰🇷 韩国节点']
+
+    conv.selectPreset('full_multimode')
+    vi.mocked(fetchPreview).mockResolvedValueOnce(okResponse)
+    await conv.submit()
+    expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'full_multimode')
+    expect(conv.phase.value).toBe('result')
+
+    // 切回支持档：excluded 已被切档清空（设计：剔除清单不跨模板继承），不会误带
+    conv.selectPreset('default')
+    expect(conv.excluded.value).toEqual([])
+  })
+
+  // ---- 评审 F2：切档作废在途 probe ----
+
+  it('F2 旧档 probe 在途时收起并切档：旧响应被丢弃，重开面板以新档重探', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = 'https://example.com/sub'
+    let resolveOld!: (v: PreviewResponse) => void
+    vi.mocked(fetchPreview).mockReturnValueOnce(
+      new Promise((r) => {
+        resolveOld = r
+      }),
+    )
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(fetchPreview).toHaveBeenCalledTimes(1))
+
+    conv.groupsOpen.value = false
+    conv.selectPreset('full_multimode') // 切档：在途 probe 作废
+    await nextTick()
+
+    resolveOld({ ...okResponse, nodes: ['旧档节点'], groupHits: { '🇰🇷 韩国节点': 3 } })
+    await nextTick()
+    await nextTick()
+    expect(conv.groupHits.value).toEqual({}) // 旧模板命中数不得写入新档
+    expect(conv.nodes.value).toEqual([])
+    expect(conv.probeState.value).not.toBe('ready')
+
+    vi.mocked(fetchPreview).mockResolvedValueOnce({
+      ...okResponse,
+      nodes: ['新档节点'],
+      groupHits: { '💬 Ai平台': 1 },
+    })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+    expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'full_multimode', {
+      probe: true,
+    })
+    expect(conv.nodes.value).toEqual(['新档节点'])
+    expect(conv.groupHits.value).toEqual({ '💬 Ai平台': 1 })
+  })
+
+  // ---- 评审 F3：probedUrl 按请求时的 URL 记账 ----
+
+  it('F3 probe 在途改 URL 且收起：响应归属请求时的 A，重开面板对 B 重探', async () => {
+    const conv = setup()
+    conv.inputUrl.value = 'https://example.com/a'
+    let resolveA!: (v: PreviewResponse) => void
+    vi.mocked(fetchPreview).mockReturnValueOnce(
+      new Promise((r) => {
+        resolveA = r
+      }),
+    )
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(fetchPreview).toHaveBeenCalledTimes(1))
+
+    conv.inputUrl.value = 'https://example.com/b' // 防抖待发
+    conv.groupsOpen.value = false // 收起清掉防抖：B 的 probe 不会发出
+    await nextTick()
+
+    resolveA({ ...okResponse, nodes: ['A 节点'] })
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+    expect(conv.nodes.value).toEqual(['A 节点'])
+
+    vi.mocked(fetchPreview).mockResolvedValueOnce({ ...okResponse, nodes: ['B 节点'] })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(fetchPreview).toHaveBeenCalledTimes(2))
+    expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/b', 'auto', 'default', { probe: true })
+    await vi.waitFor(() => expect(conv.nodes.value).toEqual(['B 节点']))
+  })
+
+  // ---- 评审 F5：空 URL 重开面板不残留旧状态 ----
+
+  it('F5 ready 后清空 URL 并收起：重开面板状态回 idle、名单清空（面板显示空态文案）、不发新请求', async () => {
+    const conv = setup()
+    conv.inputUrl.value = 'https://example.com/sub'
+    vi.mocked(fetchPreview).mockResolvedValueOnce({
+      ...okResponse,
+      nodes: ['N1'],
+      groupHits: { '🇰🇷 韩国节点': 1 },
+    })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+
+    conv.inputUrl.value = '' // 防抖未到就被收起清掉：探针状态仍是旧订阅的 ready
+    conv.groupsOpen.value = false
+    await nextTick()
+    expect(conv.probeState.value).toBe('ready') // 场景前提：残留 ready 与旧名单
+    expect(conv.nodes.value).toEqual(['N1'])
+
+    conv.groupsOpen.value = true // 重开：空 URL 分支清掉残留
+    await nextTick()
+    await nextTick()
+    expect(conv.probeState.value).toBe('idle') // GroupPanel 据此渲染「粘贴订阅链接后可加载节点名单」
+    expect(conv.nodes.value).toEqual([])
+    expect(conv.groupHits.value).toEqual({})
+    expect(fetchPreview).toHaveBeenCalledTimes(1) // 未发新请求
+  })
+})

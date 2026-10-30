@@ -5,14 +5,17 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
 
 const (
-	maxGroups     = 10
-	maxGroupRunes = 32
-	maxKeywords   = 5
+	maxGroups       = 10
+	maxGroupRunes   = 32
+	maxKeywords     = 5
+	maxExclude      = 64
+	maxExcludeRunes = 64
 )
 
 // nodeGroup 用户组意图（契约三字段）；keywords 为字面量 substring AND 语义，非正则
@@ -119,11 +122,76 @@ func canonicalGroupsJSON(gs []nodeGroup) string {
 	return string(b)
 }
 
-// parseGroupsJSON 列存 JSON 还原（建链期已校验，此处只解包；失败 → 上层 derive_error）
+// parseGroupsJSON 列存 JSON 还原（建链期已校验，此处只解包；失败 → 上层 derive_error）。
+// ""（列存 NULL 读回）等价无组
 func parseGroupsJSON(s string) ([]nodeGroup, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
 	var gs []nodeGroup
 	if err := json.Unmarshal([]byte(s), &gs); err != nil {
 		return nil, fmt.Errorf("groups JSON 解析失败: %w", err)
 	}
 	return gs, nil
+}
+
+// normalizeExclude 模板组删减名单归一化（契约 POST /api/preview「v1.5.0 增补字段」）：
+// 每名两端 trim 后落定、≤64 项、单名 ≤64 rune、禁反引号与控制字符（U+0000–U+001F、
+// U+007F）；重复名去重后升序排序（指纹 v3 规范化：名单集合与输入顺序无关）。
+// 违规 → 上层 bad_groups
+func normalizeExclude(raw []string) ([]string, error) {
+	if len(raw) > maxExclude {
+		return nil, fmt.Errorf("exclude 超过 %d 项", maxExclude)
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(raw))
+	for _, name := range raw {
+		v := strings.TrimSpace(name)
+		if v == "" {
+			return nil, fmt.Errorf("exclude 名单名 trim 后为空")
+		}
+		if utf8.RuneCountInString(v) > maxExcludeRunes {
+			return nil, fmt.Errorf("exclude 名单名超过 %d 字", maxExcludeRunes)
+		}
+		if strings.ContainsRune(v, '`') {
+			return nil, fmt.Errorf("exclude 名单名含反引号")
+		}
+		for _, r := range v {
+			if r <= 0x1F || r == 0x7F {
+				return nil, fmt.Errorf("exclude 名单名含控制字符")
+			}
+		}
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// canonicalExcludeJSON 规范化序列化（指纹 v3 与 links.exclude 列共用）：去重升序 JSON
+// 数组、无空白、空为 "[]"（空串等价 "[]"）
+func canonicalExcludeJSON(ex []string) string {
+	if len(ex) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(ex)
+	if err != nil {
+		return "[]" // []string 恒可序列化，防御性兜底
+	}
+	return string(b)
+}
+
+// parseExcludeJSON links.exclude 列还原（建链期已校验；"" 等价不删减）
+func parseExcludeJSON(s string) ([]string, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var ex []string
+	if err := json.Unmarshal([]byte(s), &ex); err != nil {
+		return nil, fmt.Errorf("exclude JSON 解析失败: %w", err)
+	}
+	return ex, nil
 }

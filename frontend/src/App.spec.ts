@@ -194,24 +194,47 @@ describe('App 自定义分组接线（v1.5.0）', () => {
     capabilities: { customGroups: true },
   }
 
+  // 带上模板自带组清单（模板原序；节点选择为规则目标组 → locked）
+  const capableClientsWithGroups = {
+    clients: [],
+    presets: [
+      {
+        id: 'default',
+        name: 'ACL4SSR 默认',
+        url: 'https://a.ini',
+        customGroups: true,
+        groups: [
+          { name: '🚀 节点选择', locked: true },
+          { name: '🇰🇷 韩国节点', locked: false },
+          { name: '💬 Ai平台', locked: false },
+        ],
+      },
+      { id: 'full_multimode', name: '地区分组 + AI 分流', url: 'https://b.ini' },
+    ],
+    capabilities: { customGroups: true },
+  }
+
   it('能力位缺席（旧 sidecar / 接口降级）：loadClients 完成后仍无分组入口（主流程零漂移）', async () => {
     const wrapper = await mountApp()
     await vi.waitFor(() => expect(fetchClients).toHaveBeenCalled())
     await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(false))
   })
 
-  it('能力位全真：url 空入口置灰 → 粘贴后可点 → 展开触发 probe → 打词输入出现', async () => {
-    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+  it('能力位全真：未粘 URL 也能展开面板看模板组清单；粘贴后触发 probe → 打词输入出现', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClientsWithGroups)
     vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['香港专线 01'] })
     const wrapper = await mountApp()
 
     await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(true))
-    expect(wrapper.find('.groups-entry').attributes('disabled')).toBeDefined()
-
-    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
-    await vi.waitFor(() => expect(wrapper.find('.groups-entry').attributes('disabled')).toBeUndefined())
+    // 入口不依赖订阅：清单来自 /api/clients
+    expect(wrapper.find('.groups-entry').attributes('disabled')).toBeUndefined()
 
     await wrapper.find('.groups-entry').trigger('click')
+    expect(wrapper.findAll('.tpl-chip')).toHaveLength(3)
+    expect(fetchPreview).not.toHaveBeenCalled() // 无 URL 不发 probe
+    expect(wrapper.find('.groups-status').text()).toContain('粘贴订阅链接后可加载节点名单')
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
     await vi.waitFor(() => {
       expect(fetchPreview).toHaveBeenCalledWith('https://example.com/sub', 'auto', 'default', { probe: true })
     })
@@ -330,6 +353,65 @@ describe('App 自定义分组接线（v1.5.0）', () => {
     await vi.waitFor(() => {
       expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'default', {
         groups: [{ name: '专线', keywords: ['专线'], urlTest: false }],
+      })
+    })
+  })
+
+  // ---- 模板群组删减接线（v1.5.0 增补） ----
+
+  it('端到端：× 剔除模板组 → 已剔除池 chip → 转换请求带 exclude', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClientsWithGroups)
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['香港专线 01'] })
+    const wrapper = await mountApp()
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(true))
+    await wrapper.find('.groups-entry').trigger('click')
+
+    // jsdom 属性选择器不认非 BMP 字符（emoji）：按类名 + 属性比对定位 ×
+    const pruneX = wrapper
+      .findAll('.tpl-x')
+      .find((b) => b.attributes('aria-label') === '剔除组 💬 Ai平台')!
+    await pruneX.trigger('click')
+    expect(wrapper.find('.excluded-chip').text()).toBe('＋ 💬 Ai平台')
+    // 上区不再有该组
+    expect(wrapper.findAll('.tpl-chip .tpl-chip-name').map((n) => n.text())).toEqual([
+      '🚀 节点选择',
+      '🇰🇷 韩国节点',
+    ])
+
+    await wrapper.find('button[type="submit"]').trigger('submit')
+    await vi.waitFor(() => {
+      expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'default', {
+        exclude: ['💬 Ai平台'],
+      })
+    })
+  })
+
+  it('groupHits 接线：0 节点标记可见；一键剔除 → 轻提示 → 转换请求带全部空群组', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClientsWithGroups)
+    vi.mocked(fetchPreview)
+      .mockResolvedValueOnce({
+        ...okResponse,
+        nodes: ['香港专线 01'],
+        groupHits: { '🇰🇷 韩国节点': 0, '💬 Ai平台': 0 },
+      })
+      .mockResolvedValueOnce(okResponse)
+    const wrapper = await mountApp()
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(true))
+    await wrapper.find('.groups-entry').trigger('click')
+    await vi.waitFor(() => expect(wrapper.findAll('.tpl-zero')).toHaveLength(2))
+
+    await wrapper.find('.prune-empty').trigger('click')
+    expect(wrapper.find('.prune-toast').text()).toBe('已剔除 2 个空群组（随时点下方标签加回）')
+    expect(wrapper.findAll('.excluded-chip')).toHaveLength(2)
+
+    await wrapper.find('button[type="submit"]').trigger('submit')
+    await vi.waitFor(() => {
+      expect(fetchPreview).toHaveBeenLastCalledWith('https://example.com/sub', 'auto', 'default', {
+        exclude: ['🇰🇷 韩国节点', '💬 Ai平台'],
       })
     })
   })

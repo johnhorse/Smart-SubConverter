@@ -1253,3 +1253,239 @@ func TestClientsCapabilities(t *testing.T) {
 		t.Errorf("树内+豁免档能力位 = top:%v per:%v，应 [false,true,true]", top, per)
 	}
 }
+
+// ---- v1.5.0 增补：模板群组删减（exclude）与 probe groupHits ----
+
+// probe groupHits：快照本地化档 + 带正则的模板组命中计数（.* 组计全部节点；无正则组缺席）；
+// exclude 在 probe 模式忽略（不校验、不影响命中计数、不落库）
+func TestPreviewProbeGroupHits(t *testing.T) {
+	subBody := "ss://YWJjLTEyOjEuMi4zLjQ6NDQz#%E9%A6%99%E6%B8%AF%E4%B8%93%E7%BA%BF\n" +
+		"vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"ps":"日本家宽","v":"2"}`)) + "\n" +
+		"ss://YWJjLTEyOjEuMi4zLjQ6NDQz#%E6%B8%AF%E4%BA%BA%E5%AE%B6%E5%AE%BD\n"
+	subURL := publicAirportURL(t, subBody)
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("target") == "mixed" {
+			content, err := fetchBody(q.Get("url"))
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(content)))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ext.Close()
+	cfg := testConfig(t, ext.URL)
+	cfg.presetURL = defaultPresetURL // default 档本地化（不豁免）
+	s := mustServer(t, cfg)
+	enableSnap(t, s)
+	writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	// 带 exclude 同发：probe 模式忽略、不校验（即使名字里以不存在组也照常返回）
+	resp := postProbe(t, s, `{"url":"`+subURL+`","probe":true,"exclude":["🌍 国外媒体","不存在的组"]}`)
+	if !resp.OK || resp.ErrorCode != nil {
+		t.Fatalf("probe 响应 = %+v", resp)
+	}
+	if len(resp.Nodes) != 3 {
+		t.Fatalf("nodes = %v", resp.Nodes)
+	}
+	// default 模板 11 组：8 个带 .* 正则、3 个纯 [] 成员（全球直连/全球拦截/应用净化）缺席
+	if len(resp.GroupHits) != 8 {
+		t.Errorf("groupHits 组数 = %d（%v），应 8（无正则组不出现）", len(resp.GroupHits), resp.GroupHits)
+	}
+	if resp.GroupHits["♻️ 自动选择"] != 3 || resp.GroupHits["🚀 节点选择"] != 3 {
+		t.Errorf(".* 组命中 = %v，应各 3", resp.GroupHits)
+	}
+	if _, ok := resp.GroupHits["🎯 全球直连"]; ok {
+		t.Errorf("无正则段组不应出现：%v", resp.GroupHits)
+	}
+	var n int
+	if err := s.store.db.QueryRow("SELECT COUNT(*) FROM links").Scan(&n); err != nil || n != 0 {
+		t.Errorf("probe 零副作用：links 行数 = %d (err %v)", n, err)
+	}
+}
+
+// probe groupHits：能力位 false（出树/豁免档）→ 恒 {}
+func TestPreviewProbeGroupHitsDisabled(t *testing.T) {
+	subURL, extURL, _ := twoStageEnv(t, "clash", "proxies:\n  - {name: node-a}\n")
+	s := mustServer(t, testConfig(t, extURL)) // snap == nil（出树态）
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+	resp := postProbe(t, s, `{"url":"`+subURL+`","probe":true}`)
+	if !resp.OK || len(resp.GroupHits) != 0 {
+		t.Fatalf("能力位 false 时 groupHits 应恒 {}：%+v", resp)
+	}
+	if !strings.Contains(mustJSON(t, resp), `"groupHits":{}`) {
+		t.Errorf("groupHits 应序列化为 {}：%s", mustJSON(t, resp))
+	}
+}
+
+// mustJSON 把响应序列化回 JSON 文本（字段形状断言用）
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// exclude 校验矩阵（能力位已开）：空名/超长/反引号/控制字符/超 64 项 → bad_groups，
+// 不调上游、丢 exclude 照常建短链；优先级 groups_disabled > bad_groups
+func TestPreviewExcludeValidation(t *testing.T) {
+	calls := 0
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte("[General]\nx"))
+	}))
+	defer ext.Close()
+
+	rune65 := strings.Repeat("组", 65)
+	var many []string
+	for i := 0; i < 65; i++ {
+		many = append(many, fmt.Sprintf(`"组%d"`, i))
+	}
+	bad := []string{
+		`[""]`,
+		`["  "]`,
+		`["a` + "`" + `b"]`,
+		`["a\u0000b"]`,
+		`["` + rune65 + `"]`,
+		`[` + strings.Join(many, ",") + `]`,
+	}
+
+	cfg := testConfig(t, ext.URL)
+	cfg.presetURL = defaultPresetURL
+	s := mustServer(t, cfg)
+	enableSnap(t, s)
+	for _, ex := range bad {
+		resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s","target":"surge","exclude":`+ex+`}`, "h:1", "")
+		if resp.OK || resp.ErrorCode == nil || *resp.ErrorCode != "bad_groups" {
+			t.Errorf("exclude %s → code %v，应 bad_groups", ex, derefCode(resp.ErrorCode))
+			continue
+		}
+		if !strings.Contains(resp.Link, "/s/") {
+			t.Errorf("bad_groups 丢 exclude 应照常建短链：%s", resp.Link)
+		}
+	}
+	if calls != 0 {
+		t.Errorf("校验失败不应触达上游，实际 %d 次", calls)
+	}
+
+	// 出树部署：exclude 单独非空也按 groups_disabled 挡（先于 bad_groups）
+	cfg2 := testConfig(t, ext.URL) // snap == nil
+	s2 := mustServer(t, cfg2)
+	resp, _ := postPreview(t, s2, `{"url":"https://sub.example.com/s","target":"surge","exclude":[""]}`, "h:1", "")
+	if resp.ErrorCode == nil || *resp.ErrorCode != "groups_disabled" {
+		t.Errorf("出树 + exclude → code %v，应 groups_disabled（能力位先于校验）", derefCode(resp.ErrorCode))
+	}
+	if calls != 0 {
+		t.Errorf("groups_disabled 不应触达上游，实际 %d 次", calls)
+	}
+}
+
+// exclude 随短链冻结（指纹 v3）：仅 exclude 可建链、存库规范化 JSON；同参数同码、
+// 改删减新码；groups + exclude 同存
+func TestPreviewExcludeStoredAndFingerprint(t *testing.T) {
+	subURL, extURL, _ := twoStageEnv(t, "clash", "proxies:\n  - {name: node-a}\n")
+	cfg := testConfig(t, extURL)
+	cfg.presetURL = defaultPresetURL
+	s := mustServer(t, cfg)
+	enableSnap(t, s)
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+
+	body := `{"url":"` + subURL + `","target":"clash","exclude":["🌍 国外媒体"]}`
+	resp, _ := postPreview(t, s, body, "h:1", "")
+	if !resp.OK || resp.ErrorCode != nil {
+		t.Fatalf("仅 exclude 响应 = %+v", resp)
+	}
+	lnk := storedFor(t, s, resp.Link)
+	if lnk.Exclude != `["🌍 国外媒体"]` || lnk.Groups != "" {
+		t.Errorf("冻结字段 = %+v，应 exclude 存规范化 JSON、groups 空", lnk)
+	}
+	// 同参数（含空白差异/顺序）→ 同码
+	resp2, _ := postPreview(t, s, `{"url":"`+subURL+`","target":"clash","exclude":[" 🌍 国外媒体 "]}`, "h:1", "")
+	if resp2.Link != resp.Link {
+		t.Errorf("同 exclude 集合应复用同码：%s vs %s", resp2.Link, resp.Link)
+	}
+	// 改删减 → 新码
+	resp3, _ := postPreview(t, s, `{"url":"`+subURL+`","target":"clash","exclude":["🌏 国内媒体"]}`, "h:1", "")
+	if resp3.Link == resp.Link {
+		t.Error("改删减应新短链（指纹 v3）")
+	}
+	// groups + exclude 同存
+	resp4, _ := postPreview(t, s, `{"url":"`+subURL+`","target":"clash","groups":[{"name":"专线","keywords":["专线"],"urlTest":false}],"exclude":["🌍 国外媒体"]}`, "h:1", "")
+	if !resp4.OK {
+		t.Fatalf("groups+exclude 响应 = %+v", resp4)
+	}
+	lnk4 := storedFor(t, s, resp4.Link)
+	if lnk4.Groups == "" || lnk4.Exclude != `["🌍 国外媒体"]` {
+		t.Errorf("groups+exclude 应同存：%+v", lnk4)
+	}
+}
+
+// GET /api/clients presets[].groups：模板原序清单 + locked 标记；豁免档/出树 → []
+func TestClientsGroupsShape(t *testing.T) {
+	getGroups := func(s *server) []presetGroupInfo {
+		ts := httptest.NewServer(s.routes())
+		defer ts.Close()
+		resp := get(t, ts.URL+"/api/clients")
+		defer resp.Body.Close()
+		var got struct {
+			Presets []struct {
+				ID     string            `json:"id"`
+				Groups []presetGroupInfo `json:"groups"`
+			} `json:"presets"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Presets[0].ID != "default" {
+			t.Fatalf("presets[0] = %+v", got.Presets[0])
+		}
+		if got.Presets[0].Groups == nil {
+			t.Error("groups 应为 []（非 null）")
+		}
+		return got.Presets[0].Groups
+	}
+
+	// 树内 + 快照本地化 default 档：真实模板组清单
+	cfg := testConfig(t, "http://unused")
+	cfg.presetURL = defaultPresetURL
+	s := mustServer(t, cfg)
+	enableSnap(t, s)
+	writeSnapshotFixture(t, s, "ACL4SSR_Online.rewritten.ini")
+	groups := getGroups(s)
+	if len(groups) != 11 {
+		t.Fatalf("groups 数 = %d，want 11（%v）", len(groups), groups)
+	}
+	if groups[0].Name != "🚀 节点选择" || !groups[0].Locked || groups[1].Name != "♻️ 自动选择" || groups[1].Locked {
+		t.Errorf("组清单/锁定错：first=%+v second=%+v", groups[0], groups[1])
+	}
+	if groups[2].Name != "🌍 国外媒体" || groups[2].Locked {
+		t.Errorf("业务组应可删：%+v", groups[2])
+	}
+
+	// 出树：[]（非 null）
+	s2 := mustServer(t, testConfig(t, "http://unused"))
+	if g := getGroups(s2); len(g) != 0 {
+		t.Errorf("出树应 []，得 %v", g)
+	}
+
+	// 豁免档：default 档 []，其余档（快照产物缺失）也 []
+	cfg3 := testConfig(t, "http://unused")
+	cfg3.presetURL = "https://example.com/other.ini"
+	s3 := mustServer(t, cfg3)
+	enableSnap(t, s3)
+	if g := getGroups(s3); len(g) != 0 {
+		t.Errorf("豁免档应 []，得 %v", g)
+	}
+}
