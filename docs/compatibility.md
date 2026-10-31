@@ -19,6 +19,7 @@
 | v2rayN | v2rayn | 未验证 | — | — |
 | 自定义分组（v1.5.0）· Clash 系 | clash | 已验证 | — | 2026-10-28 · 真机验收通过（170 节点机场，多词 AND 组/单词 url-test 组/全 select 组接线=主组+Ai平台等处处可选；S5 冒烟断言同路） |
 | 自定义分组（v1.5.0）· Quantumult X | quanx | 未验证 | — | 派生与 clash 同路（追加组闸门实证保留，2026-10-27；[policy] static 形态）；真机未单独实测 |
+| 模板群组删减（v1.5.1）· 分组管理 UI | — | 已验证 | — | 2026-10-31 · VPS v1.5.1 真机验收通过（分组管理可删可加，功能正常） |
 
 「深链」列 = 结果页「在 XX 中打开」按钮（唤起对应 App 导入），仅 iOS 五家提供，拼装口径见 [docs/implementation/api-contract.md](implementation/api-contract.md)；真机实测后回填。
 
