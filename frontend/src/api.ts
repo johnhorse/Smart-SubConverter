@@ -1,4 +1,11 @@
-import type { ClientsResponse, HealthResponse, NodeGroup, PreviewResponse } from './types'
+import type {
+  ClientsResponse,
+  HealthResponse,
+  NodeGroup,
+  PreferencesDeleteResponse,
+  PreferencesQueryResponse,
+  PreviewResponse,
+} from './types'
 
 export const PREVIEW_TIMEOUT_MS = 15_000
 export const HEALTHY_TIMEOUT_MS = 8_000
@@ -66,4 +73,29 @@ export function fetchClients(): Promise<ClientsResponse> {
 
 export function fetchHealth(): Promise<HealthResponse> {
   return fetchJson<HealthResponse>('/api/health', { method: 'GET' }, HEALTHY_TIMEOUT_MS)
+}
+
+// v1.6.0 偏好接口：POST/DELETE + body 传订阅链接（不进访问日志，见 group-preferences.md 决策 5）
+export function fetchPreferences(subUrl: string, presetId: string): Promise<PreferencesQueryResponse> {
+  return fetchJson<PreferencesQueryResponse>(
+    '/api/preferences/query',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sub_url: subUrl, preset_id: presetId }),
+    },
+    HEALTHY_TIMEOUT_MS,
+  )
+}
+
+export function deletePreferences(subUrl: string): Promise<PreferencesDeleteResponse> {
+  return fetchJson<PreferencesDeleteResponse>(
+    '/api/preferences',
+    {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sub_url: subUrl }),
+    },
+    HEALTHY_TIMEOUT_MS,
+  )
 }

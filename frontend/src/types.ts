@@ -60,6 +60,19 @@ export interface PreviewResponse {
 
 export type PresetStatus = 'fresh' | 'stale' | 'unknown'
 
+// v1.6.0 偏好查询响应（group-preferences.md 接口节）：null = 无存档；
+// exclude 只回请求 preset 档的（模板组删减按 sub_key + preset 记）
+export interface PreferencesQueryResponse {
+  custom_groups: NodeGroup[] | null
+  exclude: string[] | null
+}
+
+// v1.6.0 偏好删除响应：该订阅全部档案（自定义组 + 各档 exclude）
+export interface PreferencesDeleteResponse {
+  deleted_custom: boolean
+  deleted_exclude: number
+}
+
 export type PresetSource = 'snapshot' | 'remote'
 
 export interface HealthPreset {

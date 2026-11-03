@@ -38,17 +38,11 @@ func newCode() (string, error) {
 	return string(out[:]), nil
 }
 
-// shortFingerprint 短链指纹 = SHA-256 of
-// "v3|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}|{groupsJSON}|{excludeJSON}"。
-// v1.5.0 增补升 v3：尾段追加 excludeJSON（去重升序 JSON 数组、无空白、空为 "[]"；空串
-// 等价 "[]"）——「改删减=新短链」；v1/v2 前缀差异使存量指纹不再命中（契约「幂等与指纹」：
-// 升级后同参数首建换新码属预期一次性影响，存量码照常 hit）。
-// 订阅 URL 规范化（契约级钉死，OH-8）：两端 trim、scheme/host 小写、去默认端口
-// （http:80 / https:443）、path 空补 /、query 原样保留、fragment 丢弃。
-// target 为请求原样值（auto 或指定）；config_url 用解析后的档位 URL（同 id 被
-// PRESET_URL 覆盖时指纹自然区分）。已通过预校验的 URL 解析不会失败，防御性兜底为全空段。
-func shortFingerprint(subURL, target, configURL, groupsJSON, excludeJSON string) string {
-	var scheme, host, path, query string
+// normalizeSubURLParts 订阅 URL 规范化分段（契约级钉死，OH-8）：两端 trim、scheme/host
+// 小写、去默认端口（http:80 / https:443）、path 空补 /、query 原样保留、fragment 丢弃。
+// 解析失败（scheme/host 缺失）→ 全空段（调用方各自兜底）。shortFingerprint 与
+// normalizeSubURL 共用此函数——指纹与偏好 sub_key 的规范化规则恒同源。
+func normalizeSubURLParts(subURL string) (scheme, host, path, query string) {
 	if u, err := url.Parse(strings.TrimSpace(subURL)); err == nil && u.Scheme != "" && u.Host != "" {
 		scheme = strings.ToLower(u.Scheme)
 		hostname := strings.ToLower(u.Hostname())
@@ -70,6 +64,34 @@ func shortFingerprint(subURL, target, configURL, groupsJSON, excludeJSON string)
 		}
 		query = u.RawQuery
 	}
+	return
+}
+
+// normalizeSubURL 订阅 URL 规范化整串（v1.6.0 偏好档案 sub_key 用）：与指纹的 URL 段
+// 同一规则（normalizeSubURLParts）拼回 URL 形态；解析失败返回空串（偏好路径的 URL 已过
+// validateURL 预校验，不会走到）
+func normalizeSubURL(subURL string) string {
+	scheme, host, path, query := normalizeSubURLParts(subURL)
+	if scheme == "" || host == "" {
+		return ""
+	}
+	out := scheme + "://" + host + path
+	if query != "" {
+		out += "?" + query
+	}
+	return out
+}
+
+// shortFingerprint 短链指纹 = SHA-256 of
+// "v3|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}|{groupsJSON}|{excludeJSON}"。
+// v1.5.0 增补升 v3：尾段追加 excludeJSON（去重升序 JSON 数组、无空白、空为 "[]"；空串
+// 等价 "[]"）——「改删减=新短链」；v1/v2 前缀差异使存量指纹不再命中（契约「幂等与指纹」：
+// 升级后同参数首建换新码属预期一次性影响，存量码照常 hit）。
+// 订阅 URL 规范化见 normalizeSubURLParts（v1.6.0 提取共用，规则零变化）。
+// target 为请求原样值（auto 或指定）；config_url 用解析后的档位 URL（同 id 被
+// PRESET_URL 覆盖时指纹自然区分）。已通过预校验的 URL 解析不会失败，防御性兜底为全空段。
+func shortFingerprint(subURL, target, configURL, groupsJSON, excludeJSON string) string {
+	scheme, host, path, query := normalizeSubURLParts(subURL)
 	if groupsJSON == "" {
 		groupsJSON = "[]"
 	}
@@ -83,7 +105,8 @@ func shortFingerprint(subURL, target, configURL, groupsJSON, excludeJSON string)
 // schemaMigrations 按序幂等迁移（user_version 递增；只追加不改历史条目。
 // v1/v2/v3 同事务执行（SQLite DDL 事务性）：v2/v3 的 ALTER TABLE 无 IF NOT EXISTS
 // 形态，非原子落盘时崩溃在 DDL 与 user_version 之间会让重启重放报 duplicate column
-// 卡死启动
+// 卡死启动。v4（v1.6.0 分组偏好记忆）：prefs_custom + prefs_exclude 两表，单条目两语句
+// 同事务，均为 CREATE TABLE IF NOT EXISTS 天然幂等
 var schemaMigrations = []string{
 	`CREATE TABLE IF NOT EXISTS links (
 		code        TEXT PRIMARY KEY,
@@ -96,6 +119,18 @@ var schemaMigrations = []string{
 	)`,
 	`ALTER TABLE links ADD COLUMN groups TEXT`,
 	`ALTER TABLE links ADD COLUMN exclude TEXT`,
+	`CREATE TABLE IF NOT EXISTS prefs_custom (
+		sub_key    TEXT PRIMARY KEY,
+		groups     TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS prefs_exclude (
+		sub_key    TEXT NOT NULL,
+		preset_id  TEXT NOT NULL,
+		exclude    TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (sub_key, preset_id)
+	)`,
 }
 
 type store struct {
@@ -253,4 +288,123 @@ func (st *store) listLinks() ([]linkEntry, error) {
 func (st *store) deleteLink(code string) error {
 	_, err := st.db.Exec("DELETE FROM links WHERE code = ?", code)
 	return err
+}
+
+// ---- 分组偏好档案（v1.6.0）：两把钥匙——custom 按 sub_key（跨档/跨 target 共享），
+// exclude 按 sub_key+preset_id（档位独立）；同钥匙单份覆盖（最后提交赢）。sub_key 为
+// normalizeSubURL 规范化值；groups/exclude 存规范化 JSON（与 links.groups / links.exclude
+// 同构；列 NOT NULL，空档案存 "[]"——「字段出现（含空数组）= 记录意图」）
+
+// execer 匹配 *sql.DB 与 *sql.Tx 的 Exec：upsert 语句单份定义，单写与事务复合写共用
+// （v1.6.0 评审修订 #10 —— saveGroupPrefs 两类档案同事务，杜绝半应用档案）
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func upsertPrefsCustomExec(e execer, subKey, groupsJSON string) error {
+	if groupsJSON == "" {
+		groupsJSON = "[]"
+	}
+	_, err := e.Exec(
+		`INSERT INTO prefs_custom (sub_key, groups, updated_at) VALUES (?, ?, ?)
+		ON CONFLICT(sub_key) DO UPDATE SET groups = excluded.groups, updated_at = excluded.updated_at`,
+		subKey, groupsJSON, prefsTimestamp())
+	return err
+}
+
+func upsertPrefsExcludeExec(e execer, subKey, presetID, excludeJSON string) error {
+	if excludeJSON == "" {
+		excludeJSON = "[]"
+	}
+	_, err := e.Exec(
+		`INSERT INTO prefs_exclude (sub_key, preset_id, exclude, updated_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(sub_key, preset_id) DO UPDATE SET exclude = excluded.exclude, updated_at = excluded.updated_at`,
+		subKey, presetID, excludeJSON, prefsTimestamp())
+	return err
+}
+
+// upsertPrefsCustom 覆盖写自定义组档案（groupsJSON "" 视为 "[]"）
+func (st *store) upsertPrefsCustom(subKey, groupsJSON string) error {
+	return upsertPrefsCustomExec(st.db, subKey, groupsJSON)
+}
+
+// upsertPrefsExclude 覆盖写模板组删减档案（excludeJSON "" 视为 "[]"）
+func (st *store) upsertPrefsExclude(subKey, presetID, excludeJSON string) error {
+	return upsertPrefsExcludeExec(st.db, subKey, presetID, excludeJSON)
+}
+
+// upsertPrefs 单事务复合写（v1.6.0 评审修订 #10，对齐 deletePrefs 事务语义）：
+// groupsJSON / excludeJSON 非 nil 即「字段出现」，两类档案同成同败——故障不会留下
+// 「新 groups + 旧 exclude」的半应用档案。两者皆 nil = 字段均未出现，no-op。
+func (st *store) upsertPrefs(subKey, presetID string, groupsJSON, excludeJSON *string) error {
+	if groupsJSON == nil && excludeJSON == nil {
+		return nil
+	}
+	tx, err := st.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if groupsJSON != nil {
+		if err := upsertPrefsCustomExec(tx, subKey, *groupsJSON); err != nil {
+			return err
+		}
+	}
+	if excludeJSON != nil {
+		if err := upsertPrefsExcludeExec(tx, subKey, presetID, *excludeJSON); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// getPrefsCustom 读自定义组档案（groups JSON；found=false = 无存档）
+func (st *store) getPrefsCustom(subKey string) (groupsJSON string, found bool, err error) {
+	err = st.db.QueryRow("SELECT groups FROM prefs_custom WHERE sub_key = ?", subKey).Scan(&groupsJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return groupsJSON, err == nil, err
+}
+
+// getPrefsExclude 读指定档的删减档案（exclude JSON；found=false = 该档无存档）
+func (st *store) getPrefsExclude(subKey, presetID string) (excludeJSON string, found bool, err error) {
+	err = st.db.QueryRow("SELECT exclude FROM prefs_exclude WHERE sub_key = ? AND preset_id = ?", subKey, presetID).Scan(&excludeJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return excludeJSON, err == nil, err
+}
+
+// deletePrefs 清该订阅的全部偏好档案（custom 一份 + exclude 全档）：单事务防半删；
+// 幂等（无档案时返回 false/0 不报错）
+func (st *store) deletePrefs(subKey string) (delCustom bool, delExclude int, err error) {
+	tx, err := st.db.Begin()
+	if err != nil {
+		return false, 0, err
+	}
+	defer tx.Rollback()
+	rc, err := tx.Exec("DELETE FROM prefs_custom WHERE sub_key = ?", subKey)
+	if err != nil {
+		return false, 0, err
+	}
+	re, err := tx.Exec("DELETE FROM prefs_exclude WHERE sub_key = ?", subKey)
+	if err != nil {
+		return false, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, 0, err
+	}
+	if n, err := rc.RowsAffected(); err == nil {
+		delCustom = n > 0
+	}
+	if n, err := re.RowsAffected(); err == nil {
+		delExclude = int(n)
+	}
+	return delCustom, delExclude, nil
+}
+
+// prefsTimestamp updated_at 列的统一形态（RFC3339 UTC 秒粒度，人读运维友好）
+func prefsTimestamp() string {
+	return time.Now().UTC().Format(time.RFC3339)
 }

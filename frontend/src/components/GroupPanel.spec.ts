@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { defineComponent, h, nextTick, reactive, type PropType } from 'vue'
 import GroupPanel from './GroupPanel.vue'
 import type { NodeGroup, PresetGroup } from '../types'
 
 // 文件级 fake timers：打词防抖 250ms 用 advanceTimersByTime 驱动（无时间依赖的用例不受影响）
 beforeEach(() => {
   vi.useFakeTimers()
+  localStorage.clear() // 草稿层隔离（spec 修订 9：各 spec 文件 beforeEach 清空）
 })
 afterEach(() => {
   vi.useRealTimers()
@@ -24,20 +25,45 @@ const NODES = [
 
 type PanelProps = InstanceType<typeof GroupPanel>['$props']
 
-function mountPanel(props: Partial<PanelProps> = {}) {
-  return mount(GroupPanel, {
-    props: {
-      available: true,
-      open: true,
-      modelValue: [],
-      probeState: 'ready',
-      nodes: NODES,
-      templateGroups: [],
-      excluded: [],
-      groupHits: {},
-      ...props,
-    } as PanelProps,
+// 受控组件的测试宿主：模拟 App 的接线——draftKeywords 事件回环到 props（chips 才能真渲染），
+// 其余事件原样转发（wrapper.emitted 记录与旧用例口径一致）
+function mountPanel(initial: Partial<PanelProps> = {}) {
+  const state = reactive({
+    available: true,
+    open: true,
+    modelValue: [] as NodeGroup[],
+    probeState: 'ready' as PanelProps['probeState'],
+    nodes: NODES,
+    templateGroups: [] as PresetGroup[],
+    excluded: [] as string[],
+    groupHits: {} as Record<string, number>,
+    draftKeywords: [] as string[],
+    canClear: false,
+    ...initial,
   })
+  const Host = defineComponent({
+    // 用例可用 wrapper.setProps({ nodes }) 模拟节点名单变化（其余 props 走初始 state）
+    props: { nodes: { type: Array as PropType<string[]>, default: undefined } },
+    emits: ['update:open', 'update:modelValue', 'update:excluded', 'update:draftKeywords', 'clearMemory', 'retry'],
+    setup(props, { emit, attrs }) {
+      return () =>
+        h(GroupPanel, {
+          ...state, // 宿主初始状态
+          ...attrs, // setProps 透传（如用例中途换 nodes）
+          nodes: props.nodes ?? state.nodes,
+          'onUpdate:open': (open: boolean) => emit('update:open', open),
+          'onUpdate:modelValue': (groups: NodeGroup[]) => emit('update:modelValue', groups),
+          'onUpdate:excluded': (names: string[]) => emit('update:excluded', names),
+          'onUpdate:draftKeywords': (words: string[]) => {
+            state.draftKeywords = words
+            emit('update:draftKeywords', words)
+          },
+          onClearMemory: () => emit('clearMemory'),
+          onRetry: () => emit('retry'),
+        })
+    },
+  })
+  return mount(Host)
 }
 
 // 逐词回车加 chip（chips 即时参与命中，无需防抖等待）
@@ -580,5 +606,74 @@ describe('GroupPanel 模板自带群组删减（v1.5.0 增补）', () => {
     expect(wrapper.find('.tpl-zone').exists()).toBe(false)
     expect(wrapper.find('.excluded-zone').exists()).toBe(false)
     expect(wrapper.find('input[aria-label="分组关键词"]').exists()).toBe(true)
+  })
+})
+
+describe('GroupPanel 分组偏好记忆（v1.6.0）', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('受控 chips：draftKeywords 预置渲染成词 chip 并参与命中计数', () => {
+    const wrapper = mountPanel({ draftKeywords: ['香港', '专线'] })
+    expect(wrapper.findAll('.kw-chip')).toHaveLength(2)
+    expect(wrapper.find('.match-count').text()).toBe('已命中 2')
+  })
+
+  it('受控模式加词：emit update:draftKeywords 携带新数组（父层回写持久化）', async () => {
+    const wrapper = mountPanel({ draftKeywords: ['香港'] })
+    const input = wrapper.find('input[aria-label="分组关键词"]')
+    await input.setValue('专线')
+    await input.trigger('keydown.enter')
+    expect(wrapper.emitted('update:draftKeywords')).toEqual([[['香港', '专线']]])
+  })
+
+  it('受控模式删词：emit 移除后的数组', async () => {
+    const wrapper = mountPanel({ draftKeywords: ['香港', '专线'] })
+    await wrapper.find('button[aria-label="删除关键词 香港"]').trigger('click')
+    expect(wrapper.emitted('update:draftKeywords')).toEqual([[['专线']]])
+  })
+
+  it('受控模式确认成组：emit 清空 chips（未确认词已成组落位）', async () => {
+    const wrapper = mountPanel({ draftKeywords: ['香港', '专线'] })
+    await wrapper.find('.group-confirm').trigger('click') // 进入命名步
+    await nextTick()
+    expect((wrapper.find('input[aria-label="分组名称"]').element as HTMLInputElement).value).toBe(
+      '香港专线',
+    )
+    await wrapper.find('.group-confirm').trigger('click') // 确认命名
+    const emitted = wrapper.emitted('update:draftKeywords')
+    expect(emitted).toEqual([[[]]])
+    expect(wrapper.emitted('update:modelValue')![0][0]).toEqual([
+      { name: '香港专线', keywords: ['香港', '专线'], urlTest: false },
+    ])
+  })
+
+  it('清除本订阅记忆：canClear 缺席禁用；轻确认两击才 emit，3s 未确认复原', async () => {
+    const disabled = mountPanel()
+    const disabledBtn = disabled.find('.mem-clear')
+    expect(disabledBtn.attributes('disabled')).toBeDefined()
+    expect(disabledBtn.text()).toBe('清除本订阅记忆')
+
+    const wrapper = mountPanel({ canClear: true })
+    const btn = wrapper.find('.mem-clear')
+    await btn.trigger('click') // 第一次：进入确认态
+    expect(wrapper.emitted('clearMemory')).toBeUndefined()
+    expect(btn.text()).toBe('再点一次确认清除')
+    expect(btn.classes()).toContain('confirming')
+
+    await btn.trigger('click') // 第二次：执行
+    expect(wrapper.emitted('clearMemory')).toHaveLength(1)
+
+    // 3s 未确认自动复原
+    const wrapper2 = mountPanel({ canClear: true })
+    await wrapper2.find('.mem-clear').trigger('click')
+    await vi.advanceTimersByTime(3000)
+    await nextTick()
+    expect(wrapper2.find('.mem-clear').text()).toBe('清除本订阅记忆')
+    expect(wrapper2.emitted('clearMemory')).toBeUndefined()
   })
 })

@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
-import { ApiUnreachableError, fetchClients, fetchPreview } from './api'
+import {
+  ApiUnreachableError,
+  deletePreferences,
+  fetchClients,
+  fetchPreferences,
+  fetchPreview,
+} from './api'
 import { ERROR_MESSAGES, FALLBACK_CLIENTS, FALLBACK_PRESETS } from './constants'
+import { getSnapshot, saveSnapshot, type DraftSnapshot } from './prefs'
 import type { PreviewResponse } from './types'
 import { useConverter } from './useConverter'
 
@@ -11,6 +18,8 @@ vi.mock('./api', () => ({
   },
   fetchPreview: vi.fn(),
   fetchClients: vi.fn().mockResolvedValue({ clients: [], presets: [] }),
+  fetchPreferences: vi.fn().mockResolvedValue({ custom_groups: null, exclude: null }),
+  deletePreferences: vi.fn().mockResolvedValue({ deleted_custom: false, deleted_exclude: 0 }),
 }))
 
 const okResponse: PreviewResponse = {
@@ -37,6 +46,11 @@ function setup() {
   const conv = useConverter()
   return conv
 }
+
+// v1.6.0 草稿层落 localStorage：真实 timers 用例的防抖写入会跨用例残留，统一每例清空
+beforeEach(() => {
+  localStorage.clear()
+})
 
 describe('useConverter 状态机', () => {
   beforeEach(() => {
@@ -791,5 +805,496 @@ describe('useConverter 模板组删减（v1.5.0 增补）', () => {
     expect(conv.nodes.value).toEqual([])
     expect(conv.groupHits.value).toEqual({})
     expect(fetchPreview).toHaveBeenCalledTimes(1) // 未发新请求
+  })
+})
+
+describe('useConverter 分组偏好记忆（v1.6.0）', () => {
+  // 独立 URL：与文件内其他 describe 的 'https://example.com/sub' 隔离——真实 timers 用例的
+  // pending 草稿落盘可能跨用例落地，避免误命中本 describe 的快照查询
+  const SUB = 'https://example.com/prefs-sub'
+  const OTHER = 'https://example.com/prefs-other'
+
+  const capableClients = {
+    clients: [],
+    presets: [
+      {
+        id: 'default',
+        name: '默认',
+        url: 'https://a.ini',
+        customGroups: true,
+        groups: [
+          { name: '🚀 节点选择', locked: true },
+          { name: '🇰🇷 韩国节点', locked: false },
+        ],
+      },
+      {
+        id: 'full_multimode',
+        name: '分组',
+        url: 'https://b.ini',
+        customGroups: true,
+        groups: [
+          { name: '🚀 节点选择', locked: true },
+          { name: '🇰🇷 韩国节点', locked: false },
+        ],
+      },
+    ],
+    capabilities: { customGroups: true },
+  }
+
+  const intent = [{ name: '专线', keywords: ['专线'], urlTest: true }]
+
+  function makeSnap(overrides: Partial<DraftSnapshot> = {}): DraftSnapshot {
+    return {
+      target: 'surge',
+      preset: 'full_multimode',
+      groups: intent,
+      excluded: ['🇰🇷 韩国节点'],
+      draftKeywords: ['家宽'],
+      updatedAt: '2026-11-03T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  // 微任务链驱动（watch flush → probe → 回填全是微任务）：nextTick 轮询到条件成立
+  async function tickUntil(cond: () => boolean, rounds = 30) {
+    for (let i = 0; i < rounds && !cond(); i++) await nextTick()
+    expect(cond(), 'condition not met after ticks').toBe(true)
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    vi.mocked(fetchPreview).mockReset()
+    vi.mocked(fetchClients).mockReset().mockResolvedValue({ clients: [], presets: [] })
+    vi.mocked(fetchPreferences).mockReset().mockResolvedValue({ custom_groups: null, exclude: null })
+    vi.mocked(deletePreferences).mockReset().mockResolvedValue({ deleted_custom: true, deleted_exclude: 1 })
+  })
+
+  // ---- T4：localStorage 草稿层（落盘只由用户编辑触发，spec 修订 1）----
+
+  it('粘贴订阅本身不落盘：真实等 >300ms 后 probe，服务端回填仍触发（回填门不被空快照关死）', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = SUB
+    await new Promise((resolve) => setTimeout(resolve, 350)) // 真实等过 300ms 防抖窗口
+    expect(getSnapshot(SUB)).toBeNull() // 粘贴不是编辑：不产生快照
+
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    vi.mocked(fetchPreferences).mockResolvedValue({
+      custom_groups: intent,
+      exclude: ['🇰🇷 韩国节点'],
+    })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.groups.value).toEqual(intent))
+    expect(conv.excluded.value).toEqual(['🇰🇷 韩国节点'])
+    expect(conv.restoreNotice.value).toEqual({ groups: 1, excluded: 1 })
+  })
+
+  it('用户编辑防抖 300ms 落盘；新会话粘贴同订阅 → 整份恢复（target/preset/groups/excluded/未确认 chips）', async () => {
+    vi.useFakeTimers()
+    try {
+      const conv = setup()
+      conv.inputUrl.value = SUB
+      conv.selectClient('surge')
+      conv.selectPreset('full_multimode')
+      await nextTick() // 切档 watcher（清 excluded）先跑完，再配 excluded
+      conv.excluded.value = ['🇰🇷 韩国节点']
+      conv.groups.value = intent
+      conv.draftKeywords.value = ['家宽']
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(SUB)).toMatchObject({
+        target: 'surge',
+        preset: 'full_multimode',
+        groups: intent,
+        excluded: ['🇰🇷 韩国节点'],
+        draftKeywords: ['家宽'],
+      })
+
+      // 模拟刷新：全新实例 + 空面板，粘贴同订阅（含首尾空白）→ 恢复
+      const conv2 = useConverter()
+      conv2.inputUrl.value = `  ${SUB}  `
+      await tickUntil(() => conv2.selectedTarget.value === 'surge')
+      await tickUntil(() => conv2.groups.value.length === 1)
+      expect(conv2.selectedPreset.value).toBe('full_multimode')
+      expect(conv2.groups.value).toEqual(intent)
+      expect(conv2.excluded.value).toEqual(['🇰🇷 韩国节点']) // 未被切档 watcher 顶掉（restoring 守卫）
+      expect(conv2.draftKeywords.value).toEqual(['家宽'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('同 key（尾部补空格）不动作：不重复恢复、不清空、未落盘编辑不被顶掉', async () => {
+    vi.useFakeTimers()
+    try {
+      saveSnapshot(SUB, makeSnap())
+      const conv = setup()
+      conv.inputUrl.value = SUB
+      await tickUntil(() => conv.groups.value.length === 1) // 恢复完成
+      const modified = [{ name: '新组', keywords: ['新'], urlTest: false }]
+      conv.groups.value = modified // 防抖 pending 中
+      conv.inputUrl.value = `${SUB} ` // trim 后同 key
+      await nextTick()
+      await nextTick()
+      expect(conv.groups.value).toEqual(modified) // currentKey 守卫：不触发恢复
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(SUB)?.groups).toEqual(modified) // 落盘的是修改后状态
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('换订阅无本地快照 → 程序化清空组状态（target/preset 保留）；A 的组不写进 B 的 key/档案', async () => {
+    vi.useFakeTimers()
+    try {
+      const conv = setup()
+      conv.inputUrl.value = SUB
+      conv.selectClient('surge')
+      conv.groups.value = intent
+      conv.excluded.value = ['🇰🇷 韩国节点']
+      conv.draftKeywords.value = ['家宽']
+      await vi.advanceTimersByTimeAsync(300) // A 落盘
+      expect(getSnapshot(SUB)).not.toBeNull()
+
+      conv.inputUrl.value = OTHER // B 无快照
+      expect(conv.groups.value).toEqual([]) // 程序化清空（跨订阅污染修复）
+      expect(conv.excluded.value).toEqual([])
+      expect(conv.draftKeywords.value).toEqual([])
+      expect(conv.selectedTarget.value).toBe('surge') // target/preset 保留
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(OTHER)).toBeNull() // 换订阅本身不落盘
+      expect(getSnapshot(SUB)?.groups).toEqual(intent) // A 的档案原样
+
+      // 在 B 上编辑 → 只写 B
+      conv.groups.value = [{ name: 'B组', keywords: ['B'], urlTest: false }]
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(OTHER)?.groups).toEqual([
+        { name: 'B组', keywords: ['B'], urlTest: false },
+      ])
+      expect(getSnapshot(SUB)?.groups).toEqual(intent)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('空 URL 首次粘贴（无快照）：首次绑定不清空用户先配的组/删减', async () => {
+    const conv = setup()
+    conv.groups.value = intent
+    conv.excluded.value = ['🇰🇷 韩国节点']
+    conv.inputUrl.value = SUB
+    await nextTick()
+    await nextTick()
+    expect(conv.groups.value).toEqual(intent)
+    expect(conv.excluded.value).toEqual(['🇰🇷 韩国节点'])
+  })
+
+  it('无订阅（URL 空）时编辑不落盘', async () => {
+    vi.useFakeTimers()
+    try {
+      const conv = setup()
+      conv.groups.value = intent
+      conv.draftKeywords.value = ['家宽']
+      await vi.advanceTimersByTimeAsync(300)
+      expect(localStorage.getItem('ssc.draft.v1')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('URL 清空（key 变化）：程序化清空面板组状态', async () => {
+    vi.useFakeTimers()
+    try {
+      const conv = setup()
+      conv.inputUrl.value = SUB
+      conv.groups.value = intent
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(SUB)).not.toBeNull()
+
+      conv.inputUrl.value = ''
+      expect(conv.groups.value).toEqual([]) // 无快照路径 → 清空（target/preset 保留）
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('本地快照的 target/preset 已不在注册表 → 跳过该字段保持当前值，groups 照常恢复', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    saveSnapshot(SUB, makeSnap({ target: '不存在的target', preset: '不存在的preset' }))
+    conv.inputUrl.value = SUB
+    await vi.waitFor(() => expect(conv.groups.value).toEqual(intent))
+    expect(conv.selectedTarget.value).toBe('auto') // 无效字段跳过
+    expect(conv.selectedPreset.value).toBe('default')
+  })
+
+  // ---- T5：服务端回填（真实 timers，spec 修订 3/9）----
+
+  it('本地优先：本地有该订阅快照 → probe 成功也不问服务端', async () => {
+    saveSnapshot(SUB, makeSnap())
+    const conv = setup()
+    conv.inputUrl.value = SUB
+    await vi.waitFor(() => expect(conv.groups.value).toEqual(intent))
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+    await nextTick()
+    await nextTick()
+    expect(fetchPreferences).not.toHaveBeenCalled()
+  })
+
+  it('服务端回填：无快照 + probe 成功 + 能力位真 → query(sub_url, preset_id)，groups/exclude 交集落位 + 提示条', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = SUB
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['香港专线 01'] })
+    vi.mocked(fetchPreferences).mockResolvedValue({
+      custom_groups: intent,
+      exclude: ['🇰🇷 韩国节点', '模板里没有的组'],
+    })
+
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.groups.value).toEqual(intent))
+    expect(fetchPreferences).toHaveBeenCalledWith(SUB, 'default')
+    // exclude 与当前档模板组列表求交集：悬空名滤掉
+    expect(conv.excluded.value).toEqual(['🇰🇷 韩国节点'])
+    expect(conv.restoreNoticeText.value).toBe('已恢复 1 个自定义分组、剔除 1 个模板组')
+  })
+
+  it('回填不产生本地快照（快照只由用户编辑产生）；回填后首次编辑 → 提示条自动收起、回滚点作废', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = SUB
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    vi.mocked(fetchPreferences).mockResolvedValue({
+      custom_groups: intent,
+      exclude: ['🇰🇷 韩国节点'],
+    })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.groups.value).toEqual(intent))
+
+    // 真实等过防抖窗口：回填是程序化路径，不落盘
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    expect(getSnapshot(SUB)).toBeNull()
+
+    // 用户编辑 → 提示条自动收起、回滚点作废（「不用了」不得吞掉新编辑）
+    conv.draftKeywords.value = ['新词']
+    expect(conv.restoreNotice.value).toBeNull()
+    conv.undoRestore() // 回滚点已作废：无效果
+    expect(conv.draftKeywords.value).toEqual(['新词'])
+    expect(conv.groups.value).toEqual(intent) // 回填的组仍在，不被吞
+    // 编辑照常落盘
+    await vi.waitFor(() => expect(getSnapshot(SUB)?.draftKeywords).toEqual(['新词']))
+  })
+
+  it('撤销回填：无后续编辑时恢复回填前面板状态（不清存档）', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = SUB
+    const before = [{ name: '手配', keywords: ['手'], urlTest: false }]
+    conv.groups.value = before
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    vi.mocked(fetchPreferences).mockResolvedValue({ custom_groups: intent, exclude: ['🇰🇷 韩国节点'] })
+
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.excluded.value).toEqual(['🇰🇷 韩国节点']))
+    expect(conv.groups.value).toEqual(intent)
+
+    conv.undoRestore()
+    expect(conv.groups.value).toEqual(before) // 回滚到回填前
+    expect(conv.excluded.value).toEqual([])
+    expect(conv.restoreNotice.value).toBeNull()
+    expect(conv.restoreNoticeText.value).toBe('')
+    expect(deletePreferences).not.toHaveBeenCalled() // 不清存档
+  })
+
+  it('切档重 probe：按新 preset 重新 query，新档 exclude 档案可回填', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = SUB
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    vi.mocked(fetchPreferences).mockResolvedValue({ custom_groups: intent, exclude: ['🇰🇷 韩国节点'] })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.groups.value).toEqual(intent))
+    expect(fetchPreferences).toHaveBeenLastCalledWith(SUB, 'default')
+
+    // 切档（面板开着 → 以新档重 probe → 按新 preset 重查；无本地快照，门仍开着）
+    conv.selectPreset('full_multimode')
+    await vi.waitFor(() => expect(fetchPreferences).toHaveBeenLastCalledWith(SUB, 'full_multimode'))
+    await vi.waitFor(() => expect(conv.excluded.value).toEqual(['🇰🇷 韩国节点']))
+  })
+
+  it('同 (url, preset) 在途查询去重：重复 probe 不重复发 query', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = SUB
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    let resolveQuery!: (v: { custom_groups: typeof intent | null; exclude: string[] | null }) => void
+    vi.mocked(fetchPreferences).mockReturnValue(
+      new Promise((r) => {
+        resolveQuery = r
+      }),
+    )
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(fetchPreferences).toHaveBeenCalledTimes(1))
+
+    await conv.probeNodes() // 同 url 同档再探：在途去重
+    expect(fetchPreferences).toHaveBeenCalledTimes(1)
+
+    resolveQuery({ custom_groups: null, exclude: null })
+    await nextTick()
+    await nextTick()
+    expect(conv.restoreNotice.value).toBeNull()
+  })
+
+  it('query 失败静默：probe 仍 ready、面板不动、无提示条', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = SUB
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    vi.mocked(fetchPreferences).mockRejectedValue(new ApiUnreachableError())
+
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(fetchPreferences).toHaveBeenCalledTimes(1))
+    await nextTick()
+    await nextTick()
+    expect(conv.probeState.value).toBe('ready')
+    expect(conv.groups.value).toEqual([])
+    expect(conv.restoreNotice.value).toBeNull()
+  })
+
+  it('能力位 false（部署或档位不支持）→ probe 成功不问服务端', async () => {
+    const conv = setup() // fetchClients 降级 mock：无能力位 → customGroupsAvailable false
+    conv.inputUrl.value = SUB
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+    await nextTick()
+    await nextTick()
+    expect(fetchPreferences).not.toHaveBeenCalled()
+  })
+
+  it('回填响应慢回时 URL 已换：不落到新订阅头上', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = SUB
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    let resolveQuery!: (v: { custom_groups: typeof intent | null; exclude: string[] | null }) => void
+    vi.mocked(fetchPreferences).mockReturnValue(
+      new Promise((r) => {
+        resolveQuery = r
+      }),
+    )
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(fetchPreferences).toHaveBeenCalledTimes(1))
+    conv.inputUrl.value = OTHER // query 在途时换订阅
+    resolveQuery({ custom_groups: intent, exclude: null })
+    await nextTick()
+    await nextTick()
+    await nextTick()
+    expect(conv.groups.value).toEqual([]) // 旧订阅的档案不回填到新订阅
+    expect(conv.restoreNotice.value).toBeNull()
+  })
+
+  // ---- T5：清除记忆（spec 修订 5）----
+
+  it('清除入口：删本地快照 + DELETE 服务端（sub_url），成功返回 true；面板保留', async () => {
+    saveSnapshot(SUB, makeSnap())
+    const conv = setup()
+    conv.inputUrl.value = SUB
+    await vi.waitFor(() => expect(conv.groups.value).toEqual(intent))
+
+    const ok = await conv.clearPreferences()
+    expect(ok).toBe(true)
+    expect(getSnapshot(SUB)).toBeNull()
+    expect(deletePreferences).toHaveBeenCalledWith(SUB)
+    expect(conv.groups.value).toEqual(intent) // 清除记忆 ≠ 清空面板
+  })
+
+  it('清除后 300ms 不复活：pending 落盘被取消', async () => {
+    vi.useFakeTimers()
+    try {
+      const conv = setup()
+      conv.inputUrl.value = SUB
+      conv.groups.value = intent // 武装 300ms 落盘
+      await conv.clearPreferences() // clearTimeout + 删快照
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(SUB)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('清除后本会话禁用服务端自动回填（防「清了又回来」）', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = SUB
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+    await conv.clearPreferences()
+
+    vi.mocked(fetchPreferences).mockClear()
+    await conv.probeNodes() // 再次 probe：不得回填
+    await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+    await nextTick()
+    await nextTick()
+    expect(fetchPreferences).not.toHaveBeenCalled()
+  })
+
+  it('清除作废在途回填响应：清除后慢回的档案不回填', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+    const conv = setup()
+    await conv.loadClients()
+    conv.inputUrl.value = SUB
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    let resolveQuery!: (v: { custom_groups: typeof intent | null; exclude: string[] | null }) => void
+    vi.mocked(fetchPreferences).mockReturnValue(
+      new Promise((r) => {
+        resolveQuery = r
+      }),
+    )
+    conv.groupsOpen.value = true
+    await vi.waitFor(() => expect(fetchPreferences).toHaveBeenCalledTimes(1))
+    await conv.clearPreferences()
+    resolveQuery({ custom_groups: intent, exclude: ['🇰🇷 韩国节点'] })
+    await nextTick()
+    await nextTick()
+    await nextTick()
+    expect(conv.groups.value).toEqual([])
+    expect(conv.restoreNotice.value).toBeNull()
+  })
+
+  it('清除入口：服务端删除失败 → 本地仍已清，返回 false（UI 提示可重试）', async () => {
+    saveSnapshot(SUB, makeSnap())
+    const conv = setup()
+    conv.inputUrl.value = SUB
+    vi.mocked(deletePreferences).mockRejectedValueOnce(new ApiUnreachableError())
+
+    const ok = await conv.clearPreferences()
+    expect(ok).toBe(false)
+    expect(getSnapshot(SUB)).toBeNull()
+  })
+
+  it('清除入口：无订阅链接 → false 且不调服务端', async () => {
+    const conv = setup()
+    const ok = await conv.clearPreferences()
+    expect(ok).toBe(false)
+    expect(deletePreferences).not.toHaveBeenCalled()
+  })
+
+  it('restart 清回填提示条', async () => {
+    const conv = setup()
+    conv.restoreNotice.value = { groups: 1, excluded: 1 }
+    conv.restart()
+    expect(conv.restoreNotice.value).toBeNull()
   })
 })

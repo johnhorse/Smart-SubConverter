@@ -329,6 +329,8 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /s/{code}", s.handleShortLink)
 	mux.HandleFunc("GET /api/links", s.handleLinks)
 	mux.HandleFunc("DELETE /api/links/{code}", s.handleDeleteLink)
+	mux.HandleFunc("POST /api/preferences/query", s.handlePreferencesQuery) // v1.6.0 分组偏好记忆（纯存取，无引擎副作用）
+	mux.HandleFunc("DELETE /api/preferences", s.handlePreferencesDelete)   // 同上：清该订阅全部偏好档案
 	mux.HandleFunc("GET /internal/sub/", s.isub.handleInternalSub)    // 引擎专用（回环 listener，nginx 不路由）
 	mux.HandleFunc("GET /internal/derived/", s.handleInternalDerived) // 同上；serve 派生 ini（无 TTL，短链存活期内可重复拉取）
 	return mux

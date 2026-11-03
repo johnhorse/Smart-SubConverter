@@ -14,6 +14,8 @@
 
 > 增量修订（2026-10-28，v1.5.0 节点自定义分组）：`POST /api/preview` 增可选 `groups` 与 `probe` 请求字段、probe 模式响应增 `nodes` 节点名列表（「link 永远非空」在 probe 模式豁免）；`GET /api/clients` 响应增 `capabilities.customGroups` 与 `presets[].customGroups` 能力位；幂等指纹升 v2（含 groups）；`links` 表增 `groups` 列；`GET /s/{code}` 增拉取期派生（config= 走容器内回环 URL）；`DELETE /api/links/{code}` 同步删派生文件；新增错误码 `bad_groups` / `groups_disabled` 与 /s/ 错误体 `derive_error`。详见「自定义分组（v1.5.0）」节。
 
+> 增量修订（2026-11-03，v1.6.0 分组偏好记忆）：新增 `POST /api/preferences/query` 与 `DELETE /api/preferences` 两端点（按订阅链接存取「已提交偏好档案」，body 传订阅链接、不加认证）；preview 非 probe 成功路径增保存钩子（groups/exclude 字段出现才 upsert）；store `user_version` 3→4（prefs 两表）。详见「分组偏好记忆（v1.6.0）」节。
+
 Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081，仅容器内回环）。注意：**不能用 `PORT`**——该 env 已被 Extended（subconverter）占用。
 
 ## GET /api/clients
@@ -139,7 +141,7 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 
 - SQLite，`modernc.org/sqlite`（纯 Go 无 cgo）；文件 `${DATA_DIR}/state.db`，权限 0600；首次启动自动建目录建库
 - `links` 表：`code TEXT PRIMARY KEY`、`fingerprint TEXT UNIQUE`、`source_url TEXT`、`target TEXT`、`preset_id TEXT`、`config_url TEXT`、`created_at INTEGER`（unix 秒）；**v1.5.0 增 `groups TEXT`**（NULL=无组；非 NULL=规范化 JSON，序列化同指纹 v2 的 groupsJSON——见「自定义分组（v1.5.0）」节；`user_version` 1→2 幂等迁移，同码冻结语义：代理时永远用存的值）；**v1.5.0 增补增 `exclude TEXT`**（NULL=不删减；非 NULL=规范化 JSON 数组——去重升序、无空白，空等价 NULL；`user_version` 2→3 幂等迁移，同码冻结语义同上）
-- schema 版本用 `PRAGMA user_version`（初值 1，v1.5.0 起 3：1→2 groups 列、2→3 exclude 列），启动时按序幂等迁移；**同码冻结创建时参数**：`source_url` / `target` / `config_url` 存的是创建时刻的解析结果，代理时永远用存的值，不重新解析（防 env 改 `PRESET_URL` 后同码内容漂移）
+- schema 版本用 `PRAGMA user_version`（初值 1，v1.5.0 起 3：1→2 groups 列、2→3 exclude 列，v1.6.0 起 4：3→4 prefs 两表——见「分组偏好记忆（v1.6.0）」节），启动时按序幂等迁移；**同码冻结创建时参数**：`source_url` / `target` / `config_url` 存的是创建时刻的解析结果，代理时永远用存的值，不重新解析（防 env 改 `PRESET_URL` 后同码内容漂移）
 - **库损坏（打不开/校验失败，非「文件不存在」）→ sidecar 拒绝启动**，错误信息指引「先备份 /data/state.db 再排查，勿直接删除」；绝不自动清空
 
 ### 幂等与指纹
@@ -279,6 +281,68 @@ gate1：default 插入位成立（fallback 未触发）/ 撞名有害（吞行�
 gate2（多关键词 AND，前瞻写法）：引擎完整支持前瞻正则（5/5 PASS 零报错零吞组）——AND 主用例成员精确（不含单词命中者）/ QuoteMeta 组合转义点无误命中 / 多词零命中=仅 DIRECT / 单词前瞻与裸词等价（实现统一前瞻写法）/ QX 路径同样生效。证据：`/tmp/gate-custom-groups/gate2-report.md` 与 out/g2-* 产物。
 
 gate3（模板组删减，7/7 PASS）：删业务组+规则回退逐条生效（T1）/ **负面对照：只删组行不摘引用 → 引擎 200、13 处悬空成员引用原样输出**（T2，摘引用必需）/ 删地区组+摘引用干净（T3）/ 直连类组 ruleset 回退到 `🎯 全球直连`（T4）/ 删四个自动策略组+摘引用后主组成员完整（T5）/ QX 目标删组+回退（T6）/ 无规则引用组删除（T7）。证据：`/tmp/gate2-prune/`（`./gate.sh` 复现，report 与产物在 out/、logs/）；`config=` 本地路径结论更正见流程第 8 步。
+
+## 分组偏好记忆（v1.6.0）
+
+面板状态此前只存前端内存，刷新即丢、跨端拿不回。v1.6.0 起服务端按订阅链接存「已提交偏好档案」：preview 非 probe 提交成功顺手落档，本组端点查回/清除。设计全文：`docs/designs/group-preferences.md`。
+
+### POST /api/preferences/query
+
+请求体（订阅链接走 body、不进访问日志——隐私口径同 preview；不加认证：持链接者本可直接拉全部节点，不算新增暴露）：
+
+```json
+{ "sub_url": "https://…订阅链接…", "preset_id": "default" }
+```
+
+- `preset_id` 可选：缺省、空串或 `"default"` = 默认档；否则必须是 `/api/clients` presets 中的 id（判非法口径同 preview 的 `bad_preset`）
+- HTTP 200：
+
+```json
+{
+  "custom_groups": [ { "name": "⭐️美国专线", "keywords": ["美国", "专线"], "urlTest": false } ],
+  "exclude": ["🌍 国外媒体"]
+}
+```
+
+- `custom_groups`：`NodeGroup[] | null`——`null` = 无存档；有存档时为与 `links.groups` 同构的规范化 JSON 数组（库存形态原样透出，键序 name→keywords→urlTest）。钥匙只按 `sub_key`，**跨档跨 target 共享**（同订阅换档/换 target 查回同一份）
+- `exclude`：`string[] | null`——`null` = 该档无存档；钥匙按 `sub_key + preset_id`，**只回所请求档**的删减名单
+- 两字段独立 miss（其一有档另一无档属正常态）
+- 错误（HTTP 400）：错误族与响应形态沿用 `/api/preview`（`ok:false` + `errorCode` + `message` 字段，errorCode/message 复用 preview 错误码表）——`bad_url_empty`（body 非法 JSON / 缺 sub_url 同此）/ `bad_url_format` / `bad_url_private` / `bad_preset`；判定序 `bad_url_*` 先于 `bad_preset`。与 preview 的差异唯状态码：本组接口错误以 HTTP 400 呈现（无「link 照常返回」的兜底语义）
+- 存储层运行时错误 → HTTP 500 `{"error":"internal"}`（形态同 /s/ 运行时错误，罕见运维态）
+- 出树 `DATA_DIR`（分组禁用态）**不影响本组端点**：纯存取无引擎副作用
+
+### DELETE /api/preferences
+
+请求体：
+
+```json
+{ "sub_url": "https://…订阅链接…" }
+```
+
+- HTTP 200：`{ "deleted_custom": <bool>, "deleted_exclude": <int> }`——清该订阅的**全部**档案（custom 一份 + exclude 全档）；`deleted_exclude` = 删除的档数
+- 幂等：无档案再删回 `{"deleted_custom":false,"deleted_exclude":0}`
+- 错误同上（400 `bad_url_*`；500 internal）；`sub_key` 归并规则同 query（等价 URL 清同一份档案）
+
+### 两把钥匙与 sub_key 规范化
+
+- **自定义组按 `sub_key`（跨档共享）；模板组删减按 `sub_key + preset_id`（档位独立）；target 不进任何钥匙**——同订阅换 target 自动套用
+- `sub_key` = 订阅 URL 规范化整串，与幂等指纹的 URL 规范化**同一规则同一实现**：两端 trim、scheme/host 小写、去默认端口（http:80 / https:443）、path 空补 `/`、query 原样保留、fragment 丢弃——等价 URL（大小写/默认端口/fragment 差异）归并同一份档案
+- 同钥匙单份覆盖（**最后提交赢**，多人共用订阅可接受）；同档同订阅 exclude 各档互不串
+
+### 幂等与偏好（边界语义）
+
+- preview 保存钩子以 **JSON 字段「出现与否」为准**：请求里 `groups` 字段出现（**含空数组**）→ upsert `prefs_custom`；`exclude` 字段出现 → upsert `prefs_exclude`；**字段未出现 = 不动档案**（已有档案原样保留）
+- **删光所有组再生成短链不清档案**：现状前端仅在非空时携带两字段（`useConverter.ts` 的 `if (sendGroups.length > 0)`），自然落入「字段未出现」——要清档走「清除本订阅记忆」入口（即 DELETE /api/preferences）
+- 空数组 ≠ 未出现：手改请求显式带 `groups:[]` / `exclude:[]` → 档案记 `[]`（「当前零组/零删减」的意图被记录）
+- 钩子只在 preview **非 probe 且转换成功**（探测绿）路径触发；probe 模式（探测建链零副作用即目的）**绝不写档**；preview 失败路径（`bad_url_*` / `bad_preset` / `groups_disabled` / `bad_groups` / `upstream_*` / `backend_down`）**绝不写档**。`store_error`（转换成功、短链存储失败的降级态）不属于失败路径——钩子照常尝试写档（同一存储故障下大概率同败，仅记脱敏日志不影响响应）；写档失败一律仅记日志，不影响转换结果
+- exclude 落档的 `preset_id` = 本次请求解析后的生效档位；`groups` 落档为规范化 groupsJSON（与 links.groups 同构）
+- 删短链（DELETE /api/links/{code}）不动偏好档案；DELETE /api/preferences 不动 links——两者无联动清理（非目标）
+- 前端能力位失效档剔除 groups/exclude 发送，天然落入「字段未出现」，不会误清档案
+
+### 存储（store v4）
+
+- `user_version` 3→4 幂等迁移（schemaMigrations 只追加惯例）：`prefs_custom (sub_key TEXT PRIMARY KEY, groups TEXT NOT NULL, updated_at TEXT NOT NULL)` + `prefs_exclude (sub_key TEXT, preset_id TEXT, exclude TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (sub_key, preset_id))`，与 links 同库（`${DATA_DIR}/state.db`）
+- `groups` / `exclude` 列存规范化 JSON（空档案存 `[]`，列 NOT NULL——区别于 links 列的 NULL=无语义）；`updated_at` 为 RFC3339 UTC 时间戳
 
 ## GET /api/health
 

@@ -430,15 +430,24 @@ func resolvePreset(presets []presetEntry, id string) (presetEntry, bool) {
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SubURL  string      `json:"url"`
-		Target  string      `json:"target"`
-		Preset  string      `json:"preset"`
-		Groups  []nodeGroup `json:"groups"`  // v1.5.0：组意图（转换提交时携带；probe 模式忽略）
-		Exclude []string    `json:"exclude"` // v1.5.0 增补：模板组删减名单（probe 模式忽略、不校验）
-		Probe   bool        `json:"probe"`   // v1.5.0：true = 探测模式（取名两段式，零副作用）
+		SubURL  string       `json:"url"`
+		Target  string       `json:"target"`
+		Preset  string       `json:"preset"`
+		Groups  *[]nodeGroup `json:"groups"`  // v1.5.0：组意图（转换提交时携带；probe 模式忽略）。指针区分「字段出现（含空数组）」与「未出现」（v1.6.0 偏好钩子依赖此区分）
+		Exclude *[]string    `json:"exclude"` // v1.5.0 增补：模板组删减名单（probe 模式忽略、不校验）。指针同上
+		Probe   bool         `json:"probe"`   // v1.5.0：true = 探测模式（取名两段式，零副作用）
 	}
 	// 契约要求响应恒 200：请求体解析失败按「未提供链接」处理，不发明新错误码
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
+	// 解包指针为普通切片供既有流程使用（nil 指针 = 字段未出现 = 空切片）
+	var groupsRaw []nodeGroup
+	if req.Groups != nil {
+		groupsRaw = *req.Groups
+	}
+	var excludeRaw []string
+	if req.Exclude != nil {
+		excludeRaw = *req.Exclude
+	}
 	if req.Target == "" {
 		req.Target = "auto"
 	}
@@ -536,17 +545,17 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	// 判定序：bad_url_* > bad_preset > groups_disabled > bad_groups（preset 无效时档位
 	// 未知，groups_disabled 判不了——上面已提前返回）。两错均丢 groups/exclude 照常
 	// 建短链（对齐 bad_preset 的 link 语义）
-	groups := normalizeGroups(req.Groups)
+	groups := normalizeGroups(groupsRaw)
 	groupsJSON := "" // 空 = 无组（存量行为；列存 NULL、指纹用 "[]"）
 	if len(groups) > 0 {
 		groupsJSON = canonicalGroupsJSON(groups)
 	}
-	exclude, excludeErr := normalizeExclude(req.Exclude)
+	exclude, excludeErr := normalizeExclude(excludeRaw)
 	excludeJSON := "" // 空 = 不删减（列存 NULL、指纹用 "[]"）
 	if excludeErr == nil && len(exclude) > 0 {
 		excludeJSON = canonicalExcludeJSON(exclude)
 	}
-	if !req.Probe && (len(req.Groups) > 0 || len(req.Exclude) > 0) {
+	if !req.Probe && (len(groupsRaw) > 0 || len(excludeRaw) > 0) {
 		if !s.customGroupsEnabled() || !s.presetCustomGroups(sel) {
 			code := "groups_disabled"
 			log.Printf("preview 预校验: code=groups_disabled target=%s preset=%s", probeTarget, sel.ID)
@@ -600,5 +609,34 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		resp.ErrorCode = &storeCode
 		resp.Message = "短链生成失败，已降级为普通链接（请部署者检查 /data 卷）"
 	}
+	// 分组偏好保存钩子（v1.6.0）：非 probe 且转换成功（probeConvert 绿）才写档——probe
+	// 模式与失败路径（含预校验错/上游错）在上游分支早已 return，到不了这里；字段出现才
+	// upsert（空数组也是出现，「删光组再提交=档案记 []」），未出现不动档案；写档失败仅记
+	// 日志不影响响应（与短链 store_error 降级同哲学——偏好丢失不阻断转换结果）
+	if pr.ok {
+		s.saveGroupPrefs(req.SubURL, linkPresetID, req.Groups, groupsJSON, req.Exclude, excludeJSON)
+	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// saveGroupPrefs 偏好保存钩子核心（v1.6.0）：groups / exclude 字段出现（指针非 nil）才
+// 各自 upsert 对应档案；两者同事务落库（评审修订 #10，同成同败，杜绝半应用档案）。
+// groupsJSON / excludeJSON 为本请求的规范化序列化（"" 规范化为 "[]"——空档案也是档案）。
+// sub_key 与 exclude 的 preset_id 见 store 两把钥匙注释。日志卫生（D6）：失败只记错误
+// 类型，绝不带订阅 URL。
+func (s *server) saveGroupPrefs(subURL, presetID string, groups *[]nodeGroup, groupsJSON string, exclude *[]string, excludeJSON string) {
+	subKey := normalizeSubURL(subURL)
+	if subKey == "" {
+		return // 防御兜底（成功路径 URL 已过 validateURL，不会走到）
+	}
+	var groupsArg, excludeArg *string // nil = 字段未出现 = 不动该档案
+	if groups != nil {
+		groupsArg = &groupsJSON
+	}
+	if exclude != nil {
+		excludeArg = &excludeJSON
+	}
+	if err := s.store.upsertPrefs(subKey, presetID, groupsArg, excludeArg); err != nil {
+		log.Printf("偏好保存失败: %T", err)
+	}
 }

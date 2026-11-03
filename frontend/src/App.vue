@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useConverter } from './useConverter'
 import { useHealth } from './useHealth'
 import ClientChips from './components/ClientChips.vue'
@@ -12,8 +12,9 @@ const {
   phase, inputUrl, selectedTarget, selectedPreset, advancedOpen, submitting,
   convertError, result, clients, presets, customGroupsAvailable,
   groupsOpen, groups, nodes, probeState, excluded, groupHits, templateGroups,
+  draftKeywords, restoreNotice, restoreNoticeText,
   loadClients, probeNodes, submit,
-  selectClient, selectPreset, escapeToClash, restart,
+  selectClient, selectPreset, escapeToClash, undoRestore, clearPreferences, restart,
 } = useConverter()
 
 const { badge, init: initHealth } = useHealth()
@@ -22,6 +23,18 @@ const { badge, init: initHealth } = useHealth()
 const selectedClientLabel = computed(
   () => clients.value.find((c) => c.target === selectedTarget.value)?.label ?? '',
 )
+
+// v1.6.0 清除本订阅记忆的结果轻提示（短暂展示自动消失）
+const memoryToast = ref('')
+let memoryToastTimer: ReturnType<typeof setTimeout> | undefined
+async function onClearMemory() {
+  const ok = await clearPreferences()
+  memoryToast.value = ok ? '已清除本订阅记忆' : '本地记忆已清，服务端档案删除失败，稍后再试'
+  clearTimeout(memoryToastTimer)
+  memoryToastTimer = setTimeout(() => {
+    memoryToast.value = ''
+  }, 2500)
+}
 
 onMounted(() => {
   void initHealth()
@@ -86,6 +99,12 @@ onMounted(() => {
           </div>
         </div>
 
+        <!-- v1.6.0 偏好回填提示条：自动带出 + 一键撤销（撤销只回滚面板状态，不动存档） -->
+        <div v-if="restoreNotice" class="restore-notice" role="status">
+          <span>{{ restoreNoticeText }}</span>
+          <button type="button" class="restore-undo" @click="undoRestore">不用了</button>
+        </div>
+
         <!-- v1.5.0 自定义分组 + 模板组删减：能力位（部署 × 选中档）全真才渲染入口；
              probe 失败只影响面板内可用性 -->
         <GroupPanel
@@ -97,11 +116,17 @@ onMounted(() => {
           :template-groups="templateGroups"
           :excluded="excluded"
           :group-hits="groupHits"
+          :draft-keywords="draftKeywords"
+          :can-clear="inputUrl.trim() !== ''"
           @update:open="groupsOpen = $event"
           @update:model-value="groups = $event"
           @update:excluded="excluded = $event"
+          @update:draft-keywords="draftKeywords = $event"
+          @clear-memory="onClearMemory"
           @retry="probeNodes"
         />
+        <!-- v1.6.0 清除记忆结果轻提示 -->
+        <p v-if="memoryToast" class="memory-toast" role="status">{{ memoryToast }}</p>
         <!-- 能力位失效（切到不支持档）但组已建：面板隐藏，残留组以提示行可见——
              已建的组保留，本次转换不含分组，切回支持档即恢复 -->
         <p

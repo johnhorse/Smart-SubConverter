@@ -13,11 +13,17 @@ const props = defineProps<{
   templateGroups: PresetGroup[]
   excluded: string[]
   groupHits: Record<string, number>
+  // v1.6.0 未确认关键词 chips：必传受控 prop（持久层要存；改动一律 emit update:draftKeywords）
+  draftKeywords: string[]
+  // v1.6.0 清除本订阅记忆入口可用（粘贴了订阅链接才有记忆可清）
+  canClear?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'update:open', open: boolean): void
   (e: 'update:modelValue', groups: NodeGroup[]): void
   (e: 'update:excluded', names: string[]): void
+  (e: 'update:draftKeywords', words: string[]): void
+  (e: 'clearMemory'): void
   (e: 'retry'): void
 }>()
 
@@ -26,7 +32,8 @@ const KEYWORD_DEBOUNCE_MS = 250
 const TOAST_MS = 2500
 
 // 打词步骤：已加词 chips + 输入草稿；确认成组后进命名步骤（默认名 = 全部词拼接，可改）
-const words = ref<string[]>([])
+// chips 受控（v1.6.0 状态提升：draftKeywords 由父层持久化）；修改一律 emit 新数组
+const words = computed(() => props.draftKeywords)
 const kwInput = ref('')
 const kwDebounced = ref('')
 let debounceTimer: ReturnType<typeof setTimeout> | undefined
@@ -51,7 +58,26 @@ function showToast(msg: string) {
 onBeforeUnmount(() => {
   clearTimeout(debounceTimer)
   clearTimeout(toastTimer)
+  clearTimeout(clearConfirmTimer)
 })
+
+// v1.6.0 清除本订阅记忆：轻确认防误触——首次点击切换为确认文案，3s 未再点复原
+const confirmClear = ref(false)
+let clearConfirmTimer: ReturnType<typeof setTimeout> | undefined
+function onClearMemory() {
+  if (!props.canClear) return
+  if (!confirmClear.value) {
+    confirmClear.value = true
+    clearTimeout(clearConfirmTimer)
+    clearConfirmTimer = setTimeout(() => {
+      confirmClear.value = false
+    }, 3000)
+    return
+  }
+  clearTimeout(clearConfirmTimer)
+  confirmClear.value = false
+  emit('clearMemory')
+}
 
 // ---- 模板组删减 ----
 const excludedSet = computed(() => new Set(props.excluded))
@@ -99,13 +125,16 @@ const canAddWord = computed(
 
 function addWord() {
   if (!canAddWord.value) return
-  words.value.push(kwLive.value)
+  emit('update:draftKeywords', [...words.value, kwLive.value])
   kwInput.value = ''
   kwDebounced.value = ''
 }
 
 function removeWord(i: number) {
-  words.value.splice(i, 1)
+  emit(
+    'update:draftKeywords',
+    words.value.filter((_, j) => j !== i),
+  )
 }
 
 // 参与高亮/计数的词：已加 chips + 防抖后草稿（非空即并入；单词不回车直接看命中，与 v1 行为一致）
@@ -155,12 +184,14 @@ const nameEl = ref<HTMLInputElement>()
 
 function confirmGroup() {
   if (!canConfirm.value) return
+  // 受控模式：emit 后 props 要等重渲染才刷新，默认名按目标数组算（不读旧 props 丢草稿词）
+  const nextWords = kwLive.value !== '' ? [...words.value, kwLive.value] : [...words.value]
   if (kwLive.value !== '') {
-    words.value.push(kwLive.value)
+    emit('update:draftKeywords', nextWords)
     kwInput.value = ''
     kwDebounced.value = ''
   }
-  nameInput.value = words.value.join('')
+  nameInput.value = nextWords.join('')
   naming.value = true
   void nextTick(() => nameEl.value?.focus())
 }
@@ -185,8 +216,8 @@ function confirmName() {
     ...props.modelValue,
     { name: nameInput.value.trim(), keywords: [...words.value], urlTest: false },
   ])
+  emit('update:draftKeywords', []) // 成组后清 chips
   naming.value = false
-  words.value = []
   nameInput.value = ''
 }
 
@@ -406,6 +437,19 @@ function focusInput() {
           ＋ 添加分组
         </button>
         <p class="groups-note">机场新增同类节点会自动进组</p>
+      </div>
+
+      <!-- v1.6.0 清除本订阅记忆：删本地草稿 + 服务端档案（该订阅全部），轻确认防误触 -->
+      <div class="mem-clear-row">
+        <button
+          type="button"
+          class="mem-clear"
+          :class="{ confirming: confirmClear }"
+          :disabled="!canClear"
+          @click="onClearMemory"
+        >
+          {{ confirmClear ? '再点一次确认清除' : '清除本订阅记忆' }}
+        </button>
       </div>
     </div>
   </div>

@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mount, type VueWrapper } from '@vue/test-utils'
 import App from './App.vue'
-import { fetchClients, fetchPreview } from './api'
+import { deletePreferences, fetchClients, fetchPreferences, fetchPreview } from './api'
 import type { PreviewResponse } from './types'
 
 vi.mock('./api', () => ({
@@ -11,6 +11,8 @@ vi.mock('./api', () => ({
   fetchPreview: vi.fn(),
   fetchClients: vi.fn().mockResolvedValue({ clients: [], presets: [] }),
   fetchHealth: vi.fn().mockRejectedValue(new Error('down')),
+  fetchPreferences: vi.fn().mockResolvedValue({ custom_groups: null, exclude: null }),
+  deletePreferences: vi.fn().mockResolvedValue({ deleted_custom: false, deleted_exclude: 0 }),
 }))
 
 vi.mock('qrcode', () => ({
@@ -27,8 +29,21 @@ const okResponse: PreviewResponse = {
   deepLink: null,
 }
 
+// 每个用例挂载的组件统一卸载：onScopeDispose 清 pending 草稿定时器，
+// 防上例 300ms 防抖落盘跨用例污染（恢复 watcher 命中旧快照）
+const mountedAppWrappers: VueWrapper[] = []
+afterEach(() => {
+  while (mountedAppWrappers.length) mountedAppWrappers.pop()!.unmount()
+})
+
+// 草稿层落 localStorage：文件级统一清空，防跨用例命中旧快照（spec 修订 9）
+beforeEach(() => {
+  localStorage.clear()
+})
+
 async function mountApp() {
   const wrapper = mount(App)
+  mountedAppWrappers.push(wrapper)
   await vi.dynamicImportSettled()
   return wrapper
 }
@@ -36,6 +51,8 @@ async function mountApp() {
 describe('App 状态流转（组件层）', () => {
   beforeEach(() => {
     vi.mocked(fetchPreview).mockReset()
+    // v1.6.0 草稿层落 localStorage：防抖写入跨用例残留会让 inputUrl 命中旧快照触发恢复
+    localStorage.clear()
   })
 
   it('状态①首屏：输入框 + 转换按钮 + 高级折叠区默认收起 + 页脚徽章占位', async () => {
@@ -414,5 +431,81 @@ describe('App 自定义分组接线（v1.5.0）', () => {
         exclude: ['🇰🇷 韩国节点', '💬 Ai平台'],
       })
     })
+  })
+})
+
+describe('App 分组偏好记忆（v1.6.0）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.mocked(fetchPreview).mockReset()
+    vi.mocked(fetchClients).mockReset().mockResolvedValue({ clients: [], presets: [] })
+    vi.mocked(fetchPreferences).mockReset().mockResolvedValue({ custom_groups: null, exclude: null })
+    vi.mocked(deletePreferences).mockReset().mockResolvedValue({ deleted_custom: true, deleted_exclude: 1 })
+  })
+
+  const capableWithGroups = {
+    clients: [],
+    presets: [
+      {
+        id: 'default',
+        name: 'ACL4SSR 默认',
+        url: 'https://a.ini',
+        customGroups: true,
+        groups: [
+          { name: '🚀 节点选择', locked: true },
+          { name: '🇰🇷 韩国节点', locked: false },
+        ],
+        },
+    ],
+    capabilities: { customGroups: true },
+  }
+
+  it('粘贴订阅 → probe 成功 → 服务端回填：顶部提示条渲染，点「不用了」回滚面板状态', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableWithGroups)
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['香港专线 01'] })
+    vi.mocked(fetchPreferences).mockResolvedValue({
+      custom_groups: [{ name: '专线', keywords: ['专线'], urlTest: false }],
+      exclude: ['🇰🇷 韩国节点'],
+    })
+    const wrapper = await mountApp()
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    // 并发跑测时 loadClients/回填链可能超过 waitFor 默认 1s：放宽超时消 flaky
+    await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(true), { timeout: 3000 })
+    await wrapper.find('.groups-entry').trigger('click')
+
+    // 回填后：提示条文案 + 已剔除区出现模板组 chip
+    await vi.waitFor(() => expect(wrapper.find('.restore-notice').exists()).toBe(true), { timeout: 3000 })
+    expect(wrapper.find('.restore-notice').text()).toContain('已恢复 1 个自定义分组')
+    expect(wrapper.find('.restore-notice').text()).toContain('剔除 1 个模板组')
+    await vi.waitFor(() => expect(wrapper.findAll('.excluded-chip')).toHaveLength(1), { timeout: 3000 })
+
+    // 撤销：面板回滚、提示条消失
+    await wrapper.find('.restore-undo').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('.restore-notice').exists()).toBe(false))
+    await vi.waitFor(() => expect(wrapper.findAll('.excluded-chip')).toHaveLength(0))
+  })
+
+  it('清除本订阅记忆：两击轻确认 → 本地快照与远端档案都清 + 结果轻提示', async () => {
+    vi.mocked(fetchClients).mockResolvedValueOnce(capableWithGroups)
+    vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+    const wrapper = await mountApp()
+
+    await wrapper.find('input[aria-label="订阅链接"]').setValue('https://example.com/sub')
+    await vi.waitFor(() => expect(wrapper.find('.groups-entry').exists()).toBe(true))
+    await wrapper.find('.groups-entry').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('.mem-clear').exists()).toBe(true), { timeout: 3000 })
+
+    const btn = wrapper.find('.mem-clear')
+    await btn.trigger('click') // 第一次：确认态
+    expect(wrapper.emitted()).toBeTruthy()
+    expect(wrapper.find('.mem-clear').text()).toBe('再点一次确认清除')
+    expect(wrapper.find('.memory-toast').exists()).toBe(false)
+
+    await btn.trigger('click') // 第二次：执行（本地 + 远端）
+    await vi.waitFor(() => expect(wrapper.find('.memory-toast').exists()).toBe(true))
+    expect(wrapper.find('.memory-toast').text()).toBe('已清除本订阅记忆')
+    expect(deletePreferences).toHaveBeenCalledWith('https://example.com/sub')
+    expect(localStorage.getItem('ssc.draft.v1')).toBeNull()
   })
 })

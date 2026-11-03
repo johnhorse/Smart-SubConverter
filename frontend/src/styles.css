@@ -870,6 +870,69 @@ body {
   color: var(--ink-faint);
 }
 
+/* v1.6.0 偏好回填提示条（自动带出 + 一键撤销）与清除记忆入口 */
+.restore-notice {
+  margin-top: 14px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+  background: var(--accent-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--accent-ink);
+  font-size: 14px;
+}
+
+.restore-undo {
+  border: none;
+  background: transparent;
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: 14px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+
+.memory-toast {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.mem-clear-row {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+.mem-clear {
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.mem-clear:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+.mem-clear.confirming {
+  color: var(--danger);
+}
+
+.mem-clear:disabled {
+  cursor: default;
+  text-decoration: none;
+}
+
 @media (max-width: 560px) {
   .convert-form {
     flex-direction: column;

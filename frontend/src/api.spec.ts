@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiUnreachableError, fetchPreview, type PreviewOptions } from './api'
+import {
+  ApiUnreachableError,
+  deletePreferences,
+  fetchPreferences,
+  fetchPreview,
+  type PreviewOptions,
+} from './api'
 import { ERROR_MESSAGES, errorText } from './constants'
 
 // mock fetch：pending 直到 abort signal 触发 reject（模拟真实 fetch 对 signal 的响应）
@@ -198,5 +204,48 @@ describe('fetchPreview options（v1.5.0 probe / groups 请求形状）', () => {
         body: JSON.stringify({ url: 'https://example.com/sub', target: 'auto', preset: 'default' }),
       }),
     )
+  })
+})
+
+describe('偏好接口（v1.6.0 请求形状）', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function stubOk(body: object) {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 })))
+  }
+
+  it('fetchPreferences：POST /api/preferences/query，body 带 sub_url 与 preset_id；null 档案透传', async () => {
+    stubOk({ custom_groups: null, exclude: null })
+    const res = await fetchPreferences('https://example.com/sub', 'full_multimode')
+    expect(res).toEqual({ custom_groups: null, exclude: null })
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      '/api/preferences/query',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sub_url: 'https://example.com/sub', preset_id: 'full_multimode' }),
+      }),
+    )
+  })
+
+  it('deletePreferences：DELETE /api/preferences，body 带 sub_url；删除计数透传', async () => {
+    stubOk({ deleted_custom: true, deleted_exclude: 2 })
+    const res = await deletePreferences('https://example.com/sub')
+    expect(res).toEqual({ deleted_custom: true, deleted_exclude: 2 })
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      '/api/preferences',
+      expect.objectContaining({
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sub_url: 'https://example.com/sub' }),
+      }),
+    )
+  })
+
+  it('400（bad_url_* 族）抛 ApiUnreachableError——回填/清除侧按静默失败处理', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{"error":"bad_url_format"}', { status: 400 })))
+    await expect(fetchPreferences('not-a-url', 'default')).rejects.toBeInstanceOf(ApiUnreachableError)
   })
 })

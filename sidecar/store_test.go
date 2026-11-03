@@ -173,7 +173,7 @@ func TestDeleteAndRotate(t *testing.T) {
 	}
 }
 
-// user_version 迁移幂等：首次建库 =3（v1 建表 + v2 groups 列 + v3 exclude 列）；重开不重复迁移且数据仍在
+// user_version 迁移幂等：首次建库 =4（v1 建表 + v2 groups 列 + v3 exclude 列 + v4 prefs 两表）；重开不重复迁移且数据仍在
 func TestMigrateIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	st, err := openStore(dir)
@@ -181,8 +181,8 @@ func TestMigrateIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	var v int
-	if err := st.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 3 {
-		t.Fatalf("user_version = %d (err %v)，应为 3", v, err)
+	if err := st.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 4 {
+		t.Fatalf("user_version = %d (err %v)，应为 4", v, err)
 	}
 	if _, err := st.getOrCreateLink("https://sub.example.com/l", "auto", "default", "https://c.example/i", "", ""); err != nil {
 		t.Fatal(err)
@@ -191,13 +191,13 @@ func TestMigrateIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st2, err := openStore(dir) // 重开：迁移应跳过（v 已 3）
+	st2, err := openStore(dir) // 重开：迁移应跳过（v 已 4）
 	if err != nil {
 		t.Fatalf("重开库失败: %v", err)
 	}
 	defer st2.close()
-	if err := st2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 3 {
-		t.Fatalf("重开后 user_version = %d (err %v)，应仍为 3", v, err)
+	if err := st2.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 4 {
+		t.Fatalf("重开后 user_version = %d (err %v)，应仍为 4", v, err)
 	}
 	var n int
 	if err := st2.db.QueryRow("SELECT COUNT(*) FROM links").Scan(&n); err != nil || n != 1 {
@@ -205,7 +205,7 @@ func TestMigrateIdempotent(t *testing.T) {
 	}
 }
 
-// 存量 v1 库升级：v1 schema（无 groups/exclude 列）+ user_version=1 → openStore 迁移到 v3，
+// 存量 v1 库升级：v1 schema（无 groups/exclude 列）+ user_version=1 → openStore 迁移到 v4，
 // 存量记录不动、照常 hit（契约：v1 存量指纹记录不迁移、存量码照常 hit）
 func TestMigrateV1ExistingDB(t *testing.T) {
 	dir := t.TempDir()
@@ -239,8 +239,8 @@ func TestMigrateV1ExistingDB(t *testing.T) {
 	}
 	defer st.close()
 	var v int
-	if err := st.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 3 {
-		t.Fatalf("迁移后 user_version = %d (err %v)，应为 3", v, err)
+	if err := st.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 4 {
+		t.Fatalf("迁移后 user_version = %d (err %v)，应为 4", v, err)
 	}
 	lnk, found, err := st.linkByCode("V1LEGACY")
 	if err != nil || !found {
@@ -388,7 +388,7 @@ func TestGetOrCreateGroupsRoundtrip(t *testing.T) {
 	}
 }
 
-// 存量 v2 库升级：v2 schema（有 groups、无 exclude）+ user_version=2 → openStore 迁移到 3，
+// 存量 v2 库升级：v2 schema（有 groups、无 exclude）+ user_version=2 → openStore 迁移到 4，
 // 存量记录（含冻结 groups）照常可读、exclude 读回空
 func TestMigrateV2ExistingDB(t *testing.T) {
 	dir := t.TempDir()
@@ -424,8 +424,8 @@ func TestMigrateV2ExistingDB(t *testing.T) {
 	}
 	defer st.close()
 	var v int
-	if err := st.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 3 {
-		t.Fatalf("迁移后 user_version = %d (err %v)，应为 3", v, err)
+	if err := st.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 4 {
+		t.Fatalf("迁移后 user_version = %d (err %v)，应为 4", v, err)
 	}
 	lnk, found, err := st.linkByCode("V2LEGACY")
 	if err != nil || !found {
