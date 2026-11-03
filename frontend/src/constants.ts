@@ -6,7 +6,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   bad_url_format: '这不像一个订阅链接——检查一下是不是复制全了？',
   bad_url_private: '这个链接指向内网地址，转换服务够不着它',
   bad_preset: '这个模板不可用，重新选一个试试',
-  bad_groups: '分组信息有误——组名和关键词不超过 32 字，别用特殊符号，同名分组只留一个',
+  bad_groups: '分组信息有误——组名和关键词不超过 32 字、正则不超过 256 字，别用反引号或换行等特殊符号，同名分组只留一个',
   groups_disabled: '当前部署或所选模板不支持自定义分组',
   upstream_error: '转换没成功——可以试试展开「指定客户端」换一个，或稍后再来',
   upstream_timeout: '等太久没等到结果，再试一次看看？',

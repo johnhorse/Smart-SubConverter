@@ -31,6 +31,65 @@ describe('prefs 本地草稿层（v1.6.0）', () => {
     expect(getSnapshot('  https://example.com/sub  ')).toEqual(snap({ draftKeywords: ['专线'] }))
   })
 
+  // ---- v1.6.1：正则组 pattern 与快照 draftMode / draftPattern ----
+
+  it('往返：正则组 pattern、draftMode、draftPattern 原样存取', () => {
+    const withRegex = snap({
+      groups: [{ name: '纯净港', keywords: [], pattern: '(?=.*香港)(?!.*维护)', urlTest: false }],
+      draftMode: 'regex',
+      draftPattern: '(A|B)',
+    })
+    saveSnapshot('https://example.com/sub', withRegex)
+    expect(getSnapshot('https://example.com/sub')).toEqual(withRegex)
+  })
+
+  it('旧快照（无 draftMode/draftPattern、组无 pattern）照常合法', () => {
+    const legacy = snap()
+    saveSnapshot('https://example.com/sub', legacy)
+    expect(getSnapshot('https://example.com/sub')).toEqual(legacy)
+  })
+
+  it('pattern 非 string 的组 → 坏条目剔除；pattern 缺席或 string 均合法', () => {
+    const good = snap()
+    localStorage.setItem(
+      DRAFT_KEY,
+      JSON.stringify({
+        subs: {
+          badPattern: {
+            ...snap(),
+            groups: [{ name: 'x', keywords: [], pattern: 42, urlTest: false }],
+          },
+          goodString: snap({
+            groups: [{ name: 'ok', keywords: [], pattern: '(A|B)', urlTest: false }],
+          }),
+          'https://example.com/sub': good,
+        },
+      }),
+    )
+    expect(getSnapshot('badPattern')).toBeNull()
+    expect(getSnapshot('goodString')?.groups).toEqual([
+      { name: 'ok', keywords: [], pattern: '(A|B)', urlTest: false },
+    ])
+    expect(getSnapshot('https://example.com/sub')).toEqual(good)
+  })
+
+  it('draftMode 坏值 / draftPattern 非 string → 坏条目剔除；keyword 与 regex 均合法', () => {
+    const good = snap({ draftMode: 'regex', draftPattern: '专线' })
+    localStorage.setItem(
+      DRAFT_KEY,
+      JSON.stringify({
+        subs: {
+          badMode: { ...snap(), draftMode: 'wildcard' },
+          badPattern: { ...snap(), draftMode: 'regex', draftPattern: ['专线'] },
+          'https://example.com/sub': good,
+        },
+      }),
+    )
+    expect(getSnapshot('badMode')).toBeNull()
+    expect(getSnapshot('badPattern')).toBeNull()
+    expect(getSnapshot('https://example.com/sub')).toEqual(good)
+  })
+
   it('无存档 / 空 URL → null；坏 JSON 按无草稿降级', () => {
     expect(getSnapshot('https://example.com/sub')).toBeNull()
     expect(getSnapshot('   ')).toBeNull()

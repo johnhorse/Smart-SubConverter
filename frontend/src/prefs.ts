@@ -15,6 +15,9 @@ export interface DraftSnapshot {
   excluded: string[]
   // 未确认的关键词 chips（GroupPanel 打词步骤中已加未成组的词；刷新后原样带出）
   draftKeywords: string[]
+  // v1.6.1 增补：当前匹配模式与未成组的正则草稿（字段缺席 = 旧快照，按关键词模式降级）
+  draftMode?: 'keyword' | 'regex'
+  draftPattern?: string
   updatedAt: string
 }
 
@@ -35,6 +38,9 @@ function isNodeGroupArray(v: unknown): v is NodeGroup[] {
         typeof g === 'object' &&
         typeof (g as Record<string, unknown>).name === 'string' &&
         isStringArray((g as Record<string, unknown>).keywords) &&
+        // v1.6.1：可选 pattern，缺席或 string 均合法（正则组）
+        ((g as Record<string, unknown>).pattern === undefined ||
+          typeof (g as Record<string, unknown>).pattern === 'string') &&
         typeof (g as Record<string, unknown>).urlTest === 'boolean',
     )
   )
@@ -49,6 +55,9 @@ function isValidSnapshot(v: unknown): v is DraftSnapshot {
     isNodeGroupArray(s.groups) &&
     isStringArray(s.excluded) &&
     isStringArray(s.draftKeywords) &&
+    // v1.6.1：可选 draftMode / draftPattern，缺席合法；类型不对按坏条目剔除
+    (s.draftMode === undefined || s.draftMode === 'keyword' || s.draftMode === 'regex') &&
+    (s.draftPattern === undefined || typeof s.draftPattern === 'string') &&
     typeof s.updatedAt === 'string'
   )
 }

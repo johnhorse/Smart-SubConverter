@@ -1297,4 +1297,90 @@ describe('useConverter 分组偏好记忆（v1.6.0）', () => {
     conv.restart()
     expect(conv.restoreNotice.value).toBeNull()
   })
+
+  // ---- v1.6.1：正则模式草稿（draftMode / draftPattern）----
+
+  it('正则草稿防抖落盘；新会话粘贴同订阅 → 模式与正则恢复', async () => {
+    vi.useFakeTimers()
+    try {
+      const conv = setup()
+      conv.inputUrl.value = SUB
+      conv.draftMode.value = 'regex'
+      conv.draftPattern.value = '(?=.*香港)(?!.*维护)'
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(SUB)).toMatchObject({
+        draftMode: 'regex',
+        draftPattern: '(?=.*香港)(?!.*维护)',
+      })
+
+      const conv2 = useConverter()
+      conv2.inputUrl.value = SUB
+      await tickUntil(() => conv2.draftMode.value === 'regex')
+      expect(conv2.draftPattern.value).toBe('(?=.*香港)(?!.*维护)')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('换订阅无快照：draftPattern 清空、draftMode 重置 keyword（程序化清空不落盘）', async () => {
+    vi.useFakeTimers()
+    try {
+      const conv = setup()
+      conv.inputUrl.value = SUB
+      conv.draftMode.value = 'regex'
+      conv.draftPattern.value = '(A|B)'
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(SUB)).not.toBeNull()
+
+      conv.inputUrl.value = OTHER
+      expect(conv.draftPattern.value).toBe('')
+      expect(conv.draftMode.value).toBe('keyword')
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(OTHER)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('旧快照（draftMode/draftPattern 缺席）：恢复降级为关键词模式 + 空正则草稿', async () => {
+    saveSnapshot(SUB, makeSnap())
+    const conv = setup()
+    conv.inputUrl.value = SUB
+    await tickUntil(() => conv.groups.value.length === 1)
+    expect(conv.draftMode.value).toBe('keyword')
+    expect(conv.draftPattern.value).toBe('')
+  })
+
+  it('清除记忆：不复活本地快照（动作本身不得重新武装落盘）', async () => {
+    vi.useFakeTimers()
+    try {
+      const conv = setup()
+      conv.inputUrl.value = SUB
+      conv.draftPattern.value = '(A|B)' // 武装 300ms 落盘
+      await conv.clearPreferences()
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(SUB)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('带 pattern 的正则组随 groups 落盘与恢复（groups 原样携带 pattern 字段）', async () => {
+    vi.useFakeTimers()
+    try {
+      const regexIntent = [{ name: '纯净港', keywords: [], pattern: '(?=.*香港)(?!.*维护)', urlTest: false }]
+      const conv = setup()
+      conv.inputUrl.value = SUB
+      conv.groups.value = regexIntent
+      await vi.advanceTimersByTimeAsync(300)
+      expect(getSnapshot(SUB)?.groups).toEqual(regexIntent)
+
+      const conv2 = useConverter()
+      conv2.inputUrl.value = SUB
+      await tickUntil(() => conv2.groups.value.length === 1)
+      expect(conv2.groups.value).toEqual(regexIntent)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

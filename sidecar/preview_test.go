@@ -1068,6 +1068,13 @@ func TestPreviewBadGroupsMatrix(t *testing.T) {
 		`[{"name":"n","keywords":["a","b","c","d","e","f"]}]`,
 		`[{"name":"a","keywords":["k"]},{"name":"a","keywords":["k2"]}]`,
 		"[" + strings.Join(many, ",") + "]",
+		// v1.6.1 pattern 增补：超长 / 反引号 / 换行 \n / 回车 \r / NUL（前瞻语法合法，
+		// 放行用例见 TestPreviewPatternGroupsAccepted）
+		`[{"name":"n","keywords":[],"pattern":"` + strings.Repeat("a", 257) + `"}]`,
+		"[{\"name\":\"n\",\"keywords\":[],\"pattern\":\"p`q\"}]",
+		`[{"name":"n","keywords":[],"pattern":"a\nb"}]`,
+		`[{"name":"n","keywords":[],"pattern":"a\rb"}]`,
+		`[{"name":"n","keywords":[],"pattern":"a\u0000b"}]`,
 	}
 	for _, g := range bad {
 		resp, _ := postPreview(t, s, `{"url":"https://sub.example.com/s","target":"surge","groups":`+g+`}`, "h:1", "")
@@ -1123,6 +1130,34 @@ func TestPreviewGroupsValidBoundaries(t *testing.T) {
 	resp2, _ := postPreview(t, s, `{"url":"`+subURL+`","groups":[{"name":"专线","keywords":["专线"],"urlTest":false}]}`, "h:1", "")
 	if resp2.Link != resp.Link {
 		t.Errorf("同参数同 groups 应复用同码：%s vs %s", resp.Link, resp2.Link)
+	}
+}
+
+// 合法正则组建链（v1.6.1）：含 Perl 负向前瞻的 pattern 不被误拒（RE2 编不了 ≠ 非法，
+// 服务端不 Compile）→ ok 建链；存库 groups 为含 pattern 键的规范化 JSON；pattern
+// 两端空格 trim 后落库
+func TestPreviewPatternGroupsAccepted(t *testing.T) {
+	subURL, extURL, _ := twoStageEnv(t, "clash", "proxies:\n  - {name: node-a}\n")
+	vcfg := testConfig(t, extURL)
+	vcfg.presetURL = defaultPresetURL
+	s := mustServer(t, vcfg)
+	enableSnap(t, s)
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+	s.cfg.sidecarBase = ts.URL
+	resp, _ := postPreview(t, s, `{"url":"`+subURL+`","groups":[{"name":"香港纯净","keywords":[],"pattern":"(?=.*香港)(?!.*维护)","urlTest":false}]}`, "h:1", "")
+	if !resp.OK || resp.ErrorCode != nil {
+		t.Fatalf("合法 pattern 组响应 = %+v", resp)
+	}
+	if lnk := storedFor(t, s, resp.Link); lnk.Groups != `[{"name":"香港纯净","keywords":[],"pattern":"(?=.*香港)(?!.*维护)","urlTest":false}]` {
+		t.Errorf("存库 groups = %s，应为含 pattern 的规范化 JSON", lnk.Groups)
+	}
+	resp2, _ := postPreview(t, s, `{"url":"`+subURL+`","groups":[{"name":"n2","keywords":[],"pattern":"  HK|SG  ","urlTest":false}]}`, "h:1", "")
+	if !resp2.OK || resp2.ErrorCode != nil {
+		t.Fatalf("pattern trim 归一化响应 = %+v", resp2)
+	}
+	if lnk := storedFor(t, s, resp2.Link); lnk.Groups != `[{"name":"n2","keywords":[],"pattern":"HK|SG","urlTest":false}]` {
+		t.Errorf("存库 groups = %s，应为 trim 后规范化 JSON", lnk.Groups)
 	}
 }
 

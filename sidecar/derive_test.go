@@ -353,6 +353,35 @@ func TestDeriveGroupsINIMultiKeywords(t *testing.T) {
 	}
 }
 
+// 正则组派生（v1.6.1）：pattern 优先于 keywords；未以 (?i) 开头自动拼前缀（默认
+// 忽略大小写）、已带 (?i) 不重复拼；负向前瞻等 Perl 语法原样透传（RE2 编不了的照放
+// ——引擎侧 PCRE 解释，服务端绝不 Compile）；select / url-test 两形态；与关键词组
+// 混合派生互不干扰
+func TestDeriveGroupsINIPattern(t *testing.T) {
+	tpl := "[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\nenable_rule_generator=true\n"
+	groups := []nodeGroup{
+		{Name: "香港纯净", Pattern: "(?=.*香港)(?!.*维护)", URLTest: false},
+		{Name: "自带i", Pattern: "(?i)HK|SG", URLTest: false},
+		{Name: "测速正则", Pattern: "新加坡|狮城", URLTest: true},
+		{Name: "关键词组", Keywords: []string{"美国"}, URLTest: false},
+	}
+	out, err := deriveINI([]byte(tpl), groups, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{
+		"custom_proxy_group=香港纯净`select`(?i)(?=.*香港)(?!.*维护)",
+		"custom_proxy_group=自带i`select`(?i)HK|SG",
+		"custom_proxy_group=测速正则`url-test`(?i)新加坡|狮城`http://www.gstatic.com/generate_204`300,,50",
+		"custom_proxy_group=关键词组`select`(?=.*美国)",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("缺行:\n%s", want)
+		}
+	}
+}
+
 // 词数校验边界：0 词拒、6 词拒、恰 5 词过
 func TestValidateGroupsKeywordCount(t *testing.T) {
 	five := []string{"a", "b", "c", "d", "e"}
@@ -364,6 +393,36 @@ func TestValidateGroupsKeywordCount(t *testing.T) {
 	}
 	if err := validateGroups([]nodeGroup{{Name: "n", Keywords: append([]string{"f"}, five...)}}); err == nil {
 		t.Error("6 词应拒")
+	}
+}
+
+// pattern 校验边界（v1.6.1）：keywords 与 pattern 至少一个有效；前瞻语法（含负向）
+// 放行——铁律：RE2 编不了不等于非法，绝不能拿 regexp.Compile 当校验器；恰 256 过、
+// 257 拒；反引号 / \n / \r / \u0000 控制字符拒
+func TestValidateGroupsPattern(t *testing.T) {
+	for _, g := range []nodeGroup{
+		{Name: "负向前瞻", Pattern: "(?=.*香港)(?!.*维护)"},
+		{Name: "或条件", Pattern: "HK|SG"},
+		{Name: "词组并存", Keywords: []string{"k"}, Pattern: "p"},
+	} {
+		if err := validateGroups([]nodeGroup{g}); err != nil {
+			t.Errorf("%+v 应过: %v", g, err)
+		}
+	}
+	if err := validateGroups([]nodeGroup{{Name: "n", Pattern: strings.Repeat("a", 256)}}); err != nil {
+		t.Errorf("恰 256 字应过: %v", err)
+	}
+	for _, g := range []nodeGroup{
+		{Name: "n", Pattern: ""},
+		{Name: "n", Pattern: strings.Repeat("a", 257)},
+		{Name: "n", Pattern: "a`b"},
+		{Name: "n", Pattern: "a\nb"},
+		{Name: "n", Pattern: "a\rb"},
+		{Name: "n", Pattern: "a\x00b"},
+	} {
+		if err := validateGroups([]nodeGroup{g}); err == nil {
+			t.Errorf("pattern %q 应拒", g.Pattern)
+		}
 	}
 }
 
@@ -395,6 +454,27 @@ func TestCanonicalGroupsJSONKeyOrder(t *testing.T) {
 	}
 	if got := canonicalGroupsJSON(nil); got != "[]" {
 		t.Errorf("空组 = %s，want []", got)
+	}
+}
+
+// pattern 组规范化序列化（v1.6.1）：键序 name→keywords→pattern→urlTest；省略
+// keywords 的 pattern 组归一化后存库形态为 "keywords":[]（normalize 的 make 天然
+// nil→空 slice，指纹/列存形态统一）；关键词组 omitempty 不含 pattern 键——与
+// v1.6.0 逐字节一致（存量指纹不变）；列存 roundtrip pattern 经 UnmarshalJSON 还原
+func TestCanonicalGroupsJSONPattern(t *testing.T) {
+	got := canonicalGroupsJSON(normalizeGroups([]nodeGroup{{Name: "香港纯净", Pattern: `(?i)hk(?!.*0\.1x)`}}))
+	if want := `[{"name":"香港纯净","keywords":[],"pattern":"(?i)hk(?!.*0\\.1x)","urlTest":false}]`; got != want {
+		t.Errorf("groupsJSON = %s，want %s", got, want)
+	}
+	if got := canonicalGroupsJSON([]nodeGroup{{Name: "专线", Keywords: []string{"k"}, URLTest: true}}); got != `[{"name":"专线","keywords":["k"],"urlTest":true}]` {
+		t.Errorf("关键词组 groupsJSON = %s，pattern 键不得出现", got)
+	}
+	gs, err := parseGroupsJSON(`[{"name":"香港纯净","keywords":[],"pattern":"(?=.*hk)(?!.*0\\.1x)","urlTest":true}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gs) != 1 || gs[0].Pattern != `(?=.*hk)(?!.*0\.1x)` || !gs[0].URLTest || len(gs[0].Keywords) != 0 {
+		t.Errorf("pattern roundtrip = %+v", gs[0])
 	}
 }
 

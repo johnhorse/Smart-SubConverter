@@ -16,6 +16,8 @@
 
 > 增量修订（2026-11-03，v1.6.0 分组偏好记忆）：新增 `POST /api/preferences/query` 与 `DELETE /api/preferences` 两端点（按订阅链接存取「已提交偏好档案」，body 传订阅链接、不加认证）；preview 非 probe 成功路径增保存钩子（groups/exclude 字段出现才 upsert）；store `user_version` 3→4（prefs 两表）。详见「分组偏好记忆（v1.6.0）」节。
 
+> 增量修订（2026-11-03，v1.6.1 正则节点分组）：`groups[]` 每项增可选 `pattern` 字段（正则组；非空时优先于 `keywords`，PCRE 语法引擎侧解释，服务端只校长度 ≤256 与非法字符、不编译校验）；拉取期派生组行匹配表达式两态（关键词前瞻 AND / pattern 原样直通并自动拼 `(?i)`）；`groupsJSON` 键序 name→keywords→（pattern，存在时）→urlTest，关键词组序列化逐字节不变（存量指纹与库不受影响）。详见「groups 请求字段与归一化」节。
+
 Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081，仅容器内回环）。注意：**不能用 `PORT`**——该 env 已被 Extended（subconverter）占用。
 
 ## GET /api/clients
@@ -127,7 +129,7 @@ Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081
 | `upstream_timeout` | sidecar→Extended 10s 超时 | 等太久没等到结果，再试一次看看？ |
 | `backend_down` | Extended 连不上 | 转换引擎暂时没响应，稍后再试 |
 | `store_error` | 短链写入存储失败（磁盘满/库损坏等运维态） | 短链生成失败了——这次给的是普通链接（含订阅信息，注意别转发）；请部署者检查 /data 卷 |
-| `bad_groups` | `groups` 或 `exclude` 校验失败（v1.5.0；空名/超长/含反引号或控制字符/组内重名/超 10 组；exclude：超 64 项、单名超 64 rune） | 分组信息有误——组名和关键词不超过 32 字，别用特殊符号，同名分组只留一个 |
+| `bad_groups` | `groups` 或 `exclude` 校验失败（v1.5.0/v1.6.1；空名/超长/含反引号或控制字符/组内重名/超 10 组；exclude：超 64 项、单名超 64 rune；pattern：超 256 rune） | 分组信息有误——组名和关键词不超过 32 字、正则不超过 256 字，别用反引号或换行等特殊符号，同名分组只留一个 |
 | `groups_disabled` | `groups` / `exclude` 非空但部署（出树 `DATA_DIR`）或所选档（豁免档）不支持分组（v1.5.0；UI 正常流程点不出，防手改请求） | 当前部署或所选模板不支持自定义分组 |
 | `api_unreachable` | **前端侧专用**：fetch /api/preview 失败/超时（15s AbortController）/非 200 | 服务暂时够不着，稍后再试 |
 
@@ -211,15 +213,16 @@ Extended 错误体识别要点（映射 `upstream_error` 细节，Assignment ⑤
 
 ```json
 { "url": "https://…", "target": "clash", "preset": "default",
-  "groups": [ { "name": "⭐️美国专线", "keywords": ["美国", "专线"], "urlTest": false } ] }
+  "groups": [ { "name": "⭐️美国专线", "keywords": ["美国", "专线"], "urlTest": false },
+              { "name": "香港纯净", "keywords": [], "pattern": "(?=.*香港)(?!.*维护)", "urlTest": false } ] }
 ```
 
 - `groups` 缺省 / `null` / `[]` = 无组（存量行为，v1.4.0 逐字节回归路径）
-- 每项三字段：`name`（组名，用户自定义，确认成组时默认=关键词拼接）、`keywords`（关键词数组，**多词 AND 语义**——节点名须同时含全部词才命中；字面量 substring，非正则）、`urlTest`（`false`=select 组、`true`=url-test 组）
-- 校验（不过 → `bad_groups`，不调上游）：`name` / 每个 keyword trim 后非空；长度各 ≤ 32 个 Unicode 字符（rune 数）；禁反引号 `` ` `` 与控制字符（U+0000–U+001F、U+007F）；`keywords` 1..5 个词；`name` 组内不重复；`groups` ≤ 10 项
+- 每项四字段（v1.6.1 前三字段）：`name`（组名，用户自定义，确认成组时默认=关键词拼接）、`keywords`（关键词数组，**多词 AND 语义**——节点名须同时含全部词才命中；字面量 substring，非正则）、`pattern`（可选，正则模式——正则 Tab 专用；非空时**优先于 `keywords`** 生效，PCRE 语法由引擎侧解释；`keywords`/`pattern` 至少一个有效）、`urlTest`（`false`=select 组、`true`=url-test 组）
+- 校验（不过 → `bad_groups`，不调上游）：`name` / 每个 keyword trim 后非空；长度各 ≤ 32 个 Unicode 字符（rune 数）；禁反引号 `` ` `` 与控制字符（U+0000–U+001F、U+007F）；`keywords` 1..5 个词；`name` 组内不重复；`groups` ≤ 10 项。**`pattern`（v1.6.1）**：trim 后为空等价未提供（归 keywords 判定）；长度 ≤ 256 个 Unicode 字符（rune 数）；禁反引号与控制字符（换行 `\r` / `\n` 属控制字符自然涵盖——防破坏 ini 组行格式）。**pattern 语法不在服务端校验**：Go `regexp` 是 RE2，不支持 Perl 前瞻 `(?=…)` / `(?!…)`，拿它编译校验会误拒引擎侧完全合法的 PCRE；语法合法性由前端 `new RegExp(pattern, 'i')` 实时校验把关，服务端只做长度与非法字符检查
 - **服务端不校验命中数**：创建期零命中由前端挡（不成组）；手改请求带零命中组照建，形态与拉取期零命中一致（见下）
-- 匹配语义两端一致：前端/预览按**全部词 AND 的字面 substring**高亮计数；派生侧每个词 `regexp.QuoteMeta` 转义后拼成前瞻正则 `(?=.*w1)(?=.*w2)…(?=.*wn)`（单词同款写法，gate2 例 4 实证与裸词等价）——多词 AND 的转义误命中防护同 gate1（例 2：`IEPL 1\.0` 转义点不匹配「IEPL专线」）；计数等价（前端 AND 计数 == 引擎组员数）gate2 例 1/2 断言
-- `groupsJSON`（指纹与存储用规范化序列化）：键序固定 `name`→`keywords`→`urlTest`、无空白、空组为 `[]`
+- 匹配语义两端一致：前端/预览按**全部词 AND 的字面 substring**高亮计数；派生侧每个词 `regexp.QuoteMeta` 转义后拼成前瞻正则 `(?=.*w1)(?=.*w2)…(?=.*wn)`（单词同款写法，gate2 例 4 实证与裸词等价）——多词 AND 的转义误命中防护同 gate1（例 2：`IEPL 1\.0` 转义点不匹配「IEPL专线」）；计数等价（前端 AND 计数 == 引擎组员数）gate2 例 1/2 断言。**正则组（v1.6.1）**：前端按 `new RegExp(pattern, 'i')` 高亮计数；派生侧 pattern **原样**作为组成员匹配表达式放入组行（服务端不编译、不改写），未以 `(?i)` 开头时自动拼 `(?i)` 前缀（默认忽略大小写，与前端 `'i'` 标志一致；引擎 PCRE 实测支持 inline flag）
+- `groupsJSON`（指纹与存储用规范化序列化）：键序固定 `name`→`keywords`→（`pattern`，存在时）→`urlTest`、无空白、空组为 `[]`；关键词组 `pattern` 省略（omitempty）——序列化与 v1.6.0 逐字节一致，存量指纹与库不受影响
 
 ### probe 模式（取名两段式：探测不建链、提交才建链）
 
@@ -259,9 +262,11 @@ hit 且该码 `groups` 或 `exclude` 非空 → 拉取时派生（`exclude` 单�
    - 摘引用：其余组行成员引用 `` `[]{被删组名} ``（**连前导反引号**整体摘除，防止留空成员）——gate3 T2 实证：不摘则引擎 200 且把悬空成员引用原样写进产物（不报错、不清理），摘引用为必需步骤
    - 规则回退：`ruleset={被删组名},<url>` 行的目标组改写——被删组首成员（`[]X` 或裸成员；`.*` 等正则段不算）属直连类（`DIRECT` / `REJECT` / `🎯 全球直连` / 拦截净化类组名）→ 改写为 `🎯 全球直连`，否则 → `🚀 节点选择`
    - 自检（fail-closed）：产物中不允许再出现被删组名作为 `custom_proxy_group=` 定义、`ruleset=` 目标或 `` `[] `` 成员引用；且发生规则改写时，所用回退目标组（`🚀 节点选择` / `🎯 全球直连`）必须存在于产物组集合中（上游模板改名/删除的防护——引擎不校验规则目标）；任一不满足 → 502 `derive_error`（gate3 T2：引擎不做兜底，自检是最后防线）
-3. 逐组生成行（每个关键词 `regexp.QuoteMeta` 转义后拼**前瞻 AND 正则**：`(?=.*w1)(?=.*w2)…(?=.*wn)`，单词同款写法——gate2 例 4 实证与裸词等价；行内分隔符为反引号，模板原生形态）：
-   - `urlTest:false` → ``custom_proxy_group={name}`select`{前瞻正则}``
-   - `urlTest:true` → ``custom_proxy_group={name}`url-test`{前瞻正则}`http://www.gstatic.com/generate_204`300,,50``（模板默认外网测速 URL、间隔 300、tolerance 50——R5 定案：测速流量穿节点，勿换国内 URL；行首 `=` 后直接组名、无前导反引号——模板原生形态，前导反引号形态引擎实测被静默吞）
+3. 逐组生成行（匹配表达式两态，v1.6.1 `pattern` 优先；行内分隔符为反引号，模板原生形态）：
+   - 关键词组（`pattern` 空）：每个关键词 `regexp.QuoteMeta` 转义后拼**前瞻 AND 正则**：`(?=.*w1)(?=.*w2)…(?=.*wn)`，单词同款写法——gate2 例 4 实证与裸词等价
+   - 正则组（`pattern` 非空）：`pattern` 原样直通作为成员匹配表达式（服务端不编译改写），未以 `(?i)` 开头自动拼 `(?i)` 前缀（默认忽略大小写；引擎 PCRE 实测支持 inline flag）
+   - `urlTest:false` → ``custom_proxy_group={name}`select`{匹配表达式}``
+   - `urlTest:true` → ``custom_proxy_group={name}`url-test`{匹配表达式}`http://www.gstatic.com/generate_204`300,,50``（模板默认外网测速 URL、间隔 300、tolerance 50——R5 定案：测速流量穿节点，勿换国内 URL；行首 `=` 后直接组名、无前导反引号——模板原生形态，前导反引号形态引擎实测被静默吞）
 4. 撞名兜底（R3；闸门证有害形态：同名追加行被引擎静默吞、用户组丢失）：组名 ∈ 模板组名单（**删减前原始名单**，含被删名——用户组不得复用被删组名，避免与第 2b 步自检冲突）或本次已生成组名 → 后缀带圈数字逐级递增（`{name}②`、`{name}③`…），撞穿全表 → 502 `derive_error`（极罕见）
 5. 插入位（X-2 default 阶梯，闸门三档 81 个模板组逐组点名验证成立）：`[custom]` 段内既有 `custom_proxy_group=` 行块之后、`enable_rule_generator=true` 之前
 6. 全 select 组接线（用户裁决 B→A，2026-10-28）：追加组行的同时，`[custom]` 段**每个 select 类模板组行**（`名\`select\`…` 形态）行尾为每个自定义组追加 `` `[]{最终组名} `` 引用段（反引号分隔、[]组引用——模板原生形态，模板组员本就含 `[]♻️ 自动选择` 等；追加顺序 = groups 顺序；最终组名 = 撞名后缀解析后的名字；兼容行尾 `.*` 正则段与 `[]DIRECT` 两形态）——**规则流量可达 + 处处可选**：接线前自定义组在规则模式下不通流量、且仅主组可选；接线后用户在客户端任何手动选择组（「🚀 节点选择」、MultiMode 的「💬 Ai平台」等）里都能选中自定义组。url-test 等自动组行不注入（无手动选择语义）；极端模板无 select 组行时不接线（组仍生成，GLOBAL 模式可用）
@@ -304,7 +309,7 @@ gate3（模板组删减，7/7 PASS）：删业务组+规则回退逐条生效（
 }
 ```
 
-- `custom_groups`：`NodeGroup[] | null`——`null` = 无存档；有存档时为与 `links.groups` 同构的规范化 JSON 数组（库存形态原样透出，键序 name→keywords→urlTest）。钥匙只按 `sub_key`，**跨档跨 target 共享**（同订阅换档/换 target 查回同一份）
+- `custom_groups`：`NodeGroup[] | null`——`null` = 无存档；有存档时为与 `links.groups` 同构的规范化 JSON 数组（库存形态原样透出，键序 name→keywords→（pattern，存在时）→urlTest）。钥匙只按 `sub_key`，**跨档跨 target 共享**（同订阅换档/换 target 查回同一份）
 - `exclude`：`string[] | null`——`null` = 该档无存档；钥匙按 `sub_key + preset_id`，**只回所请求档**的删减名单
 - 两字段独立 miss（其一有档另一无档属正常态）
 - 错误（HTTP 400）：错误族与响应形态沿用 `/api/preview`（`ok:false` + `errorCode` + `message` 字段，errorCode/message 复用 preview 错误码表）——`bad_url_empty`（body 非法 JSON / 缺 sub_url 同此）/ `bad_url_format` / `bad_url_private` / `bad_preset`；判定序 `bad_url_*` 先于 `bad_preset`。与 preview 的差异唯状态码：本组接口错误以 HTTP 400 呈现（无「link 照常返回」的兜底语义）

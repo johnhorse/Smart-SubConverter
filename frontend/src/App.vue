@@ -12,7 +12,7 @@ const {
   phase, inputUrl, selectedTarget, selectedPreset, advancedOpen, submitting,
   convertError, result, clients, presets, customGroupsAvailable,
   groupsOpen, groups, nodes, probeState, excluded, groupHits, templateGroups,
-  draftKeywords, restoreNotice, restoreNoticeText,
+  draftKeywords, draftMode, draftPattern, restoreNotice, restoreNoticeText,
   loadClients, probeNodes, submit,
   selectClient, selectPreset, escapeToClash, undoRestore, clearPreferences, restart,
 } = useConverter()
@@ -117,11 +117,15 @@ onMounted(() => {
           :excluded="excluded"
           :group-hits="groupHits"
           :draft-keywords="draftKeywords"
+          :draft-mode="draftMode"
+          :draft-pattern="draftPattern"
           :can-clear="inputUrl.trim() !== ''"
           @update:open="groupsOpen = $event"
           @update:model-value="groups = $event"
           @update:excluded="excluded = $event"
           @update:draft-keywords="draftKeywords = $event"
+          @update:draft-mode="draftMode = $event"
+          @update:draft-pattern="draftPattern = $event"
           @clear-memory="onClearMemory"
           @retry="probeNodes"
         />

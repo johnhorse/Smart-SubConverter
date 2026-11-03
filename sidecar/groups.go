@@ -14,15 +14,19 @@ const (
 	maxGroups       = 10
 	maxGroupRunes   = 32
 	maxKeywords     = 5
+	maxPatternRunes = 256
 	maxExclude      = 64
 	maxExcludeRunes = 64
 )
 
-// nodeGroup 用户组意图（契约三字段）；keywords 为字面量 substring AND 语义，非正则
-// （派生侧每词 regexp.QuoteMeta 转义后拼前瞻正则，计数与前端字面高亮等价——gate2）
+// nodeGroup 用户组意图（契约四字段，v1.6.1 前三字段）；keywords 为字面量 substring
+// AND 语义，非正则（派生侧每词 regexp.QuoteMeta 转义后拼前瞻正则，计数与前端字面
+// 高亮等价——gate2）；pattern 为正则模式（前端正则 Tab，pattern 优先于 keywords 生效，
+// 自带 PCRE 语法由引擎侧解释）。两者至少一个有效
 type nodeGroup struct {
 	Name     string   `json:"name"`
 	Keywords []string `json:"keywords"`
+	Pattern  string   `json:"pattern,omitempty"` // 空 = 关键词组（序列化省略，存量指纹逐字节不变）
 	URLTest  bool     `json:"urlTest"`
 }
 
@@ -32,20 +36,21 @@ func (g *nodeGroup) UnmarshalJSON(b []byte) error {
 	var aux struct {
 		Name     string    `json:"name"`
 		Keywords []string  `json:"keywords"`
+		Pattern  string    `json:"pattern"`
 		URLTest  bool      `json:"urlTest"`
 		Keyword  *string   `json:"keyword"`
 	}
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
-	*g = nodeGroup{Name: aux.Name, Keywords: aux.Keywords, URLTest: aux.URLTest}
+	*g = nodeGroup{Name: aux.Name, Keywords: aux.Keywords, Pattern: aux.Pattern, URLTest: aux.URLTest}
 	if len(g.Keywords) == 0 && aux.Keyword != nil {
 		g.Keywords = []string{*aux.Keyword}
 	}
 	return nil
 }
 
-// normalizeGroups 请求组归一化：name/每词两端 trim（trim 后落定，校验/存储/
+// normalizeGroups 请求组归一化：name/每词/pattern 两端 trim（trim 后落定，校验/存储/
 // groupsJSON 都用规范化值）
 func normalizeGroups(raw []nodeGroup) []nodeGroup {
 	out := make([]nodeGroup, 0, len(raw))
@@ -56,6 +61,7 @@ func normalizeGroups(raw []nodeGroup) []nodeGroup {
 			kw[i] = strings.TrimSpace(w)
 		}
 		g.Keywords = kw
+		g.Pattern = strings.TrimSpace(g.Pattern)
 		out = append(out, g)
 	}
 	return out
@@ -63,19 +69,23 @@ func normalizeGroups(raw []nodeGroup) []nodeGroup {
 
 // validateGroups 契约校验（不过 → 上层 bad_groups，不调上游）：name/每词 trim 后
 // 非空、各 ≤32 rune、禁反引号与控制字符（U+0000–U+001F、U+007F）、keywords 1..5 词、
-// name 组内不重复、≤10 项
+// name 组内不重复、≤10 项；v1.6.1：keywords 与 pattern 至少一个有效，pattern ≤256 rune、
+// 禁反引号与控制字符（\r \n 属控制字符自然涵盖，防破坏 ini 组行格式）。
+// 铁律：绝不用 regexp.Compile 校验 pattern——Go regexp 是 RE2，不支持 Perl 前瞻
+// (?=...) / (?!...)，Compile 会误拒引擎侧完全合法的 PCRE；语法合法性由前端
+// JS RegExp 实时校验把关，服务端只做长度与非法字符
 func validateGroups(gs []nodeGroup) error {
 	if len(gs) > maxGroups {
 		return fmt.Errorf("groups 超过 %d 项", maxGroups)
 	}
 	seen := map[string]bool{}
 	for _, g := range gs {
-		check := func(what, val string) error {
+		check := func(what, val string, maxRunes int) error {
 			if val == "" {
 				return fmt.Errorf("%s trim 后为空", what)
 			}
-			if utf8.RuneCountInString(val) > maxGroupRunes {
-				return fmt.Errorf("%s 超过 %d 字", what, maxGroupRunes)
+			if utf8.RuneCountInString(val) > maxRunes {
+				return fmt.Errorf("%s 超过 %d 字", what, maxRunes)
 			}
 			if strings.ContainsRune(val, '`') {
 				return fmt.Errorf("%s 含反引号", what)
@@ -87,17 +97,22 @@ func validateGroups(gs []nodeGroup) error {
 			}
 			return nil
 		}
-		if err := check("name", g.Name); err != nil {
+		if err := check("name", g.Name, maxGroupRunes); err != nil {
 			return err
 		}
-		if len(g.Keywords) == 0 {
-			return fmt.Errorf("keywords 为空")
+		if len(g.Keywords) == 0 && g.Pattern == "" {
+			return fmt.Errorf("keywords 与 pattern 均为空")
 		}
 		if len(g.Keywords) > maxKeywords {
 			return fmt.Errorf("keywords 超过 %d 词", maxKeywords)
 		}
 		for _, w := range g.Keywords {
-			if err := check("keyword", w); err != nil {
+			if err := check("keyword", w, maxGroupRunes); err != nil {
+				return err
+			}
+		}
+		if g.Pattern != "" {
+			if err := check("pattern", g.Pattern, maxPatternRunes); err != nil {
 				return err
 			}
 		}
@@ -109,8 +124,9 @@ func validateGroups(gs []nodeGroup) error {
 	return nil
 }
 
-// canonicalGroupsJSON 规范化序列化（指纹与列存共用）：键序 name→keywords→urlTest
-// （struct 声明序）、无空白、空组 "[]"
+// canonicalGroupsJSON 规范化序列化（指纹与列存共用）：键序 name→keywords→
+// (pattern)→urlTest（struct 声明序；pattern omitempty——关键词组不含该键，存量
+// 指纹逐字节不变）、无空白、空组 "[]"
 func canonicalGroupsJSON(gs []nodeGroup) string {
 	if len(gs) == 0 {
 		return "[]"

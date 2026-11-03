@@ -141,15 +141,29 @@ func appendGroups(lines []string, groups []nodeGroup, info templateInfo) ([]stri
 		}
 		taken[name] = true
 		wire += "`[]" + name
-		// 关键词位 = 前瞻串联 AND（gate2 实证写法）：词 w1..wn 各 QuoteMeta 转义后拼
-		// (?=.*w1)(?=.*w2)…(?=.*wn)；单词同款写法（gate2 例 4 与裸词等价，不按词数分支）
-		var kb strings.Builder
-		for _, w := range g.Keywords {
-			kb.WriteString("(?=.*")
-			kb.WriteString(regexp.QuoteMeta(w))
-			kb.WriteString(")")
+		// 匹配表达式两态（v1.6.1 pattern 优先）：pattern 非空 = 正则组，未以 (?i)
+		// 开头自动拼前缀（默认忽略大小写，设计决策 4；引擎 PCRE 实测支持 inline
+		// flag），pattern 原样放入不 Compile——Go regexp 是 RE2 不支持 Perl 前瞻，
+		// 语法合法性由前端 JS RegExp 把关，服务端只校长度/非法字符（铁律）；
+		// pattern 空 = 关键词组，前瞻串联 AND（gate2 实证写法）：词 w1..wn 各
+		// QuoteMeta 转义后拼 (?=.*w1)(?=.*w2)…(?=.*wn)；单词同款写法（gate2 例 4
+		// 与裸词等价，不按词数分支）
+		var escaped string
+		if g.Pattern != "" {
+			if strings.HasPrefix(g.Pattern, "(?i)") {
+				escaped = g.Pattern
+			} else {
+				escaped = "(?i)" + g.Pattern
+			}
+		} else {
+			var kb strings.Builder
+			for _, w := range g.Keywords {
+				kb.WriteString("(?=.*")
+				kb.WriteString(regexp.QuoteMeta(w))
+				kb.WriteString(")")
+			}
+			escaped = kb.String()
 		}
-		escaped := kb.String()
 		// 行格式 = 闸门实证形态（与 ACL4SSR 模板原生行同构，无前导反引号）：
 		// name`select`escaped / name`url-test`escaped`url`interval,,tolerance。
 		// 实证（2026-10-28 本机引擎复测）：前导反引号形态（=`name`select`k`）组被

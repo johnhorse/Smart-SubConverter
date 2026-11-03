@@ -15,6 +15,9 @@ const props = defineProps<{
   groupHits: Record<string, number>
   // v1.6.0 未确认关键词 chips：必传受控 prop（持久层要存；改动一律 emit update:draftKeywords）
   draftKeywords: string[]
+  // v1.6.1 匹配模式与未成组正则草稿：必传受控 prop（同上，改动一律 emit）
+  draftMode: 'keyword' | 'regex'
+  draftPattern: string
   // v1.6.0 清除本订阅记忆入口可用（粘贴了订阅链接才有记忆可清）
   canClear?: boolean
 }>()
@@ -23,6 +26,8 @@ const emit = defineEmits<{
   (e: 'update:modelValue', groups: NodeGroup[]): void
   (e: 'update:excluded', names: string[]): void
   (e: 'update:draftKeywords', words: string[]): void
+  (e: 'update:draftMode', mode: 'keyword' | 'regex'): void
+  (e: 'update:draftPattern', pattern: string): void
   (e: 'clearMemory'): void
   (e: 'retry'): void
 }>()
@@ -149,7 +154,69 @@ function hitCountWords(kws: string[]): number {
   return props.nodes.filter((n) => kws.every((k) => n.includes(k))).length
 }
 
-const matchedCount = computed(() => hitCountWords(activeWords.value))
+// ---- v1.6.1 正则匹配模式 ----
+// 常用语法模板 chip：点击填入改词即用
+const REGEX_TEMPLATES = [
+  { label: '包含A但排除B', value: '(?=.*A)(?!.*B)' },
+  { label: '包含A或B', value: '(A|B)' },
+  { label: '纯排除A', value: '^(?!.*A)' },
+]
+
+// 正则草稿实时编译（'i' 忽略大小写，与 sidecar 派生 (?i) 前缀口径一致）：语法错误返回中文提示
+const regexError = computed(() => {
+  const p = props.draftPattern.trim()
+  if (!p) return ''
+  if (p.length > 256) return '正则表达式不超过 256 字符'
+  if (p.includes('`') || /[\r\n\x00-\x1f\x7f]/.test(p)) return '不能包含反引号或换行符'
+  // 若用户手动输入了 (?i) 前缀，剥离后再交由 JS 校验（JS RegExp 不支持内联 (?i) 前缀语法）
+  const stripped = p.replace(/^\(\?i\)/i, '')
+  try {
+    new RegExp(stripped, 'i')
+    return ''
+  } catch {
+    return '正则语法有误，检查括号与转义'
+  }
+})
+const regexLive = computed(() => props.draftPattern.trim())
+const regexOk = computed(() => regexLive.value !== '' && regexError.value === '')
+// 语法正确且非空才参与高亮/计数；坏正则不高亮不计数（剥除 (?i) 前缀）
+const regexRe = computed<RegExp | null>(() => {
+  if (!regexOk.value) return null
+  const stripped = regexLive.value.replace(/^\(\?i\)/i, '')
+  try {
+    return new RegExp(stripped, 'i')
+  } catch {
+    return null
+  }
+})
+const regexHitCount = computed(() => {
+  const re = regexRe.value
+  return re ? props.nodes.filter((n) => re.test(n)).length : 0
+})
+
+function nodeHits(n: string): boolean {
+  return props.draftMode === 'regex' ? !!regexRe.value?.test(n) : activeWords.value.every((w) => n.includes(w))
+}
+// 节点列表高亮：有关键词/有效正则才区分 hit/dim，否则原样
+const hasActiveFilter = computed(() =>
+  props.draftMode === 'regex' ? regexOk.value : activeWords.value.length > 0,
+)
+
+const matchedCount = computed(() =>
+  props.draftMode === 'regex' ? regexHitCount.value : hitCountWords(activeWords.value),
+)
+
+const regexHint = computed(() => {
+  if (regexError.value) return '' // 语法错误走红色轻提示
+  if (props.probeState === 'ready' && regexLive.value && regexHitCount.value === 0) {
+    return '没命中任何节点，换个写法试试'
+  }
+  return ''
+})
+
+function onPatternInput(e: Event) {
+  emit('update:draftPattern', (e.target as HTMLInputElement).value)
+}
 
 // 成组判定用即时词（未防抖）：chips + 有效草稿；草稿非空但非法时整组不给确认
 const confirmWords = computed(() => {
@@ -161,14 +228,12 @@ const confirmWords = computed(() => {
 })
 const fullGroups = computed(() => props.modelValue.length >= GROUPS_MAX)
 
-// 创建期零命中不确认成组（UI 挡；契约明确服务端不管）
-const canConfirm = computed(
-  () =>
-    props.probeState === 'ready' &&
-    confirmWords.value.length > 0 &&
-    !fullGroups.value &&
-    hitCountWords(confirmWords.value) > 0,
-)
+// 创建期零命中不确认成组（UI 挡；契约明确服务端不管）；正则模式：语法正确且非空且命中>0
+const canConfirm = computed(() => {
+  if (props.probeState !== 'ready' || fullGroups.value) return false
+  if (props.draftMode === 'regex') return regexOk.value && regexHitCount.value > 0
+  return confirmWords.value.length > 0 && hitCountWords(confirmWords.value) > 0
+})
 
 const kwHint = computed(() => {
   if (draftInvalid.value) return '关键词不超过 32 字，不能用反引号'
@@ -184,6 +249,13 @@ const nameEl = ref<HTMLInputElement>()
 
 function confirmGroup() {
   if (!canConfirm.value) return
+  // 正则模式：默认组名为空并聚焦命名框，引导输入自然组名（如「香港纯净」）
+  if (props.draftMode === 'regex') {
+    nameInput.value = ''
+    naming.value = true
+    void nextTick(() => nameEl.value?.focus())
+    return
+  }
   // 受控模式：emit 后 props 要等重渲染才刷新，默认名按目标数组算（不读旧 props 丢草稿词）
   const nextWords = kwLive.value !== '' ? [...words.value, kwLive.value] : [...words.value]
   if (kwLive.value !== '') {
@@ -212,6 +284,17 @@ const nameHint = computed(() => {
 
 function confirmName() {
   if (!naming.value || !canConfirmName.value) return
+  if (props.draftMode === 'regex') {
+    // 正则组：keywords 空、pattern 落位（trim）；成组后清空正则草稿
+    emit('update:modelValue', [
+      ...props.modelValue,
+      { name: nameInput.value.trim(), keywords: [], pattern: props.draftPattern.trim(), urlTest: false },
+    ])
+    emit('update:draftPattern', '')
+    naming.value = false
+    nameInput.value = ''
+    return
+  }
   emit('update:modelValue', [
     ...props.modelValue,
     { name: nameInput.value.trim(), keywords: [...words.value], urlTest: false },
@@ -237,9 +320,35 @@ function removeGroup(name: string) {
   emit('update:modelValue', props.modelValue.filter((g) => g.name !== name))
 }
 
+// 已建分组命中计数：正则组按 'i' 正则匹配（坏 pattern 按 0 容错，剥除 (?i)），关键词组按 AND 字面量
+function groupHitCount(g: NodeGroup): number {
+  if (g.pattern) {
+    const stripped = g.pattern.replace(/^\(\?i\)/i, '')
+    try {
+      const re = new RegExp(stripped, 'i')
+      return props.nodes.filter((n) => re.test(n)).length
+    } catch {
+      return 0
+    }
+  }
+  return hitCountWords(g.keywords)
+}
+
+// 节点或模式变化时重置命名步与输入草稿（防换订阅跨用例残留与命名污染）
+watch(
+  () => props.nodes,
+  () => {
+    naming.value = false
+    nameInput.value = ''
+    kwInput.value = ''
+    kwDebounced.value = ''
+  },
+)
+
 const kwEl = ref<HTMLInputElement>()
+const reEl = ref<HTMLInputElement>()
 function focusInput() {
-  kwEl.value?.focus()
+  ;(props.draftMode === 'regex' ? reEl.value : kwEl.value)?.focus()
 }
 </script>
 
@@ -325,6 +434,33 @@ function focusInput() {
         <span class="zone-title">自定义分组</span>
       </div>
 
+      <!-- v1.6.1 匹配模式切换：默认关键词（傻瓜体验），正则供进阶筛选（排除/或条件）；
+           命名步期间锁定（确认分支按模式取数，中途切换会产出无效组） -->
+      <div class="mode-tabs" role="tablist" aria-label="匹配模式">
+        <button
+          type="button"
+          role="tab"
+          class="mode-tab"
+          :class="{ active: draftMode === 'keyword' }"
+          :aria-selected="draftMode === 'keyword'"
+          :disabled="naming"
+          @click="emit('update:draftMode', 'keyword')"
+        >
+          关键词匹配
+        </button>
+        <button
+          type="button"
+          role="tab"
+          class="mode-tab"
+          :class="{ active: draftMode === 'regex' }"
+          :aria-selected="draftMode === 'regex'"
+          :disabled="naming"
+          @click="emit('update:draftMode', 'regex')"
+        >
+          正则匹配
+        </button>
+      </div>
+
       <p v-if="probeState === 'loading'" class="groups-status">正在拉取节点名单…</p>
       <div v-else-if="probeState === 'failed'" class="groups-status">
         节点名单拉取失败
@@ -354,9 +490,9 @@ function focusInput() {
         </div>
         <p v-if="naming && nameHint" class="group-kw-hint">{{ nameHint }}</p>
 
-        <!-- 打词步骤：逐词加 chip（AND 筛选） -->
+        <!-- 打词步骤：逐词加 chip（AND 筛选） / 正则步骤：单行正则实时校验 -->
         <div v-else class="group-kw-row">
-          <div class="group-kw-fields">
+          <div v-if="draftMode === 'keyword'" class="group-kw-fields">
             <span v-for="(w, i) in words" :key="w" class="kw-chip">
               {{ w }}
               <button type="button" class="kw-chip-x" :aria-label="`删除关键词 ${w}`" @click="removeWord(i)">
@@ -385,19 +521,50 @@ function focusInput() {
               ＋
             </button>
           </div>
-          <span v-if="activeWords.length" class="match-count">已命中 {{ matchedCount }}</span>
-          <button type="button" class="secondary-btn group-confirm" :disabled="!canConfirm" @click="confirmGroup">
+          <template v-else>
+            <input
+              ref="reEl"
+              :value="draftPattern"
+              class="group-kw-input regex-input"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="如 (?=.*香港)(?!.*维护)，默认忽略大小写"
+              aria-label="分组正则"
+              @input="onPatternInput"
+            />
+          </template>
+          <span v-if="hasActiveFilter" class="match-count">已命中 {{ matchedCount }}</span>
+          <button
+            type="button"
+            class="secondary-btn group-confirm"
+            :disabled="!canConfirm"
+            @click="confirmGroup"
+          >
             成组
           </button>
         </div>
-        <p v-if="!naming && kwHint" class="group-kw-hint">{{ kwHint }}</p>
+        <!-- 正则模式：快捷语法模板（点击填入改词即用） -->
+        <div v-if="!naming && draftMode === 'regex'" class="regex-tpl-chips">
+          <button
+            v-for="t in REGEX_TEMPLATES"
+            :key="t.label"
+            type="button"
+            class="regex-tpl-chip"
+            :title="`填入 ${t.value}`"
+            @click="emit('update:draftPattern', t.value)"
+          >
+            {{ t.label }}
+          </button>
+        </div>
+        <p v-if="!naming && draftMode === 'keyword' && kwHint" class="group-kw-hint">{{ kwHint }}</p>
+        <p v-if="!naming && draftMode === 'regex' && regexError" class="regex-error" role="alert">
+          {{ regexError }}
+        </p>
+        <p v-if="!naming && draftMode === 'regex' && regexHint" class="group-kw-hint">{{ regexHint }}</p>
 
         <ul class="node-list">
-          <li
-            v-for="(n, i) in nodes"
-            :key="i"
-            :class="activeWords.length ? (activeWords.every((w) => n.includes(w)) ? 'hit' : 'dim') : ''"
-          >
+          <li v-for="(n, i) in nodes" :key="i" :class="hasActiveFilter ? (nodeHits(n) ? 'hit' : 'dim') : ''">
             {{ n }}
           </li>
         </ul>
@@ -405,7 +572,8 @@ function focusInput() {
 
       <div v-if="modelValue.length" class="group-rows">
         <div v-for="g in modelValue" :key="g.name" class="group-row">
-          <span class="group-chip">{{ g.name }} ×{{ hitCountWords(g.keywords) }}</span>
+          <!-- 正则组：[正则] 微标（title 悬浮显示完整 pattern），命中计数 pattern 优先 -->
+          <span class="group-chip">{{ g.name }}<span v-if="g.pattern" class="group-chip-regex" :title="g.pattern">[正则]</span> ×{{ groupHitCount(g) }}</span>
           <label class="group-switch">
             <input
               type="checkbox"

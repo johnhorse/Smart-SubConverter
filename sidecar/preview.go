@@ -315,7 +315,7 @@ var validateMessages = map[string]string{
 	"bad_url_private": "链接指向私网或回环地址，转换服务无法访问",
 	"bad_preset":      "指定的规则模板不可用",
 	"groups_disabled": "当前部署或所选模板不支持自定义分组",
-	"bad_groups":      "分组信息有误——组名和关键词不超过 32 字，别用特殊符号，同名分组只留一个",
+	"bad_groups":      "分组信息有误——组名和关键词不超过 32 字、正则不超过 256 字，别用反引号或换行等特殊符号，同名分组只留一个",
 }
 
 // probeNodeList probe 模式核心（v1.5.0）：复用两段式第一段（stage1Mixed，代拉订阅 →

@@ -788,6 +788,91 @@ body {
   opacity: 0.45;
 }
 
+/* v1.6.1 匹配模式 Tab（关键词/正则）：紧凑分段控件，选中态同 chip.active 口径 */
+.mode-tabs {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-top: 12px;
+}
+
+.mode-tab {
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 16px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.mode-tab + .mode-tab {
+  border-left: 1px solid var(--line-strong);
+}
+
+.mode-tab:hover:not(:disabled) {
+  color: var(--ink);
+}
+
+.mode-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.mode-tab:disabled {
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+/* 正则模式输入框：等宽字体利于辨认正则符号 */
+.regex-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+}
+
+/* 正则语法错误：红色轻提示（行距字号对齐 group-kw-hint） */
+.regex-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+/* 正则模式：快捷语法模板 chips（虚线弱化，区别于真正参与匹配的词 chips） */
+.regex-tpl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.regex-tpl-chip {
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-faint);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.regex-tpl-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* 已建分组里的 [正则] 微标：小号弱化，悬浮 title 显示完整 pattern */
+.group-chip-regex {
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.8;
+  cursor: help;
+}
+
 .group-rows {
   margin-top: 12px;
   display: flex;

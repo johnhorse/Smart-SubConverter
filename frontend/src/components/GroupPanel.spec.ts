@@ -25,9 +25,9 @@ const NODES = [
 
 type PanelProps = InstanceType<typeof GroupPanel>['$props']
 
-// 受控组件的测试宿主：模拟 App 的接线——draftKeywords 事件回环到 props（chips 才能真渲染），
-// 其余事件原样转发（wrapper.emitted 记录与旧用例口径一致）
-function mountPanel(initial: Partial<PanelProps> = {}) {
+// 受控组件的测试宿主：模拟 App 的接线——draftKeywords / draftMode / draftPattern 事件回环到
+// props（chips / 正则草稿才能真渲染），其余事件原样转发（wrapper.emitted 记录与旧用例口径一致）
+function mountPanel(initial: Partial<PanelProps> = {}, attach = false) {
   const state = reactive({
     available: true,
     open: true,
@@ -38,13 +38,15 @@ function mountPanel(initial: Partial<PanelProps> = {}) {
     excluded: [] as string[],
     groupHits: {} as Record<string, number>,
     draftKeywords: [] as string[],
+    draftMode: 'keyword' as PanelProps['draftMode'],
+    draftPattern: '',
     canClear: false,
     ...initial,
   })
   const Host = defineComponent({
     // 用例可用 wrapper.setProps({ nodes }) 模拟节点名单变化（其余 props 走初始 state）
     props: { nodes: { type: Array as PropType<string[]>, default: undefined } },
-    emits: ['update:open', 'update:modelValue', 'update:excluded', 'update:draftKeywords', 'clearMemory', 'retry'],
+    emits: ['update:open', 'update:modelValue', 'update:excluded', 'update:draftKeywords', 'update:draftMode', 'update:draftPattern', 'clearMemory', 'retry'],
     setup(props, { emit, attrs }) {
       return () =>
         h(GroupPanel, {
@@ -58,12 +60,22 @@ function mountPanel(initial: Partial<PanelProps> = {}) {
             state.draftKeywords = words
             emit('update:draftKeywords', words)
           },
+          'onUpdate:draftMode': (mode: PanelProps['draftMode']) => {
+            state.draftMode = mode
+            emit('update:draftMode', mode)
+          },
+          'onUpdate:draftPattern': (pattern: string) => {
+            state.draftPattern = pattern
+            emit('update:draftPattern', pattern)
+          },
           onClearMemory: () => emit('clearMemory'),
           onRetry: () => emit('retry'),
         })
     },
   })
-  return mount(Host)
+  // attach = true：挂到 document.body（jsdom 下 detached 元素 focus() 不设 activeElement，
+  // 需要 focus 断言的用例才用）
+  return attach ? mount(Host, { attachTo: document.body }) : mount(Host)
 }
 
 // 逐词回车加 chip（chips 即时参与命中，无需防抖等待）
@@ -675,5 +687,237 @@ describe('GroupPanel 分组偏好记忆（v1.6.0）', () => {
     await nextTick()
     expect(wrapper2.find('.mem-clear').text()).toBe('清除本订阅记忆')
     expect(wrapper2.emitted('clearMemory')).toBeUndefined()
+  })
+})
+
+describe('GroupPanel 正则匹配模式（v1.6.1）', () => {
+  const RE_INPUT = 'input[aria-label="分组正则"]'
+
+  async function setPattern(wrapper: ReturnType<typeof mountPanel>, pattern: string) {
+    await wrapper.find(RE_INPUT).setValue(pattern)
+    await nextTick()
+  }
+
+  it('Tab 切换：默认关键词 Tab；点「正则匹配」emit update:draftMode，输入区跟随切换', async () => {
+    const wrapper = mountPanel()
+    const tabs = wrapper.findAll('.mode-tab')
+    expect(tabs.map((t) => t.text())).toEqual(['关键词匹配', '正则匹配'])
+    expect(tabs[0].classes('active')).toBe(true)
+    expect(wrapper.find(RE_INPUT).exists()).toBe(false)
+
+    await tabs[1].trigger('click')
+    expect(wrapper.emitted('update:draftMode')).toEqual([['regex']])
+    expect(wrapper.find(RE_INPUT).exists()).toBe(true) // 宿主回环后正则输入框渲染
+    expect(wrapper.find('input[aria-label="分组关键词"]').exists()).toBe(false)
+    expect(wrapper.findAll('.mode-tab')[1].classes('active')).toBe(true)
+
+    await wrapper.findAll('.mode-tab')[0].trigger('click')
+    expect(wrapper.emitted('update:draftMode')).toEqual([['regex'], ['keyword']])
+    expect(wrapper.find('input[aria-label="分组关键词"]').exists()).toBe(true)
+  })
+
+  it('实时匹配：香港|新加坡 命中 3 并加粗、其余降灰', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    await setPattern(wrapper, '香港|新加坡')
+    expect(wrapper.find('.match-count').text()).toBe('已命中 3')
+    expect(wrapper.findAll('.node-list li.hit').map((li) => li.text())).toEqual([
+      '香港专线 01',
+      '香港专线 02',
+      '新加坡 IEPL 1x0',
+    ])
+    expect(wrapper.findAll('.node-list li.dim')).toHaveLength(NODES.length - 3)
+  })
+
+  it('默认忽略大小写：iepl 命中两条 IEPL 节点', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    await setPattern(wrapper, 'iepl')
+    expect(wrapper.find('.match-count').text()).toBe('已命中 2')
+  })
+
+  it('前瞻排除语义：(?=.*IEPL)(?!.*1x) 只吃美国不走新加坡', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    await setPattern(wrapper, '(?=.*IEPL)(?!.*1x)')
+    expect(wrapper.find('.match-count').text()).toBe('已命中 1')
+    expect(wrapper.findAll('.node-list li.hit').map((li) => li.text())).toEqual(['美国 IEPL 1.0'])
+  })
+
+  it('语法错误：红色轻提示 + 成组禁用 + 不高亮不计数', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    await setPattern(wrapper, '(?=.*香港')
+    expect(wrapper.find('.regex-error').text()).toBe('正则语法有误，检查括号与转义')
+    expect(wrapper.find('.group-confirm').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.match-count').exists()).toBe(false)
+    expect(wrapper.findAll('.node-list li.hit')).toHaveLength(0)
+    expect(wrapper.findAll('.node-list li.dim')).toHaveLength(0)
+
+    // 改对后提示消失、成组恢复可用
+    await setPattern(wrapper, '(?=.*香港)')
+    expect(wrapper.find('.regex-error').exists()).toBe(false)
+    expect(wrapper.find('.group-confirm').attributes('disabled')).toBeUndefined()
+  })
+
+  it('零命中：成组禁用 + 提示换写法', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    await setPattern(wrapper, '德国')
+    expect(wrapper.find('.match-count').text()).toBe('已命中 0')
+    expect(wrapper.find('.group-confirm').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.group-kw-hint').text()).toBe('没命中任何节点，换个写法试试')
+  })
+
+  it('空 pattern：成组禁用，无计数无高亮', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    expect(wrapper.find('.match-count').exists()).toBe(false)
+    expect(wrapper.find('.group-confirm').attributes('disabled')).toBeDefined()
+  })
+
+  it('模板 chips：点击填入对应正则（受控 emit）', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    const chips = wrapper.findAll('.regex-tpl-chip')
+    expect(chips.map((c) => c.text())).toEqual(['包含A但排除B', '包含A或B', '纯排除A'])
+    expect(chips[0].attributes('title')).toBe('填入 (?=.*A)(?!.*B)')
+
+    await chips[0].trigger('click')
+    expect(wrapper.emitted('update:draftPattern')).toEqual([[('(?=.*A)(?!.*B)')]])
+    expect((wrapper.find(RE_INPUT).element as HTMLInputElement).value).toBe('(?=.*A)(?!.*B)')
+
+    await wrapper.findAll('.regex-tpl-chip')[1].trigger('click')
+    expect(wrapper.emitted('update:draftPattern')![1]).toEqual(['(A|B)'])
+    await wrapper.findAll('.regex-tpl-chip')[2].trigger('click')
+    expect(wrapper.emitted('update:draftPattern')![2]).toEqual(['^(?!.*A)'])
+  })
+
+  it('正则成组：命名步默认组名为空并聚焦，确认 emit keywords:[] + pattern + 清空草稿', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' }, true)
+    await setPattern(wrapper, '(?=.*香港)(?!.*维护)')
+    await wrapper.find('.group-confirm').trigger('click') // 进入命名步
+    await nextTick()
+    const nameInput = wrapper.find('input[aria-label="分组名称"]')
+    expect(nameInput.exists()).toBe(true)
+    expect((nameInput.element as HTMLInputElement).value).toBe('')
+    expect(document.activeElement).toBe(nameInput.element) // 光标直接聚焦命名框
+    expect(wrapper.find('.match-count').text()).toBe('已命中 2') // 命名步计数仍按正则口径
+
+    await nameInput.setValue('香港纯净')
+    await wrapper.find('.group-confirm').trigger('click') // 确认命名
+    expect(wrapper.emitted('update:modelValue')![0][0]).toEqual([
+      { name: '香港纯净', keywords: [], pattern: '(?=.*香港)(?!.*维护)', urlTest: false },
+    ])
+    expect(wrapper.emitted('update:draftPattern')!.at(-1)).toEqual([''])
+    expect((wrapper.find(RE_INPUT).element as HTMLInputElement).value).toBe('') // 回打词步已清空
+    wrapper.unmount()
+  })
+
+  it('取消命名：回正则输入步，草稿 pattern 保留', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    await setPattern(wrapper, '(?=.*香港)')
+    await wrapper.find('.group-confirm').trigger('click')
+    await nextTick()
+    await wrapper.find('.group-cancel').trigger('click')
+    await nextTick()
+    expect((wrapper.find(RE_INPUT).element as HTMLInputElement).value).toBe('(?=.*香港)')
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+  })
+
+  it('命名步期间 Tab 锁定（中途切模式会产出无效组）', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    await setPattern(wrapper, '(?=.*香港)')
+    await wrapper.find('.group-confirm').trigger('click')
+    await nextTick()
+    for (const tab of wrapper.findAll('.mode-tab')) {
+      expect(tab.attributes('disabled')).toBeDefined()
+    }
+    await wrapper.findAll('.mode-tab')[0].trigger('click')
+    expect(wrapper.emitted('update:draftMode')).toBeUndefined()
+  })
+
+  it('命名校验照常：空名/重名确认禁用，回车可确认', async () => {
+    const wrapper = mountPanel({
+      draftMode: 'regex',
+      modelValue: [{ name: '香港纯净', keywords: [], pattern: '香港', urlTest: false }],
+    })
+    await setPattern(wrapper, '(?=.*香港)')
+    await wrapper.find('.group-confirm').trigger('click')
+    await nextTick()
+    const nameInput = wrapper.find('input[aria-label="分组名称"]')
+    expect(wrapper.find('.group-confirm').attributes('disabled')).toBeDefined() // 默认空名
+
+    await nameInput.setValue('香港纯净')
+    expect(wrapper.find('.group-confirm').attributes('disabled')).toBeDefined() // 重名
+    expect(wrapper.find('.group-kw-hint').text()).toContain('同名分组只留一个')
+
+    await nameInput.setValue('纯净港')
+    await nameInput.trigger('keydown.enter')
+    expect(wrapper.emitted('update:modelValue')![0][0]).toEqual([
+      { name: '香港纯净', keywords: [], pattern: '香港', urlTest: false },
+      { name: '纯净港', keywords: [], pattern: '(?=.*香港)', urlTest: false },
+    ])
+  })
+
+  it('已建正则组：[正则] 微标 + title 显示完整 pattern + 命中计数走正则口径', () => {
+    const wrapper = mountPanel({
+      modelValue: [
+        { name: '纯净港', keywords: [], pattern: '香港|新加坡', urlTest: false },
+        { name: '专线', keywords: ['专线'], urlTest: false },
+      ],
+    })
+    const chips = wrapper.findAll('.group-chip')
+    expect(chips[0].text()).toBe('纯净港[正则] ×3') // 香港×2 + 新加坡×1
+    const badge = chips[0].find('.group-chip-regex')
+    expect(badge.text()).toBe('[正则]')
+    expect(badge.attributes('title')).toBe('香港|新加坡')
+    expect(chips[1].text()).toBe('专线 ×3') // 关键词组无微标、计数走 AND
+    expect(chips[1].find('.group-chip-regex').exists()).toBe(false)
+  })
+
+  it('已建组坏 pattern 容错：编译失败按 0 命中不炸', () => {
+    const wrapper = mountPanel({
+      modelValue: [{ name: '坏正则', keywords: [], pattern: '[', urlTest: false }],
+    })
+    expect(wrapper.find('.group-chip').text()).toBe('坏正则[正则] ×0')
+  })
+
+  it('草稿恢复渲染：draftMode/draftPattern 预置 → 正则 Tab 激活、输入框带出、实时命中', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex', draftPattern: '专线' })
+    expect(wrapper.findAll('.mode-tab')[1].classes('active')).toBe(true)
+    expect((wrapper.find(RE_INPUT).element as HTMLInputElement).value).toBe('专线')
+    expect(wrapper.find('.match-count').text()).toBe('已命中 3')
+  })
+
+  it('probe 非 ready：正则模式成组禁用（无名单无从判定命中）', () => {
+    for (const probeState of ['idle', 'loading', 'failed'] as const) {
+      const wrapper = mountPanel({ draftMode: 'regex', draftPattern: '香港', probeState })
+      expect(wrapper.find('.group-confirm').exists()).toBe(false)
+    }
+  })
+
+  it('支持内联 (?i) 前缀：自动剥除后校验，不误报语法错误且不影响匹配', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    await setPattern(wrapper, '(?i)iepl|bgp')
+    expect(wrapper.find('.regex-error').exists()).toBe(false)
+    expect(wrapper.find('.match-count').text()).toBe('已命中 3') // 美国 IEPL + 新加坡 IEPL + 韩国 BGP
+  })
+
+  it('正则非法输入拦截：反引号或超过 256 字报错并阻止成组', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    await setPattern(wrapper, 'hk`test')
+    expect(wrapper.find('.regex-error').text()).toContain('不能包含反引号')
+    expect(wrapper.find('.group-confirm').attributes('disabled')).toBeDefined()
+
+    await setPattern(wrapper, 'a'.repeat(257))
+    expect(wrapper.find('.regex-error').text()).toContain('不超过 256 字符')
+    expect(wrapper.find('.group-confirm').attributes('disabled')).toBeDefined()
+  })
+
+  it('节点列表变更（换订阅重探）：自动退出命名状态并清空输入草稿', async () => {
+    const wrapper = mountPanel({ draftMode: 'regex' })
+    await setPattern(wrapper, '(?=.*香港)')
+    await wrapper.find('.group-confirm').trigger('click')
+    await nextTick()
+    expect(wrapper.find('input[aria-label="分组名称"]').exists()).toBe(true)
+
+    // 模拟换订阅 nodes 改变
+    await wrapper.setProps({ nodes: ['新节点-01'] })
+    await nextTick()
+    expect(wrapper.find('input[aria-label="分组名称"]').exists()).toBe(false)
   })
 })

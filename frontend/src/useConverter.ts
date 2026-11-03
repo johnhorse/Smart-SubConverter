@@ -49,6 +49,9 @@ export function useConverter() {
   const groupHits = ref<Record<string, number>>({})
   // v1.6.0 分组偏好记忆：未确认关键词 chips（GroupPanel 受控）+ 服务端回填提示条（可撤销）
   const draftKeywords = ref<string[]>([])
+  // v1.6.1 正则匹配：当前模式（GroupPanel 受控）与未成组的正则草稿
+  const draftMode = ref<'keyword' | 'regex'>('keyword')
+  const draftPattern = ref('')
   const restoreNotice = ref<{ groups: number; excluded: number } | null>(null)
   // 当前选中档的模板自带组清单（模板原序；字段缺席按 [] 降级——豁免档/旧 sidecar）
   const templateGroups = computed(
@@ -154,12 +157,14 @@ export function useConverter() {
         groups: [...groups.value],
         excluded: [...excluded.value],
         draftKeywords: [...draftKeywords.value],
+        draftMode: draftMode.value,
+        draftPattern: draftPattern.value,
         updatedAt: new Date().toISOString(),
       })
     }, DRAFT_DEBOUNCE_MS)
   }
   watch(
-    [selectedTarget, selectedPreset, groups, excluded, draftKeywords],
+    [selectedTarget, selectedPreset, groups, excluded, draftKeywords, draftMode, draftPattern],
     () => {
       if (suppressDraft) return
       if (restoreNotice.value) {
@@ -176,13 +181,16 @@ export function useConverter() {
     onScopeDispose(() => clearTimeout(draftTimer))
   }
 
-  // 程序化清空面板组状态（换订阅无快照，spec 修订 2）：target/preset 保留
+  // 程序化清空面板组状态（换订阅无快照，spec 修订 2）：target/preset 保留；
+  // 正则草稿一并清空并回到关键词模式（草稿不跨订阅）
   function clearPanelGroups() {
     suppressDraft = true
     try {
       groups.value = []
       excluded.value = []
       draftKeywords.value = []
+      draftPattern.value = ''
+      draftMode.value = 'keyword'
     } finally {
       suppressDraft = false
     }
@@ -203,6 +211,9 @@ export function useConverter() {
         groups.value = snap.groups.map((g) => ({ ...g, keywords: [...g.keywords] }))
         excluded.value = [...snap.excluded]
         draftKeywords.value = [...snap.draftKeywords]
+        // v1.6.1：恢复匹配模式与正则草稿（字段缺席按关键词模式/空正则降级）
+        draftMode.value = snap.draftMode === 'regex' ? 'regex' : 'keyword'
+        draftPattern.value = snap.draftPattern ?? ''
         // 不依赖调度次序（spec 修订 4）：面板开着且档位真变了 → 显式重 probe 刷新 groupHits
         if (presetChanged && groupsOpen.value && customGroupsAvailable.value) void probeNodes()
       } finally {
@@ -453,6 +464,8 @@ export function useConverter() {
     groupHits,
     templateGroups,
     draftKeywords,
+    draftMode,
+    draftPattern,
     restoreNotice,
     restoreNoticeText,
     loadClients,
