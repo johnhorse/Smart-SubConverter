@@ -123,6 +123,139 @@ body {
   box-shadow: var(--shadow);
 }
 
+/* 多订阅与容灾卡片 */
+.single-sub-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+}
+
+.sub-addon-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+  padding: 0 4px;
+}
+
+.add-sub-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: opacity 0.15s ease;
+}
+
+.add-sub-link:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+.convert-form.multi-sub-mode {
+  display: block;
+}
+
+.multi-sub-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sub-item-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg);
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+
+.sub-role-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.sub-role-badge.backup {
+  background: var(--ink-soft);
+  color: var(--panel);
+  opacity: 0.85;
+}
+
+.tag-input {
+  width: 80px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  text-align: center;
+}
+
+.tag-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.remove-sub-btn {
+  background: none;
+  border: none;
+  color: var(--ink-faint);
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.remove-sub-btn:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.multi-sub-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+  gap: 12px;
+}
+
+.add-sub-btn {
+  background: var(--bg);
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.add-sub-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.submit-multi-btn {
+  padding: 10px 24px;
+}
+
+.multi-sub-tip {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
 .url-input {
   flex: 1;
   min-width: 0;

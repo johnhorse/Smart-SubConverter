@@ -57,7 +57,8 @@ func isSelectCPG(line string) bool {
 // deriveINI 派生总入口（v1.5.0 增补承载 exclude）：先删减模板组（exclude 非空时：删组行 /
 // 摘成员引用 / 规则回退 / fail-closed 自检），再追加自定义组行并接线。groups 为空仅
 // exclude 非空 → 跳过第 3–6 步（生成/撞名/接线），只做删减+自检（契约第 2b 步）。
-func deriveINI(src []byte, groups []nodeGroup, exclude []string) ([]byte, error) {
+// v1.7.1: 支持 airportTags 可变参数——有多机场时自动生成各机场测速组与 🔯 机场容灾 组
+func deriveINI(src []byte, groups []nodeGroup, exclude []string, airportTagsArgs ...[]string) ([]byte, error) {
 	lines := strings.Split(string(src), "\n")
 	info := analyzeTemplate(src)
 	removed := map[string]bool{}
@@ -83,6 +84,9 @@ func deriveINI(src []byte, groups []nodeGroup, exclude []string) ([]byte, error)
 			return nil, err
 		}
 	}
+	if len(airportTagsArgs) > 0 && len(airportTagsArgs[0]) >= 2 {
+		lines = appendAirportGroups(lines, airportTagsArgs[0], info)
+	}
 	out := []byte(strings.Join(lines, "\n"))
 	if len(removed) > 0 {
 		if err := selfCheckPruned(out, removed, requiredTargets); err != nil {
@@ -90,6 +94,66 @@ func deriveINI(src []byte, groups []nodeGroup, exclude []string) ([]byte, error)
 		}
 	}
 	return out, nil
+}
+
+// appendAirportGroups 为多机场自动生成各机场专属测速组与 🔯 机场容灾 策略组，并注入各 select 组首位
+func appendAirportGroups(lines []string, airportTags []string, info templateInfo) []string {
+	if len(airportTags) < 2 {
+		return lines
+	}
+
+	lastCPG := -1
+	var selectRows []int
+	inCustom := false
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if name, ok := sectionName(t); ok {
+			inCustom = name == "custom"
+			continue
+		}
+		if !inCustom {
+			continue
+		}
+		if _, ok := parseProxyGroupName(t); ok {
+			if isSelectCPG(t) {
+				selectRows = append(selectRows, i)
+			}
+			lastCPG = i
+		}
+	}
+	if lastCPG < 0 {
+		return lines
+	}
+
+	var gen []string
+	var members string
+	var airportGroupWire string
+	for _, tag := range airportTags {
+		gName := fmt.Sprintf("✈️ [%s] 全部节点", tag)
+		pat := fmt.Sprintf(`(\[%s\])`, regexp.QuoteMeta(tag))
+		gen = append(gen, fmt.Sprintf("custom_proxy_group=%s`url-test`%s`%s", gName, pat, urlTestTail))
+		members += "`[]" + gName
+		airportGroupWire += "`[]" + gName
+	}
+	fbName := "🔯 机场容灾"
+	gen = append(gen, fmt.Sprintf("custom_proxy_group=%s`fallback%s`%s", fbName, members, urlTestTail))
+
+	// 将 []🔯 机场容灾 注入为所有 select 类组的首选，行尾追加各机场专属组引用
+	for _, i := range selectRows {
+		line := lines[i]
+		const selMarker = "`select`"
+		if idx := strings.Index(line, selMarker); idx >= 0 {
+			prefix := line[:idx+len(selMarker)]
+			suffix := line[idx+len(selMarker):]
+			lines[i] = prefix + "[]" + fbName + "`" + suffix + airportGroupWire
+		}
+	}
+
+	out := make([]string, 0, len(lines)+len(gen))
+	out = append(out, lines[:lastCPG+1]...)
+	out = append(out, gen...)
+	out = append(out, lines[lastCPG+1:]...)
+	return out
 }
 
 // appendGroups 组行生成 + 撞名兜底 + 插入位 + 全 select 组接线（契约第 3–6 步）。
@@ -194,7 +258,7 @@ func appendGroups(lines []string, groups []nodeGroup, info templateInfo) ([]stri
 // 返回引擎可用的回环 URL。任一步失败返回错误（上层 502 derive_error）。
 // rbLines（v1.7.0 DNS 透传）：非空时同文件追加 rule_base 行（机场 dns 派生 base 的
 // 回环 URL 集）——一根派生 ini 同时承载组行 + rule_base 行（设计定案的叠加共存）。
-func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON, excludeJSON string, rbLines []string) (string, error) {
+func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON, excludeJSON string, rbLines []string, airportTagsArgs ...[]string) (string, error) {
 	groups, err := parseGroupsJSON(groupsJSON)
 	if err != nil {
 		return "", err
@@ -203,8 +267,12 @@ func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON, exclude
 	if err != nil {
 		return "", err
 	}
-	if len(groups) == 0 && len(exclude) == 0 && len(rbLines) == 0 {
-		return "", fmt.Errorf("groups 与 exclude 均为空，不应进入派生路径")
+	var airportTags []string
+	if len(airportTagsArgs) > 0 {
+		airportTags = airportTagsArgs[0]
+	}
+	if len(groups) == 0 && len(exclude) == 0 && len(rbLines) == 0 && len(airportTags) < 2 {
+		return "", fmt.Errorf("groups 与 exclude 及 airportTags 均为空，不应进入派生路径")
 	}
 	if !strings.HasPrefix(frozenConfigURL, "/") {
 		// v1.5.0 兜底（评审 F3）：改写产物缺（bootstrap 预生成原料不齐、产物被删等残余
@@ -223,7 +291,7 @@ func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON, exclude
 	if err != nil {
 		return "", fmt.Errorf("读快照失败: %w", err)
 	}
-	out, err := deriveINI(src, groups, exclude)
+	out, err := deriveINI(src, groups, exclude, airportTags)
 	if err != nil {
 		return "", err
 	}

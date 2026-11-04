@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -82,23 +83,85 @@ func normalizeSubURL(subURL string) string {
 	return out
 }
 
+type subscriptionItem struct {
+	URL string `json:"url"`
+	Tag string `json:"tag"`
+}
+
+// parseSubscriptions 解析 source_url，支持单 URL 字符串与 JSON 数组形态
+func parseSubscriptions(raw string) []subscriptionItem {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "[") {
+		var items []subscriptionItem
+		if err := json.Unmarshal([]byte(raw), &items); err == nil && len(items) > 0 {
+			var valid []subscriptionItem
+			for _, it := range items {
+				it.URL = strings.TrimSpace(it.URL)
+				it.Tag = strings.TrimSpace(it.Tag)
+				if it.URL != "" {
+					valid = append(valid, it)
+				}
+			}
+			if len(valid) > 0 {
+				return valid
+			}
+		}
+	}
+	if raw == "" {
+		return nil
+	}
+	return []subscriptionItem{{URL: raw, Tag: ""}}
+}
+
+// canonicalSubscriptionsJSON 规范化多订阅 JSON
+func canonicalSubscriptionsJSON(items []subscriptionItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	if len(items) == 1 {
+		return items[0].URL
+	}
+	b, _ := json.Marshal(items)
+	return string(b)
+}
+
+// primarySubURL 取主力订阅 URL（多订阅取第 1 个，单订阅取自身）
+func primarySubURL(raw string) string {
+	subs := parseSubscriptions(raw)
+	if len(subs) > 0 {
+		return subs[0].URL
+	}
+	return raw
+}
+
 // shortFingerprint 短链指纹 = SHA-256 of
 // "v3|{scheme}|{host}|{path}|{rawquery}|{target}|{config_url}|{groupsJSON}|{excludeJSON}"。
 // v1.5.0 增补升 v3：尾段追加 excludeJSON（去重升序 JSON 数组、无空白、空为 "[]"；空串
 // 等价 "[]"）——「改删减=新短链」；v1/v2 前缀差异使存量指纹不再命中（契约「幂等与指纹」：
 // 升级后同参数首建换新码属预期一次性影响，存量码照常 hit）。
-// 订阅 URL 规范化见 normalizeSubURLParts（v1.6.0 提取共用，规则零变化）。
-// target 为请求原样值（auto 或指定）；config_url 用解析后的档位 URL（同 id 被
-// PRESET_URL 覆盖时指纹自然区分）。已通过预校验的 URL 解析不会失败，防御性兜底为全空段。
+// 多订阅：单订阅 extraSub 为空，保持历史哈希逐字节一致；多订阅追加 |subs=...
 func shortFingerprint(subURL, target, configURL, groupsJSON, excludeJSON string) string {
-	scheme, host, path, query := normalizeSubURLParts(subURL)
+	subs := parseSubscriptions(subURL)
+	primURL := subURL
+	extraSub := ""
+	if len(subs) > 0 {
+		primURL = subs[0].URL
+		if len(subs) > 1 {
+			extraSub = canonicalSubscriptionsJSON(subs)
+		}
+	}
+	scheme, host, path, query := normalizeSubURLParts(primURL)
 	if groupsJSON == "" {
 		groupsJSON = "[]"
 	}
 	if excludeJSON == "" {
 		excludeJSON = "[]"
 	}
-	sum := sha256.Sum256([]byte("v3|" + scheme + "|" + host + "|" + path + "|" + query + "|" + target + "|" + configURL + "|" + groupsJSON + "|" + excludeJSON))
+	basePayload := "v3|" + scheme + "|" + host + "|" + path + "|" + query + "|" + target + "|" + configURL + "|" + groupsJSON + "|" + excludeJSON
+	if extraSub != "" {
+		basePayload += "|subs=" + extraSub
+	}
+	sum := sha256.Sum256([]byte(basePayload))
 	return hex.EncodeToString(sum[:])
 }
 

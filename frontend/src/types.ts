@@ -1,5 +1,10 @@
 // 与 docs/implementation/api-contract.md 严格一致（字段名、可空性）
 
+export interface SubscriptionItem {
+  url: string
+  tag: string
+}
+
 export interface ClientEntry {
   id: string
   label: string

@@ -64,12 +64,20 @@ func (s *server) handleShortLink(w http.ResponseWriter, r *http.Request) {
 	// mixed 无 config 参数）。失败 fail-closed 502 derive_error（不回退无组输出，R2）
 	// v1.7.0 时机分叉：dns 透传开启时派生延后到代拉之后（rule_base 行与组行同落
 	// {code}.ini，见 proxyTwoStage 钩子与下方单段分支）；关闭时维持原时机（逐字节回退现状）
+	// v1.7.1：多订阅（>=2）同样需要派生机场容灾组
+	subs := parseSubscriptions(lnk.SourceURL)
 	groupsPending := false
-	if lnk.Groups != "" || lnk.Exclude != "" {
+	if lnk.Groups != "" || lnk.Exclude != "" || len(subs) >= 2 {
 		if s.cfg.passThroughDNS {
 			groupsPending = true
 		} else {
-			derived, err := s.prepareDerivedConfig(code, configURL, lnk.Groups, lnk.Exclude, nil)
+			var tags []string
+			if len(subs) >= 2 {
+				for _, it := range subs {
+					tags = append(tags, it.Tag)
+				}
+			}
+			derived, err := s.prepareDerivedConfig(code, configURL, lnk.Groups, lnk.Exclude, nil, tags)
 			if err != nil {
 				log.Printf("s/ hit code=%s*** status=%d latency=%s derive_error: %v", logCode(code), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err)
 				writeSubError(w, r, http.StatusBadGateway, "derive_error", deriveErrTitle, deriveErrDetail)
@@ -79,13 +87,14 @@ func (s *server) handleShortLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// v1.3.3 QX 两段式服务端代取；v1.4.0 扩展到 clash：Extended 对 quanx/clash + http 订阅
-	// 默认把机场原始 URL 塞给客户端自拉（QX native server_remote / clash proxy-providers，
-	// 0 内联节点），而「机场输出客户端解析不了」正是本服务存在的意义——改为两段式：mixed 先
-	// 转通用 URI 列表（服务端代拉机场），再以节点列表转链 target，输出内联明文节点。判定：
-	// 显式 quanx/clash 档，或 auto 且 UA 宽匹配 quantumult / clash 系词表（宽匹配仅为路由
-	// 决策，权威识别仍在引擎）
-	if stageTarget, ok := twoStageRouteTarget(lnk.Target, r.Header.Get("User-Agent")); ok {
+	// v1.3.3 QX 两段式服务端代取；v1.4.0 扩展到 clash；多订阅（>=2）统一走两段式输出合并内联节点
+	if stageTarget, ok := twoStageRouteTarget(lnk.Target, r.Header.Get("User-Agent")); ok || len(subs) >= 2 {
+		if !ok {
+			stageTarget = lnk.Target
+			if stageTarget == "auto" {
+				stageTarget = "clash"
+			}
+		}
 		s.proxyTwoStage(w, r, lnk, configURL, code, stageTarget, start, groupsPending)
 		return
 	}
@@ -267,8 +276,94 @@ func (s *server) stage1Mixed(ctx context.Context, client *http.Client, ua, sourc
 	return uris, content, nil
 }
 
+// stage1MixedMulti 多订阅并发代拉（单订阅退化为 stage1Mixed 原路）。
+// 并发抓取各机场，单机场失败跳过；只要有 >=1 个机场成功就合并节点并返回主力机场 content；
+// 全部失败才返回错误。
+func (s *server) stage1MixedMulti(ctx context.Context, client *http.Client, ua string, subs []subscriptionItem, stageTimeout time.Duration) ([]string, string, []string, *twoStageFailure) {
+	if len(subs) <= 1 {
+		url := ""
+		tag := ""
+		if len(subs) == 1 {
+			url = subs[0].URL
+			tag = subs[0].Tag
+		}
+		uris, content, fail := s.stage1Mixed(ctx, client, ua, url, stageTimeout)
+		if fail != nil {
+			return nil, "", nil, fail
+		}
+		if tag != "" {
+			uris = tagNodeURIs(uris, tag)
+		}
+		var activeTags []string
+		if tag != "" {
+			activeTags = []string{tag}
+		}
+		return uris, content, activeTags, nil
+	}
+
+	type subResult struct {
+		index   int
+		tag     string
+		uris    []string
+		content string
+		fail    *twoStageFailure
+	}
+
+	resCh := make(chan subResult, len(subs))
+	for i, sub := range subs {
+		go func(idx int, item subscriptionItem) {
+			uris, content, fail := s.stage1Mixed(ctx, client, ua, item.URL, stageTimeout)
+			if fail == nil && item.Tag != "" {
+				uris = tagNodeURIs(uris, item.Tag)
+			}
+			resCh <- subResult{
+				index:   idx,
+				tag:     item.Tag,
+				uris:    uris,
+				content: content,
+				fail:    fail,
+			}
+		}(i, sub)
+	}
+
+	results := make([]subResult, len(subs))
+	for i := 0; i < len(subs); i++ {
+		r := <-resCh
+		results[r.index] = r
+	}
+
+	var allURIs []string
+	var primaryContent string
+	var activeTags []string
+	var lastFail *twoStageFailure
+
+	for _, r := range results {
+		if r.fail != nil {
+			log.Printf("s/ 多订阅代拉跳过 [%s]: stage=%d kind=%s err=%v", r.tag, r.fail.stage, r.fail.kind, r.fail.err)
+			lastFail = r.fail
+			continue
+		}
+		if len(r.uris) > 0 {
+			allURIs = append(allURIs, r.uris...)
+			activeTags = append(activeTags, r.tag)
+			if primaryContent == "" {
+				primaryContent = r.content
+			}
+		}
+	}
+
+	if len(allURIs) == 0 {
+		if lastFail != nil {
+			return nil, "", nil, lastFail
+		}
+		return nil, "", nil, &twoStageFailure{stage: 1, kind: "nodes"}
+	}
+
+	return allURIs, primaryContent, activeTags, nil
+}
+
 // twoStageConvert 两段式共享核心（v1.3.3 QX；v1.4.0 参数化 target 并供 preview 同路）：
-// 第一段（stage1Mixed）代拉订阅转通用 URI 列表，第二段以「URI|URI」明文节点列表转
+// 第一段（stage1MixedMulti）代拉订阅转通用 URI 列表，第二段以「URI|URI」明文节点列表转
 // 链 target，输出内联明文节点（quanx [server_local] / clash proxies 数组），客户端
 // 零二次拉取。两段各自分得 stageTimeout。
 // v1.7.0 增 configHook：第一段拿到代拉原文后、第二段开跑前调用——DNS 透传（fail-open）
@@ -276,15 +371,15 @@ func (s *server) stage1Mixed(ctx context.Context, client *http.Client, ua, sourc
 // 成功返回第二段响应与第二段的 context cancel（B1：resp body 由调用方流式消费，cancel
 // 责任随之移交——调用方须在 body 消费完后触发；核心内 defer cancel 会在 return 瞬间取消
 // ctx，大响应 body 读到一半即截断）。所有失败路径在返回前自行 cancel。
-func (s *server) twoStageConvert(ctx context.Context, client *http.Client, ua, sourceURL, configURL, target string, stageTimeout time.Duration, configHook func(stage1Content string) (string, *twoStageFailure)) (*http.Response, []string, context.CancelFunc, *twoStageFailure) {
-	// 第一段：内部回环内容 → mixed 通用节点列表
-	uris, content, fail := s.stage1Mixed(ctx, client, ua, sourceURL, stageTimeout)
+func (s *server) twoStageConvert(ctx context.Context, client *http.Client, ua, sourceURL, configURL, target string, stageTimeout time.Duration, configHook func(stage1Content string, activeTags []string) (string, *twoStageFailure)) (*http.Response, []string, context.CancelFunc, *twoStageFailure) {
+	subs := parseSubscriptions(sourceURL)
+	uris, content, activeTags, fail := s.stage1MixedMulti(ctx, client, ua, subs, stageTimeout)
 	if fail != nil {
 		return nil, nil, nil, fail
 	}
 	// v1.7.0 钩子：dns 透传 + groups 派生（拉取期）。钩子失败（kind=derive）直达调用方
 	if configHook != nil {
-		hooked, hfail := configHook(content)
+		hooked, hfail := configHook(content, activeTags)
 		if hfail != nil {
 			return nil, nil, nil, hfail
 		}
@@ -335,7 +430,7 @@ func (s *server) proxyTwoStage(w http.ResponseWriter, r *http.Request, lnk store
 	// 原样 config）→ groups/exclude 派生（fail-closed，kind=derive → 502 derive_error
 	// 与既有单段语义一致）
 	baseConfig := configURL
-	hook := func(stage1Content string) (string, *twoStageFailure) {
+	hook := func(stage1Content string, activeTags []string) (string, *twoStageFailure) {
 		cfg := baseConfig
 		var rb []string
 		if s.cfg.passThroughDNS {
@@ -345,8 +440,8 @@ func (s *server) proxyTwoStage(w http.ResponseWriter, r *http.Request, lnk store
 				cfg = dnsCfg // 共享 dns ini（无组链直用；有组链仅取 rb 行叠加）
 			}
 		}
-		if groupsPending {
-			derived, err := s.prepareDerivedConfig(code, baseConfig, lnk.Groups, lnk.Exclude, rb)
+		if groupsPending || len(activeTags) >= 2 {
+			derived, err := s.prepareDerivedConfig(code, baseConfig, lnk.Groups, lnk.Exclude, rb, activeTags)
 			if err != nil {
 				return "", &twoStageFailure{stage: 1, kind: "derive", err: err}
 			}

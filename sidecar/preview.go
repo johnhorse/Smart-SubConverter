@@ -191,7 +191,7 @@ func (s *server) probeTwoStage(subURL, target, presetURL string) probeResult {
 
 	// v1.7.0 dns 透传钩子（探测与拉取同路）：第一段代拉原文提取 dns → 派生 config；
 	// fail-open（无 dns / 派生失败原样 config），探测永不由透传致红
-	resp, _, cancelStage2, fail := s.twoStageConvert(ctx, s.probeClient, ua, subURL, presetURL, target, stageTimeout, func(stage1Content string) (string, *twoStageFailure) {
+	resp, _, cancelStage2, fail := s.twoStageConvert(ctx, s.probeClient, ua, subURL, presetURL, target, stageTimeout, func(stage1Content string, activeTags []string) (string, *twoStageFailure) {
 		if !s.cfg.passThroughDNS {
 			return presetURL, nil
 		}
@@ -360,7 +360,8 @@ func (s *server) probeNodeList(subURL, target string) ([]string, probeResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
-	uris, _, fail := s.stage1Mixed(ctx, s.probeClient, ua, subURL, 0)
+	subs := parseSubscriptions(subURL)
+	uris, _, _, fail := s.stage1MixedMulti(ctx, s.probeClient, ua, subs, 0)
 	if fail != nil {
 		switch {
 		case fail.stage == 0: // 代拉失败（err / airport）：订阅源侧不可用或被拦，归 upstream_error
@@ -454,14 +455,69 @@ func resolvePreset(presets []presetEntry, id string) (presetEntry, bool) {
 	return presetEntry{}, false
 }
 
+// resolveSubscriptions 解析并校验订阅列表
+func resolveSubscriptions(rawURL string, subsInput *[]subscriptionItem) ([]subscriptionItem, string) {
+	var subs []subscriptionItem
+	if subsInput != nil && len(*subsInput) > 0 {
+		subs = *subsInput
+	} else {
+		subs = parseSubscriptions(rawURL)
+	}
+	if len(subs) == 0 {
+		return nil, "bad_url_empty"
+	}
+
+	usedTags := make(map[string]int)
+	var normalized []subscriptionItem
+	for i, sub := range subs {
+		u := strings.TrimSpace(sub.URL)
+		if code := validateURL(u); code != "" {
+			return nil, code
+		}
+		tag := strings.TrimSpace(sub.Tag)
+		if tag == "" {
+			if parsed, err := url.Parse(u); err == nil {
+				h := parsed.Hostname()
+				h = strings.TrimPrefix(h, "www.")
+				h = strings.TrimPrefix(h, "sub.")
+				if idx := strings.Index(h, "."); idx > 0 {
+					tag = h[:idx]
+				} else {
+					tag = h
+				}
+			}
+			if tag == "" {
+				tag = fmt.Sprintf("机场%d", i+1)
+			}
+		}
+		tag = strings.ReplaceAll(tag, "`", "")
+		tag = strings.ReplaceAll(tag, "\r", "")
+		tag = strings.ReplaceAll(tag, "\n", "")
+		tag = strings.TrimSpace(tag)
+		if len([]rune(tag)) > 32 {
+			tag = string([]rune(tag)[:32])
+		}
+		if tag == "" {
+			tag = fmt.Sprintf("机场%d", i+1)
+		}
+		usedTags[tag]++
+		if count := usedTags[tag]; count > 1 {
+			tag = fmt.Sprintf("%s-%d", tag, count)
+		}
+		normalized = append(normalized, subscriptionItem{URL: u, Tag: tag})
+	}
+	return normalized, ""
+}
+
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SubURL  string       `json:"url"`
-		Target  string       `json:"target"`
-		Preset  string       `json:"preset"`
-		Groups  *[]nodeGroup `json:"groups"`  // v1.5.0：组意图（转换提交时携带；probe 模式忽略）。指针区分「字段出现（含空数组）」与「未出现」（v1.6.0 偏好钩子依赖此区分）
-		Exclude *[]string    `json:"exclude"` // v1.5.0 增补：模板组删减名单（probe 模式忽略、不校验）。指针同上
-		Probe   bool         `json:"probe"`   // v1.5.0：true = 探测模式（取名两段式，零副作用）
+		SubURL        string              `json:"url"`
+		Subscriptions *[]subscriptionItem `json:"subscriptions"` // v1.7.1：多订阅
+		Target        string              `json:"target"`
+		Preset        string              `json:"preset"`
+		Groups        *[]nodeGroup        `json:"groups"`  // v1.5.0：组意图（转换提交时携带；probe 模式忽略）。指针区分「字段出现（含空数组）」与「未出现」（v1.6.0 偏好钩子依赖此区分）
+		Exclude       *[]string           `json:"exclude"` // v1.5.0 增补：模板组删减名单（probe 模式忽略、不校验）。指针同上
+		Probe         bool                `json:"probe"`   // v1.5.0：true = 探测模式（取名两段式，零副作用）
 	}
 	// 契约要求响应恒 200：请求体解析失败按「未提供链接」处理，不发明新错误码
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
@@ -505,14 +561,22 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	if presetOK {
 		linkPresetID = sel.ID
 	}
+
+	// 订阅 URL 预校验（多订阅逐个校验与规范化；无效 URL 不落库）
+	subs, urlErr := resolveSubscriptions(req.SubURL, req.Subscriptions)
+	finalSubURL := ""
+	if urlErr == "" {
+		finalSubURL = canonicalSubscriptionsJSON(subs)
+	}
+
 	// makeLink 查/建短链（契约 sidecar 行为 step 3：与探测结果无关，永远执行）。
 	// 存储失败 → link 降级 /sub 旧长链并置 store_error（唯一保留长链返回的正常场景）。
 	// v1.5.0 groups/exclude 校验/能力位失败时二者传 ""（丢弃后照常建短链，对齐 bad_preset）
 	makeLink := func(gj, ej string) (link string, storeCode string) {
-		code, err := s.store.getOrCreateLink(req.SubURL, linkTarget, linkPresetID, linkPresetURL, gj, ej)
+		code, err := s.store.getOrCreateLink(finalSubURL, linkTarget, linkPresetID, linkPresetURL, gj, ej)
 		if err != nil {
 			log.Printf("preview 短链生成失败: %T (store_error)", err)
-			return buildLink(origin, linkTarget, req.SubURL, linkPresetURL, s.cfg.subToken), "store_error"
+			return buildLink(origin, linkTarget, primarySubURL(finalSubURL), linkPresetURL, s.cfg.subToken), "store_error"
 		}
 		return origin + "/s/" + code, ""
 	}
@@ -536,15 +600,18 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 契约预校验判定序：bad_url_* 先于 bad_preset。
-	// 无效 URL 不落库（D7：私网/垃圾 URL 不持久化供 /s/ 重放），link 用 /sub 旧长链维持 D4 非空
-	if code := validateURL(req.SubURL); code != "" {
+	if urlErr != "" {
 		if req.Probe {
-			writeProbeResult(probeResult{false, code, validateMessages[code]}, nil, nil)
+			writeProbeResult(probeResult{false, urlErr, validateMessages[urlErr]}, nil, nil)
 			return
 		}
-		link := buildLink(origin, linkTarget, req.SubURL, linkPresetURL, s.cfg.subToken)
+		fallbackURL := req.SubURL
+		if fallbackURL == "" && req.Subscriptions != nil && len(*req.Subscriptions) > 0 {
+			fallbackURL = (*req.Subscriptions)[0].URL
+		}
+		link := buildLink(origin, linkTarget, fallbackURL, linkPresetURL, s.cfg.subToken)
 		writeJSON(w, http.StatusOK, previewResponse{
-			OK: false, Target: probeTarget, Preset: echo, ErrorCode: &code, Message: validateMessages[code],
+			OK: false, Target: probeTarget, Preset: echo, ErrorCode: &urlErr, Message: validateMessages[urlErr],
 			Link: link, DeepLink: buildDeepLink(linkTarget, link), Nodes: []string{},
 		})
 		return
@@ -617,7 +684,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Probe {
-		nodes, pr := s.probeNodeList(req.SubURL, probeTarget)
+		nodes, pr := s.probeNodeList(finalSubURL, probeTarget)
 		hits := map[string]int{}
 		if pr.ok {
 			hits = s.probeGroupHits(sel, nodes)
@@ -626,7 +693,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pr := s.probeConvert(req.SubURL, probeTarget, s.engineConfig(sel))
+	pr := s.probeConvert(finalSubURL, probeTarget, s.engineConfig(sel))
 	link, storeCode := makeLink(groupsJSON, excludeJSON)
 	resp := previewResponse{OK: pr.ok, Target: probeTarget, Preset: echo, Message: pr.message, Link: link, DeepLink: buildDeepLink(linkTarget, link), Nodes: []string{}}
 	if !pr.ok {
@@ -640,7 +707,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	// upsert（空数组也是出现，「删光组再提交=档案记 []」），未出现不动档案；写档失败仅记
 	// 日志不影响响应（与短链 store_error 降级同哲学——偏好丢失不阻断转换结果）
 	if pr.ok {
-		s.saveGroupPrefs(req.SubURL, linkPresetID, req.Groups, groupsJSON, req.Exclude, excludeJSON)
+		s.saveGroupPrefs(finalSubURL, linkPresetID, req.Groups, groupsJSON, req.Exclude, excludeJSON)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -649,9 +716,9 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 // 各自 upsert 对应档案；两者同事务落库（评审修订 #10，同成同败，杜绝半应用档案）。
 // groupsJSON / excludeJSON 为本请求的规范化序列化（"" 规范化为 "[]"——空档案也是档案）。
 // sub_key 与 exclude 的 preset_id 见 store 两把钥匙注释。日志卫生（D6）：失败只记错误
-// 类型，绝不带订阅 URL。
+// 类型，绝不带订阅 URL。多订阅以主力订阅（第 1 条）作为 sub_key 锚点。
 func (s *server) saveGroupPrefs(subURL, presetID string, groups *[]nodeGroup, groupsJSON string, exclude *[]string, excludeJSON string) {
-	subKey := normalizeSubURL(subURL)
+	subKey := normalizeSubURL(primarySubURL(subURL))
 	if subKey == "" {
 		return // 防御兜底（成功路径 URL 已过 validateURL，不会走到）
 	}

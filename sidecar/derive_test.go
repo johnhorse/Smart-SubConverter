@@ -632,3 +632,38 @@ func TestDeriveININoExcludeByteIdentical(t *testing.T) {
 		t.Error("nil 与空切片 exclude 应等价（逐字节一致）")
 	}
 }
+
+// 多机场专属组与 🔯 机场容灾 策略组生成与注入
+func TestDeriveAirportGroups(t *testing.T) {
+	src := readFixture(t, "ACL4SSR_Online_Full_MultiMode.ini")
+	airportTags := []string{"主力", "备用"}
+	out, err := deriveINI(src, nil, nil, airportTags)
+	if err != nil {
+		t.Fatalf("deriveINI with airportTags failed: %v", err)
+	}
+	s := string(out)
+
+	// 检查机场专属组生成
+	wantMain := "custom_proxy_group=✈️ [主力] 全部节点`url-test`(\\[主力\\])`http://www.gstatic.com/generate_204`300,,50"
+	wantBackup := "custom_proxy_group=✈️ [备用] 全部节点`url-test`(\\[备用\\])`http://www.gstatic.com/generate_204`300,,50"
+	wantFallback := "custom_proxy_group=🔯 机场容灾`fallback`[]✈️ [主力] 全部节点`[]✈️ [备用] 全部节点`http://www.gstatic.com/generate_204`300,,50"
+
+	if !strings.Contains(s, wantMain) {
+		t.Errorf("缺少主力专属组:\n%s", s)
+	}
+	if !strings.Contains(s, wantBackup) {
+		t.Errorf("缺少备用专属组:\n%s", s)
+	}
+	if !strings.Contains(s, wantFallback) {
+		t.Errorf("缺少机场容灾组:\n%s", s)
+	}
+
+	// 检查 select 组（如 🚀 节点选择、💬 Ai平台）是否把 []🔯 机场容灾 放在首位
+	if !strings.Contains(s, "custom_proxy_group=🚀 节点选择`select`[]🔯 机场容灾`") {
+		t.Errorf("主组首位应为 []🔯 机场容灾:\n%s", s)
+	}
+	if !strings.Contains(s, "custom_proxy_group=💬 Ai平台`select`[]🔯 机场容灾`") {
+		t.Errorf("Ai平台组首位应为 []🔯 机场容灾:\n%s", s)
+	}
+}
+

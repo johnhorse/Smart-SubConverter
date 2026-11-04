@@ -1383,4 +1383,110 @@ describe('useConverter 分组偏好记忆（v1.6.0）', () => {
       vi.useRealTimers()
     }
   })
+
+  // ---- v1.7.1：多机场与容灾 Fallback（subscriptions）----
+
+  describe('多机场与容灾 Fallback（v1.7.1）', () => {
+    it('extractTagFromUrl 准确从 hostname 提取机场简写', async () => {
+      const { extractTagFromUrl } = await import('./useConverter')
+      expect(extractTagFromUrl('https://sub.airport-one.com/link')).toBe('airport-one')
+      expect(extractTagFromUrl('https://www.flycloud.net/sub')).toBe('flycloud')
+      expect(extractTagFromUrl('https://example.com:8443/api')).toBe('example')
+      expect(extractTagFromUrl('')).toBe('')
+      expect(extractTagFromUrl('not-a-url')).toBe('')
+    })
+
+    it('handleUrlBatch 支持换行或竖线粘贴自动拆分为主力与备用订阅并自动生成 tag', () => {
+      const conv = setup()
+      const pasted = `https://a.com/sub
+https://b.com/sub|https://b.com/sub2`
+      const handled = conv.handleUrlBatch(pasted)
+      expect(handled).toBe(true)
+      expect(conv.inputUrl.value).toBe('https://a.com/sub')
+      expect(conv.mainTag.value).toBe('a')
+      expect(conv.extraSubs.value.length).toBe(2)
+      expect(conv.extraSubs.value[0]).toEqual({ url: 'https://b.com/sub', tag: 'b' })
+      expect(conv.extraSubs.value[1]).toEqual({ url: 'https://b.com/sub2', tag: 'b-2' })
+    })
+
+    it('多订阅卡片操作：addExtraSub 与 removeExtraSub', () => {
+      const conv = setup()
+      expect(conv.allSubscriptions.value.length).toBe(0)
+      conv.inputUrl.value = 'https://main.com/sub'
+      expect(conv.allSubscriptions.value.length).toBe(1)
+
+      conv.addExtraSub('https://backup.com/sub', '备用')
+      expect(conv.extraSubs.value.length).toBe(1)
+      expect(conv.allSubscriptions.value.length).toBe(2)
+      expect(conv.allSubscriptions.value[0].tag).toBe('main') // 默认从 url 提取
+      expect(conv.allSubscriptions.value[1].tag).toBe('备用')
+
+      conv.removeExtraSub(0)
+      expect(conv.extraSubs.value.length).toBe(0)
+      expect(conv.allSubscriptions.value.length).toBe(1)
+    })
+
+    it('多订阅提交：submit 带上 subscriptions 字段', async () => {
+      const conv = setup()
+      conv.inputUrl.value = 'https://main.com/sub'
+      conv.mainTag.value = '主力'
+      conv.addExtraSub('https://backup.com/sub', '备用')
+
+      vi.mocked(fetchPreview).mockResolvedValueOnce(okResponse)
+      await conv.submit()
+
+      expect(fetchPreview).toHaveBeenLastCalledWith(
+        'https://main.com/sub',
+        'auto',
+        'default',
+        {
+          subscriptions: [
+            { url: 'https://main.com/sub', tag: '主力' },
+            { url: 'https://backup.com/sub', tag: '备用' },
+          ],
+        },
+      )
+    })
+
+    it('多订阅探测：probeNodes 带上 subscriptions 字段', async () => {
+      const conv = setup()
+      conv.inputUrl.value = 'https://main.com/sub'
+      conv.mainTag.value = '主力'
+      conv.addExtraSub('https://backup.com/sub', '备用')
+
+      vi.mocked(fetchPreview).mockResolvedValueOnce({
+        ...okResponse,
+        nodes: ['[主力] 香港 01', '[备用] 香港 01'],
+      })
+
+      conv.groupsOpen.value = true
+      await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+
+      expect(fetchPreview).toHaveBeenLastCalledWith(
+        'https://main.com/sub',
+        'auto',
+        'default',
+        {
+          probe: true,
+          subscriptions: [
+            { url: 'https://main.com/sub', tag: '主力' },
+            { url: 'https://backup.com/sub', tag: '备用' },
+          ],
+        },
+      )
+      expect(conv.nodes.value).toEqual(['[主力] 香港 01', '[备用] 香港 01'])
+    })
+
+    it('restart 清空 extraSubs 和 mainTag', () => {
+      const conv = setup()
+      conv.inputUrl.value = 'https://main.com/sub'
+      conv.mainTag.value = '主力'
+      conv.addExtraSub('https://backup.com/sub', '备用')
+      expect(conv.extraSubs.value.length).toBe(1)
+
+      conv.restart()
+      expect(conv.extraSubs.value.length).toBe(0)
+      expect(conv.mainTag.value).toBe('')
+    })
+  })
 })

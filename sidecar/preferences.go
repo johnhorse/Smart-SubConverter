@@ -45,7 +45,8 @@ func (s *server) handlePreferencesQuery(w http.ResponseWriter, r *http.Request) 
 	var req preferencesQueryRequest
 	// body 解析失败按「未提供链接」处理（口径同 preview，不发明新错误码）
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
-	if code := validateURL(req.SubURL); code != "" {
+	primURL := primarySubURL(req.SubURL)
+	if code := validateURL(primURL); code != "" {
 		writePrefsError(w, code)
 		return
 	}
@@ -55,7 +56,7 @@ func (s *server) handlePreferencesQuery(w http.ResponseWriter, r *http.Request) 
 		writePrefsError(w, "bad_preset")
 		return
 	}
-	subKey := normalizeSubURL(req.SubURL)
+	subKey := normalizeSubURL(primURL)
 	groupsJSON, hasCustom, err := s.store.getPrefsCustom(subKey)
 	if err != nil {
 		log.Printf("preferences query 读 prefs_custom 失败: %T", err)
@@ -89,11 +90,12 @@ func (s *server) handlePreferencesDelete(w http.ResponseWriter, r *http.Request)
 		SubURL string `json:"sub_url"`
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
-	if code := validateURL(req.SubURL); code != "" {
+	primURL := primarySubURL(req.SubURL)
+	if code := validateURL(primURL); code != "" {
 		writePrefsError(w, code)
 		return
 	}
-	delCustom, delExclude, err := s.store.deletePrefs(normalizeSubURL(req.SubURL))
+	delCustom, delExclude, err := s.store.deletePrefs(normalizeSubURL(primURL))
 	if err != nil {
 		log.Printf("preferences delete 失败: %T", err)
 		writeJSON(w, http.StatusInternalServerError, struct {

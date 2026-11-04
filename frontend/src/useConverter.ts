@@ -14,7 +14,7 @@ import {
   saveSnapshot,
   type DraftSnapshot,
 } from './prefs'
-import type { ClientEntry, NodeGroup, PreviewResponse, PresetInfo } from './types'
+import type { ClientEntry, NodeGroup, PreviewResponse, PresetInfo, SubscriptionItem } from './types'
 
 export type Phase = 'idle' | 'converting' | 'result'
 
@@ -23,9 +23,86 @@ export type ProbeState = 'idle' | 'loading' | 'ready' | 'failed'
 
 const URL_REPROBE_DEBOUNCE_MS = 400
 
+export function extractTagFromUrl(u: string): string {
+  try {
+    const trimmed = u.trim()
+    if (!trimmed) return ''
+    const parsed = new URL(trimmed)
+    let h = parsed.hostname.toLowerCase()
+    h = h.replace(/^www\./, '').replace(/^sub\./, '')
+    const parts = h.split('.')
+    return parts[0] || ''
+  } catch {
+    return ''
+  }
+}
+
 export function useConverter() {
   const phase = ref<Phase>('idle')
   const inputUrl = ref('')
+  const mainTag = ref('')
+  const extraSubs = ref<SubscriptionItem[]>([])
+
+  function addExtraSub(url = '', tag = '') {
+    extraSubs.value.push({ url, tag })
+  }
+
+  function removeExtraSub(index: number) {
+    extraSubs.value.splice(index, 1)
+  }
+
+  function updateExtraSub(index: number, patch: Partial<SubscriptionItem>) {
+    if (extraSubs.value[index]) {
+      Object.assign(extraSubs.value[index], patch)
+    }
+  }
+
+  function handleUrlBatch(rawText: string): boolean {
+    if (rawText.includes('\n') || rawText.includes('|')) {
+      const parts = rawText.split(/[\r\n|]+/).map((s) => s.trim()).filter(Boolean)
+      if (parts.length > 1) {
+        inputUrl.value = parts[0]
+        if (!mainTag.value) {
+          mainTag.value = extractTagFromUrl(parts[0]) || '主力'
+        }
+        const used = new Set<string>()
+        used.add(mainTag.value)
+        const additions: SubscriptionItem[] = []
+        for (let i = 1; i < parts.length; i++) {
+          const u = parts[i]
+          let t = extractTagFromUrl(u) || `机场${i + 1}`
+          let baseT = t
+          let c = 2
+          while (used.has(t)) {
+            t = `${baseT}-${c++}`
+          }
+          used.add(t)
+          additions.push({ url: u, tag: t })
+        }
+        extraSubs.value = additions
+        return true
+      }
+    }
+    return false
+  }
+
+  const allSubscriptions = computed<SubscriptionItem[]>(() => {
+    const list: SubscriptionItem[] = []
+    const firstUrl = inputUrl.value.trim()
+    if (firstUrl) {
+      list.push({ url: firstUrl, tag: mainTag.value.trim() || extractTagFromUrl(firstUrl) || '主力' })
+    }
+    for (const sub of extraSubs.value) {
+      if (sub.url.trim()) {
+        list.push({
+          url: sub.url.trim(),
+          tag: sub.tag.trim() || extractTagFromUrl(sub.url) || `机场${list.length + 1}`,
+        })
+      }
+    }
+    return list
+  })
+
   const selectedTarget = ref('auto')
   // 模板无「未选」态：default 永远默认选中（契约保证 default 永远第一）
   const selectedPreset = ref('default')
@@ -104,7 +181,8 @@ export function useConverter() {
     probeState.value = 'loading'
     groupHits.value = {} // 旧命中数属旧名单/旧模板，探测期间不展示
     try {
-      const res = await fetchPreview(url, selectedTarget.value, preset, { probe: true })
+      const sendSubs = allSubscriptions.value.length >= 2 ? allSubscriptions.value : undefined
+      const res = await fetchPreview(url, selectedTarget.value, preset, { probe: true, subscriptions: sendSubs })
       if (seq !== probeSeq) return // 过期响应丢弃（换 url / 换档后旧 probe 慢回）
       if (res.ok && Array.isArray(res.nodes)) {
         nodes.value = res.nodes
@@ -390,9 +468,11 @@ export function useConverter() {
       // 发送——等价无组转换正常成功，残留组不会撞 groups_disabled 锁死（F1）
       const sendGroups = customGroupsAvailable.value ? groups.value : []
       const sendExclude = customGroupsAvailable.value ? excluded.value : []
-      const options: { groups?: NodeGroup[]; exclude?: string[] } = {}
+      const sendSubs = allSubscriptions.value.length >= 2 ? allSubscriptions.value : undefined
+      const options: { groups?: NodeGroup[]; exclude?: string[]; subscriptions?: SubscriptionItem[] } = {}
       if (sendGroups.length > 0) options.groups = sendGroups
       if (sendExclude.length > 0) options.exclude = sendExclude
+      if (sendSubs) options.subscriptions = sendSubs
       const res =
         Object.keys(options).length > 0
           ? await fetchPreview(inputUrl.value, selectedTarget.value, selectedPreset.value, options)
@@ -437,6 +517,8 @@ export function useConverter() {
     result.value = null
     convertError.value = null
     restoreNotice.value = null // 回填提示条属于上一次转换，回来不残留
+    extraSubs.value = []
+    mainTag.value = ''
     // 节点名单属旧链接：清掉并收起面板（重开即对新链接重 probe）；组意图与剔除清单保留
     //（换链接打词/删减仍适用）
     resetProbe()
@@ -447,6 +529,13 @@ export function useConverter() {
   return {
     phase,
     inputUrl,
+    mainTag,
+    extraSubs,
+    addExtraSub,
+    removeExtraSub,
+    updateExtraSub,
+    handleUrlBatch,
+    allSubscriptions,
     selectedTarget,
     selectedPreset,
     advancedOpen,

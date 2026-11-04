@@ -5,6 +5,7 @@ import type {
   PreferencesDeleteResponse,
   PreferencesQueryResponse,
   PreviewResponse,
+  SubscriptionItem,
 } from './types'
 
 export const PREVIEW_TIMEOUT_MS = 15_000
@@ -44,6 +45,8 @@ export interface PreviewOptions {
   groups?: NodeGroup[]
   // 要删减的模板自带组名；空数组不带字段（存量请求字节不变）
   exclude?: string[]
+  // v1.7.1 多订阅支持（空数组不带字段，存量单订阅请求不变）
+  subscriptions?: SubscriptionItem[]
 }
 
 export function fetchPreview(
@@ -56,6 +59,7 @@ export function fetchPreview(
   if (options.probe) body.probe = true
   if (options.groups && options.groups.length > 0) body.groups = options.groups
   if (options.exclude && options.exclude.length > 0) body.exclude = options.exclude
+  if (options.subscriptions && options.subscriptions.length > 0) body.subscriptions = options.subscriptions
   return fetchJson<PreviewResponse>(
     '/api/preview',
     {

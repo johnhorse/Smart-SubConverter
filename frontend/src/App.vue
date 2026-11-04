@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useConverter } from './useConverter'
+import { extractTagFromUrl, useConverter } from './useConverter'
 import { useHealth } from './useHealth'
 import ClientChips from './components/ClientChips.vue'
 import PresetChips from './components/PresetChips.vue'
@@ -9,13 +9,34 @@ import ResultPanel from './components/ResultPanel.vue'
 import StatusBadge from './components/StatusBadge.vue'
 
 const {
-  phase, inputUrl, selectedTarget, selectedPreset, advancedOpen, submitting,
+  phase, inputUrl, mainTag, extraSubs, addExtraSub, removeExtraSub, handleUrlBatch,
+  selectedTarget, selectedPreset, advancedOpen, submitting,
   convertError, result, clients, presets, customGroupsAvailable,
   groupsOpen, groups, nodes, probeState, excluded, groupHits, templateGroups,
   draftKeywords, draftMode, draftPattern, restoreNotice, restoreNoticeText,
   loadClients, probeNodes, submit,
   selectClient, selectPreset, escapeToClash, undoRestore, clearPreferences, restart,
 } = useConverter()
+
+function onMainInput(e: Event) {
+  const target = e.target as HTMLInputElement
+  const val = target.value
+  if (handleUrlBatch(val)) {
+    return
+  }
+}
+
+function onExtraUrlInput(index: number, e: Event) {
+  const target = e.target as HTMLInputElement
+  const val = target.value
+  const cur = extraSubs.value[index]
+  if (cur) {
+    cur.url = val
+    if (!cur.tag) {
+      cur.tag = extractTagFromUrl(val)
+    }
+  }
+}
 
 const { badge, init: initHealth } = useHealth()
 
@@ -53,21 +74,106 @@ onMounted(() => {
         </header>
 
         <!-- novalidate：URL 合法性由 sidecar 校验（错误码 bad_url_format + 人话文案），不用浏览器原生气泡 -->
-        <form class="convert-form" novalidate @submit.prevent="submit">
-          <input
-            v-model="inputUrl"
-            class="url-input"
-            type="url"
-            inputmode="url"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="粘贴你的订阅链接"
-            aria-label="订阅链接"
-          />
-          <button type="submit" class="primary-btn" :disabled="submitting">
-            {{ submitting ? '转换中…' : '转换' }}
-          </button>
+        <form class="convert-form" :class="{ 'multi-sub-mode': extraSubs.length > 0 }" novalidate @submit.prevent="submit">
+          <!-- 单订阅经典模式 -->
+          <div v-if="extraSubs.length === 0" class="single-sub-row">
+            <input
+              v-model="inputUrl"
+              class="url-input"
+              type="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="粘贴你的订阅链接（支持多行/竖线分隔）"
+              aria-label="订阅链接"
+              @input="onMainInput"
+            />
+            <button type="submit" class="primary-btn" :disabled="submitting">
+              {{ submitting ? '转换中…' : '转换' }}
+            </button>
+          </div>
+
+          <!-- 多订阅卡片列表模式 -->
+          <div v-else class="multi-sub-container">
+            <div class="sub-item-row main-sub-row">
+              <span class="sub-role-badge">主力</span>
+              <input
+                v-model="mainTag"
+                class="tag-input"
+                type="text"
+                placeholder="主力"
+                aria-label="主力机场标记"
+              />
+              <input
+                v-model="inputUrl"
+                class="url-input"
+                type="url"
+                inputmode="url"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="主力机场订阅链接"
+                aria-label="主力订阅链接"
+                @input="onMainInput"
+              />
+            </div>
+
+            <div
+              v-for="(sub, idx) in extraSubs"
+              :key="idx"
+              class="sub-item-row extra-sub-row"
+            >
+              <span class="sub-role-badge backup">备用</span>
+              <input
+                v-model="sub.tag"
+                class="tag-input"
+                type="text"
+                placeholder="备用"
+                aria-label="备用机场标记"
+              />
+              <input
+                :value="sub.url"
+                class="url-input"
+                type="url"
+                inputmode="url"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="备用机场订阅链接"
+                aria-label="备用订阅链接"
+                @input="onExtraUrlInput(idx, $event)"
+              />
+              <button
+                type="button"
+                class="remove-sub-btn"
+                aria-label="删除此备用订阅"
+                @click="removeExtraSub(idx)"
+              >
+                ×
+              </button>
+            </div>
+
+            <div class="multi-sub-actions">
+              <button
+                type="button"
+                class="add-sub-btn"
+                @click="addExtraSub()"
+              >
+                + 添加备用订阅
+              </button>
+              <button type="submit" class="primary-btn submit-multi-btn" :disabled="submitting">
+                {{ submitting ? '转换中…' : '转换' }}
+              </button>
+            </div>
+            <p class="multi-sub-tip">
+              已启用多机场容灾：节点自动打标，客户端首选「🔯 机场容灾」（主力故障时自动切备用）。
+            </p>
+          </div>
         </form>
+
+        <div v-if="extraSubs.length === 0" class="sub-addon-row">
+          <button type="button" class="add-sub-link" @click="addExtraSub()">
+            + 添加备用订阅（多机场容灾 Fallback）
+          </button>
+        </div>
 
         <div v-if="convertError && !submitting" class="error-note" role="alert">
           <p>{{ convertError }}</p>
