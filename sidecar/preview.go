@@ -112,12 +112,30 @@ func isTimeoutErr(err error) bool {
 
 // probeConvert 向 Extended 发探测 GET /sub 并按契约归类结果（config 用所选档位 url）。
 // 日志只记 target 与 errorCode（D6：探测 URL 含订阅链接，绝不入日志）。
+// v1.7.0 DNS 透传：与 /s/ 拉取同路（设计定案「探测与拉取同路，避免路径分叉」）——
+// 两段式 target 走 probeTwoStage 钩子，其余 target 单段分支也改 sidecar 代拉 +
+// dns 派生 config；代拉失败 fail-open 回退原始参数探测。
 func (s *server) probeConvert(subURL, target, presetURL string) probeResult {
 	// v1.4.0 两段式探测（契约 preview「sidecar 行为」第 2 条）：quanx / clash（含 auto
 	// 默认的 clash——handlePreview 已把 auto 归一化为 clash 探测值）与 /s/ 拉取同一两段式
 	// 路径，所见即所得：preview 绿 = 受限网络消费端拉得到内联节点；其余 target 直通不变
 	if target == "quanx" || target == "clash" {
 		return s.probeTwoStage(subURL, target, presetURL)
+	}
+	if s.cfg.passThroughDNS {
+		// 预算口径对齐 probeTwoStage：整体 min(PROBE_TIMEOUT, SUB_PROXY_TIMEOUT) 从代拉起算
+		budget := s.cfg.probeTimeout
+		if s.cfg.subProxyTimeout > 0 && s.cfg.subProxyTimeout < budget {
+			budget = s.cfg.subProxyTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		if internalURL, content, err := s.isub.fetchAndRegisterContent(ctx, uaFor(target), subURL, s.cfg.sidecarBase); err == nil {
+			subURL = internalURL
+			if newCfg, rb := s.dnsPassthroughConfig(content, presetURL); len(rb) > 0 {
+				presetURL = newCfg
+			}
+		} // 代拉失败 fail-open：原参数探测（引擎自拉），不映射为探测错误
 	}
 	q := url.Values{}
 	q.Set("target", target)
@@ -171,7 +189,15 @@ func (s *server) probeTwoStage(subURL, target, presetURL string) probeResult {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
-	resp, _, cancelStage2, fail := s.twoStageConvert(ctx, s.probeClient, ua, subURL, presetURL, target, stageTimeout)
+	// v1.7.0 dns 透传钩子（探测与拉取同路）：第一段代拉原文提取 dns → 派生 config；
+	// fail-open（无 dns / 派生失败原样 config），探测永不由透传致红
+	resp, _, cancelStage2, fail := s.twoStageConvert(ctx, s.probeClient, ua, subURL, presetURL, target, stageTimeout, func(stage1Content string) (string, *twoStageFailure) {
+		if !s.cfg.passThroughDNS {
+			return presetURL, nil
+		}
+		newCfg, _ := s.dnsPassthroughConfig(stage1Content, presetURL)
+		return newCfg, nil
+	})
 	if fail != nil {
 		switch {
 		case fail.kind == "internal":
@@ -334,7 +360,7 @@ func (s *server) probeNodeList(subURL, target string) ([]string, probeResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
-	uris, fail := s.stage1Mixed(ctx, s.probeClient, ua, subURL, 0)
+	uris, _, fail := s.stage1Mixed(ctx, s.probeClient, ua, subURL, 0)
 	if fail != nil {
 		switch {
 		case fail.stage == 0: // 代拉失败（err / airport）：订阅源侧不可用或被拦，归 upstream_error

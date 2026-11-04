@@ -298,7 +298,7 @@ func TestPrepareDerivedConfigBootstrapsRewritten(t *testing.T) {
 	writeTB(t, filepath.Join(m.rulesDir, "ACL4SSR_Online.ini"),
 		"[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\nruleset=DIRECT,http://up/a.list\n")
 	writeTB(t, filepath.Join(m.rulesDir, "a.list"), "a-content")
-	u, err := s.prepareDerivedConfig("code1", defaultPresetURL, groupsJSON, "")
+	u, err := s.prepareDerivedConfig("code1", defaultPresetURL, groupsJSON, "", nil)
 	if err != nil {
 		t.Fatalf("原料齐备应当场补产物派生成功: %v", err)
 	}
@@ -317,13 +317,13 @@ func TestPrepareDerivedConfigBootstrapsRewritten(t *testing.T) {
 	s2, m2 := newSV()
 	writeTB(t, filepath.Join(m2.rulesDir, "ACL4SSR_Online.ini"),
 		"[custom]\ncustom_proxy_group=`T`select`[]DIRECT`\nruleset=DIRECT,http://up/b.list\n")
-	if _, err := s2.prepareDerivedConfig("code2", defaultPresetURL, groupsJSON, ""); err == nil {
+	if _, err := s2.prepareDerivedConfig("code2", defaultPresetURL, groupsJSON, "", nil); err == nil {
 		t.Error("原料不齐应维持 derive_error")
 	}
 
 	// 豁免档自定义远端 URL：无本地原料可补 → derive_error
 	s3, _ := newSV()
-	if _, err := s3.prepareDerivedConfig("code3", "https://deploy.example.com/custom.ini", groupsJSON, ""); err == nil {
+	if _, err := s3.prepareDerivedConfig("code3", "https://deploy.example.com/custom.ini", groupsJSON, "", nil); err == nil {
 		t.Error("非内置档 URL 应维持 derive_error")
 	}
 }

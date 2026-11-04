@@ -192,7 +192,9 @@ func appendGroups(lines []string, groups []nodeGroup, info templateInfo) ([]stri
 // 建链期已被能力位挡，兜底撞上在此失败）→ 派生（groups 追加 + exclude 删减）→ 写
 // {DATA_DIR}/derived/{code}.ini（拉取时覆盖写——快照刷新后下次拉取自动用新模板）→
 // 返回引擎可用的回环 URL。任一步失败返回错误（上层 502 derive_error）。
-func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON, excludeJSON string) (string, error) {
+// rbLines（v1.7.0 DNS 透传）：非空时同文件追加 rule_base 行（机场 dns 派生 base 的
+// 回环 URL 集）——一根派生 ini 同时承载组行 + rule_base 行（设计定案的叠加共存）。
+func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON, excludeJSON string, rbLines []string) (string, error) {
 	groups, err := parseGroupsJSON(groupsJSON)
 	if err != nil {
 		return "", err
@@ -201,7 +203,7 @@ func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON, exclude
 	if err != nil {
 		return "", err
 	}
-	if len(groups) == 0 && len(exclude) == 0 {
+	if len(groups) == 0 && len(exclude) == 0 && len(rbLines) == 0 {
 		return "", fmt.Errorf("groups 与 exclude 均为空，不应进入派生路径")
 	}
 	if !strings.HasPrefix(frozenConfigURL, "/") {
@@ -224,6 +226,11 @@ func (s *server) prepareDerivedConfig(code, frozenConfigURL, groupsJSON, exclude
 	out, err := deriveINI(src, groups, exclude)
 	if err != nil {
 		return "", err
+	}
+	if len(rbLines) > 0 {
+		if out, err = appendRuleBaseLines(out, rbLines); err != nil {
+			return "", err
+		}
 	}
 	dir := filepath.Join(s.cfg.dataDir, "derived")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -253,21 +260,37 @@ const (
 	deriveErrDetail = "这条短链配置了自定义分组，服务器在生成配置时遇到错误。请稍后重试；如果持续出现，请联系部署者。"
 )
 
-// handleInternalDerived GET /internal/derived/{code}：引擎专用（回环 listener，nginx 不
+// handleInternalDerived GET /internal/derived/{name}：引擎专用（回环 listener，nginx 不
 // 路由），serve 派生 ini。照 /internal/sub/ 模式但无 TTL——短链存活期内可重复拉取；
 // miss → 404（引擎侧表现为拉取失败，sidecar 日志有根因）。
+// v1.7.0 DNS 透传增补：除既有 {code} 形态（读 code+".ini"——短码 base62 无点，存量
+// URL 逐字节兼容）外，接受带后缀文件名（dns-{preset}-{hash}.ini/.tpl/.yaml——rule_base
+// 只认 http，派生 base 也走本端点回环 serve，闸门 G1 实测）；后缀白名单外的形态一律 404。
 func (s *server) handleInternalDerived(w http.ResponseWriter, r *http.Request) {
-	code := strings.TrimPrefix(r.URL.Path, "/internal/derived/")
-	if code == "" || strings.ContainsAny(code, `/\`) || strings.Contains(code, "..") {
+	name := strings.TrimPrefix(r.URL.Path, "/internal/derived/")
+	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
 		http.NotFound(w, r)
 		return
 	}
-	data, err := os.ReadFile(filepath.Join(s.cfg.dataDir, "derived", code+".ini"))
+	file := name
+	switch filepath.Ext(name) {
+	case ".ini", ".tpl", ".yaml":
+		// 带后缀 = v1.7.0 派生物（dns 三件套），文件名即真名
+	default:
+		// 无白名单后缀 = 既有 {code} 形态，落盘文件名补 .ini（存量 URL 兼容）
+		if strings.Contains(name, ".") {
+			http.NotFound(w, r)
+			return
+		}
+		file = name + ".ini"
+	}
+	data, err := os.ReadFile(filepath.Join(s.cfg.dataDir, "derived", file))
 	if err != nil {
-		log.Printf("internal-derived miss code=%s***", logCode(code))
+		log.Printf("internal-derived miss name=%s***", logCode(name))
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	ct := "text/plain; charset=utf-8"
+	w.Header().Set("Content-Type", ct)
 	_, _ = w.Write(data)
 }

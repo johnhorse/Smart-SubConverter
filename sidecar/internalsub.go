@@ -63,21 +63,30 @@ func newInternalSubStore(cfg config) *internalSubStore {
 // 可拉的回环 URL。ctx 约束代拉全程（v1.4.0 M2：preview 侧整体预算从代拉起算；/s/ 侧传
 // r.Context()——客户端断开时代拉随之取消）。
 func (s *internalSubStore) fetchAndRegister(ctx context.Context, ua, sourceURL, sidecarBase string) (string, error) {
+	url, _, err := s.fetchAndRegisterContent(ctx, ua, sourceURL, sidecarBase)
+	return url, err
+}
+
+// fetchAndRegisterContent v1.7.0 DNS 透传增补：除回环 URL 外同时返回代拉到的订阅内容
+// （fetch 路径与 60s 缓存命中路径字节都在 entries 手里）——dns 提取需要机场原始字节
+// （twoStageConvert 第一段 mixed 展开会丢 dns 块，sidecar 必须在展开前捞住）。
+// 既有调用方（fetchAndRegister 薄包装）零扰动。
+func (s *internalSubStore) fetchAndRegisterContent(ctx context.Context, ua, sourceURL, sidecarBase string) (string, string, error) {
 	s.mu.Lock()
 	if e, ok := s.bySource[sourceURL]; ok && time.Now().Before(e.expires) {
 		s.mu.Unlock()
-		return sidecarBase + "/internal/sub/" + e.ref, nil
+		return sidecarBase + "/internal/sub/" + e.ref, e.content, nil
 	}
 	s.mu.Unlock()
 
 	body, err := s.fetch(ctx, ua, sourceURL)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
-		return "", err
+		return "", "", err
 	}
 	ref := hex.EncodeToString(buf)
 	s.mu.Lock()
@@ -85,7 +94,7 @@ func (s *internalSubStore) fetchAndRegister(ctx context.Context, ua, sourceURL, 
 	s.entries[ref] = internalSubEntry{ref: ref, content: body, expires: time.Now().Add(internalSubTTL)}
 	s.bySource[sourceURL] = s.entries[ref]
 	s.mu.Unlock()
-	return sidecarBase + "/internal/sub/" + ref, nil
+	return sidecarBase + "/internal/sub/" + ref, body, nil
 }
 
 // fetch 代拉：Go 抓取优先，失败时 exec curl 重试（v1.3.6）——实测部分机场 WAF 按 TLS 指纹

@@ -18,6 +18,8 @@
 
 > 增量修订（2026-11-03，v1.6.1 正则节点分组）：`groups[]` 每项增可选 `pattern` 字段（正则组；非空时优先于 `keywords`，PCRE 语法引擎侧解释，服务端只校长度 ≤256 与非法字符、不编译校验）；拉取期派生组行匹配表达式两态（关键词前瞻 AND / pattern 原样直通并自动拼 `(?i)`）；`groupsJSON` 键序 name→keywords→（pattern，存在时）→urlTest，关键词组序列化逐字节不变（存量指纹与库不受影响）。详见「groups 请求字段与归一化」节。
 
+> 增量修订（2026-11-04，v1.7.0 机场 DNS 透传）：**无 API 形状变化、无前端改动**——`GET /s/{code}` 拉取行为增强（机场订阅自带 dns 时转换产物带上机场 DNS）+ preview 探测同路 + 单段链统一 sidecar 代拉（加固）+ 新 env `PASS_THROUGH_DNS`（部署级逃生口，off = 所有路径逐字节回退 v1.6.x 行为）。详见「机场 DNS 透传（v1.7.0）」节。
+
 Sidecar 由 nginx 反代挂载在 `/api/*`；监听 `SIDECAR_PORT`（默认 8081，仅容器内回环）。注意：**不能用 `PORT`**——该 env 已被 Extended（subconverter）占用。
 
 ## GET /api/clients
@@ -349,6 +351,33 @@ gate3（模板组删减，7/7 PASS）：删业务组+规则回退逐条生效（
 - `user_version` 3→4 幂等迁移（schemaMigrations 只追加惯例）：`prefs_custom (sub_key TEXT PRIMARY KEY, groups TEXT NOT NULL, updated_at TEXT NOT NULL)` + `prefs_exclude (sub_key TEXT, preset_id TEXT, exclude TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (sub_key, preset_id))`，与 links 同库（`${DATA_DIR}/state.db`）
 - `groups` / `exclude` 列存规范化 JSON（空档案存 `[]`，列 NOT NULL——区别于 links 列的 NULL=无语义）；`updated_at` 为 RFC3339 UTC 时间戳
 
+## 机场 DNS 透传（v1.7.0）
+
+机场订阅自带 dns 信息（通常是机场自家 DoH，专门用于正确解析其节点域名）时，转换产物带上机场指定的 DNS，解决「拉到节点但节点域名解析不对、连不通」。设计定案与闸门实验记录见 `docs/designs/dns-passthrough.md`。**无 API 形状变化、无前端改动**——存量短链下次拉取即受益。
+
+### 生效范围与策略
+
+- **clash 系（clash/clashr/stash）**：机场 dns YAML 块**整块替换**产物 dns（含 fake-ip / nameserver-policy 等模式字段；闸门 G1/G3 实证引擎全字段保真、无白名单）；
+- **QX / Surge / Loon**：格式所限只翻译**解析服务器**（QX `server=` 每行一个 plain + `doh-server=` 单行逗号分隔；Surge/Loon `dns-server = ` / `doh-server = `；`doh-suffix` 机场语义未知不造）；
+- **其余 target（singbox/shadowrocket/v2ray 等）不透传**（非目标）；无 dns 机场自动 no-op。
+
+### /s/ 拉取行为变化（对客户端透明）
+
+1. sidecar 代拉订阅（两段式链既有行为扩展到单段链；UA 原样透传保留机场按 UA 的内容协商），从原始字节提取 dns（内容嗅探：clash YAML `dns:` 块 → QX `[dns]` 段 → Surge `[General]` dns 行，不按 UA 硬走）；
+2. 派生物三件套落 `{DATA_DIR}/derived/`：`dns-{preset}-{hash}.tpl`（引擎 all_base.tpl 改写，运行时读不 vendor）+ `dns-{preset}-{hash}.yaml`（stash 独立纯 YAML）+ `dns-{preset}-{hash}.ini`（档位快照 ini + rule_base 行，共享幂等覆盖写）；ext ini 键 = `clash_rule_base` / `surge_rule_base` / `loon_rule_base` / `quanx_rule_base` / `stash_rule_base`（全部指回环 URL——引擎 rule_base 只认 http，闸门实测）；
+3. 引擎 `config=` 改指派生 ini；带 groups/exclude 的链同一根 `{code}.ini` 追加 rule_base 行（组行与 rule_base 行叠加共存）；
+4. preview 探测与拉取同路（探测也代拉 + 派生 config，避免「探测绿、拉取挂」路径分叉）。
+
+### 失败语义（与 groups 派生 fail-closed 相反：fail-open）
+
+- dns 是尽力增强：提取失败 / 机场无 dns / 写入自检失败 → no-op 用原 config（脱敏日志 `dns_passthrough=absent|error|skip`），**绝不因透传挂掉拉取**；引擎模板**单家段漂移只降级该家**（该家输出维持模板默认 = 现状行为，其余家族照常透传），全家族漂移才整体 no-op；
+- 豁免档（`PRESET_URL` 覆盖、无本地快照 ini 作底）与出树 DATA_DIR → 跳过（与自定义分组能力位同款边界）；
+- 派生 base 写入前自检（段结构完整 + 注入内容在）：宁可漏透传，不可让引擎拉到坏 base。
+
+### env 逃生口
+
+`PASS_THROUGH_DNS`（默认 on；`off`/`0`/`false` = 关闭）：关闭时**所有路径逐字节回退 v1.6.x 行为**——单段链照旧传原始订阅 URL 给引擎自拉、不提取不注入、两段式不带 rule_base。
+
 ## GET /api/health
 
 ```json
@@ -396,6 +425,7 @@ gate3（模板组删减，7/7 PASS）：删业务组+规则回退逐条生效（
 | `PROBE_TIMEOUT` | `30s` | preview 探测 sidecar→Extended 超时（v1.3.0 前硬编码 10s；慢网络下预检不再 10 秒判死） |
 | `DATA_DIR` | `/base/data` | SQLite `state.db` 与运行时快照 `rules/` 所在目录（volume 挂载点；**必须位于 /base 树内**引擎才可读本地快照，不在树内则快照本地化禁用并告警；单测指向 tmp） |
 | `SUB_PROXY_TIMEOUT` | `120s` | `/s/` 代理 sidecar→Extended 超时（v1.2.0 默认 30s；国内慢网络实测不够。快照本地化后常规请求应快，此值兜订阅源慢的情况） |
+| `PASS_THROUGH_DNS` | 空（on） | v1.7.0：机场 DNS 透传总开关。`off`/`0`/`false`（大小写不敏感）= 关闭——所有路径逐字节回退 v1.6.x 行为（单段照旧引擎自拉、不提取不注入）；其余值/未设 = 开启（默认全生效，存量短链下次拉取即受益） |
 
 ## nginx 路由（镜像层，与契约相关部分）
 

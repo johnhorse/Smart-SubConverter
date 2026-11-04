@@ -20,6 +20,10 @@
 | 自定义分组（v1.5.0）· Clash 系 | clash | 已验证 | — | 2026-10-28 · 真机验收通过（170 节点机场，多词 AND 组/单词 url-test 组/全 select 组接线=主组+Ai平台等处处可选；S5 冒烟断言同路） |
 | 自定义分组（v1.5.0）· Quantumult X | quanx | 未验证 | — | 派生与 clash 同路（追加组闸门实证保留，2026-10-27；[policy] static 形态）；真机未单独实测 |
 | 模板群组删减（v1.5.1）· 分组管理 UI | — | 已验证 | — | 2026-10-31 · VPS v1.5.1 真机验收通过（分组管理可删可加，功能正常） |
+| 机场 DNS 透传（v1.7.0）· Clash 系 | clash | 未验证 | — | 派生 base 闸门 G1/G3 实证（2026-11-04：clash_rule_base 整块替换、全字段保真，dns.go 产物真引擎复验五家全过）；真机验收前标未验证 |
+| 机场 DNS 透传（v1.7.0）· Quantumult X | quanx | 未验证 | — | quanx_rule_base 翻译行（server= 每行一个 + doh-server= 单行逗号）闸门实证；真机未实测 |
+| 机场 DNS 透传（v1.7.0）· Surge / Loon | surge/loon | 未验证 | — | surge/loon_rule_base 翻译行（dns-server = / doh-server =）闸门实证；真机未实测 |
+| 机场 DNS 透传（v1.7.0）· Stash | stash | 未验证 | — | stash_rule_base 纯 YAML dns 顶层块替换闸门实证；真机未实测（stash 需显式 target，引擎 auto 不识别其 UA） |
 
 「深链」列 = 结果页「在 XX 中打开」按钮（唤起对应 App 导入），仅 iOS 五家提供，拼装口径见 [docs/implementation/api-contract.md](implementation/api-contract.md)；真机实测后回填。
 

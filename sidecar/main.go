@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -162,6 +163,9 @@ type config struct {
 	snapshotProxy         *url.URL      // 规则/模板上游访问代理（SNAPSHOT_PROXY，v1.3.1）
 	subscriptionProxy     *url.URL      // 订阅代拉专用代理（SUBSCRIPTION_PROXY，v1.3.8）；与 snapshotProxy 独立
 	sidecarBase           string        // sidecar 自身回环基址（引擎拉内部订阅端点用；main 按 SIDECAR_PORT 填充）
+	passThroughDNS        bool          // 机场 DNS 透传（v1.7.0，PASS_THROUGH_DNS；默认 on，off = 所有路径逐字节回退现状）
+	engineTplPath         string        // 引擎混合 base 模板路径（v1.7.0 运行时读取不 vendor；测试注入 testdata）
+	engineStashPath       string        // 引擎 stash 独立模板路径（纯 YAML；stash 派生 base 的底）
 }
 
 func loadConfigFromEnv() config {
@@ -181,6 +185,15 @@ func loadConfigFromEnv() config {
 		dataDir:               getOr("DATA_DIR", "/base/data"),
 		subProxyTimeout:       defaultSubProxyTimeout,
 		presetRefreshInterval: defaultPresetRefreshInterval,
+		passThroughDNS:        true, // v1.7.0 默认全生效；PASS_THROUGH_DNS=off 为部署级逃生口
+		engineTplPath:         defaultEngineTplPath,
+		engineStashPath:       defaultEngineStashPath,
+	}
+	// v1.7.0 PASS_THROUGH_DNS：off/0/false（大小写不敏感）→ 关闭（所有路径逐字节回退
+	// 现状行为：单段照旧传原始 URL、不提取不注入）；其余值（含未设）→ on
+	switch strings.ToLower(os.Getenv("PASS_THROUGH_DNS")) {
+	case "off", "0", "false":
+		c.passThroughDNS = false
 	}
 	parseDur := func(name, def string, dst *time.Duration) {
 		if raw := os.Getenv(name); raw != "" {
