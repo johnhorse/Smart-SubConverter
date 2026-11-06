@@ -1,11 +1,11 @@
 {
-  "pulledAt": "2026-11-01T13:21:57Z",
-  "upstream": {"repo": "ACL4SSR/ACL4SSR", "branch": "master", "commit": "c15bf546085b825afd238e211f750bb7868c7132"},
+  "pulledAt": "2026-11-06T23:22:27Z",
+  "upstream": {"repo": "ACL4SSR/ACL4SSR", "branch": "master", "commit": "bdc102fc54ba64f6ecaf3c73248100fd7af32559"},
   "files": {
     "ACL4SSR_Online.ini": "26f7445cb4e91f9c21b92de5029aca9126e4facca49858763bda4cf2dadb0afb",
     "ACL4SSR_Online_Full_AdblockPlus.ini": "7ce2b39f5f844df8d06e6267907ae00a3a9e042283712236890f7ec87338b027",
     "ACL4SSR_Online_Full_MultiMode.ini": "c9cc1c2000588919cfd63c0d34201a8f52985857f42cc010c56f3f7354d7bb92",
-    "AI.list": "6a0b3858b19bd318fc2d631872bc2392f07e8ae8f8024b95b44f26efc7f96b9e",
+    "AI.list": "63e70895ac8c04c3b28965dc0b4ba9ceb3a1313a66b49487ed96005debc97e1e",
     "Apple.list": "7b2e60cd0bf3c4bfb1369890d39cc3783bdfcb016089b78acee0ff6f0d4e51c5",
     "Bahamut.list": "5c2b875abd3cec4d11612af639163a9b9f68c5828ad42793e7f21bc50f75169c",
     "BanAD.list": "27a5f6d018d428409d8da5d9f390a46298d505ae4941bb8172f052055abe7262",
