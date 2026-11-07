@@ -37,11 +37,13 @@ export interface ClientsResponse {
 
 // v1.5.0 分组意图（groupsJSON 键序 name→keywords→urlTest 由序列化保证）
 // v1.6.1 增补：可选 pattern（正则组 keywords 为 []；字段缺席 = 关键词组，存量兼容）
+// v1.9.0 增补：可选 backupRules（备用机场 Tag -> 自定义匹配规则）
 export interface NodeGroup {
   name: string
   keywords: string[]
   pattern?: string
   urlTest: boolean
+  backupRules?: Record<string, string>
 }
 
 // preview 响应回显的生效档位（bad_preset 时为 null）

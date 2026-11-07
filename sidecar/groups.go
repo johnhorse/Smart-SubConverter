@@ -19,31 +19,39 @@ const (
 	maxExcludeRunes = 64
 )
 
-// nodeGroup 用户组意图（契约四字段，v1.6.1 前三字段）；keywords 为字面量 substring
+// nodeGroup 用户组意图（契约四字段，v1.6.1 前三字段，v1.9.0 增补 backupRules）；keywords 为字面量 substring
 // AND 语义，非正则（派生侧每词 regexp.QuoteMeta 转义后拼前瞻正则，计数与前端字面
 // 高亮等价——gate2）；pattern 为正则模式（前端正则 Tab，pattern 优先于 keywords 生效，
-// 自带 PCRE 语法由引擎侧解释）。两者至少一个有效
+// 自带 PCRE 语法由引擎侧解释）。两者至少一个有效。backupRules 为备用机场自定义替补匹配规则。
 type nodeGroup struct {
-	Name     string   `json:"name"`
-	Keywords []string `json:"keywords"`
-	Pattern  string   `json:"pattern,omitempty"` // 空 = 关键词组（序列化省略，存量指纹逐字节不变）
-	URLTest  bool     `json:"urlTest"`
+	Name        string            `json:"name"`
+	Keywords    []string          `json:"keywords"`
+	Pattern     string            `json:"pattern,omitempty"` // 空 = 关键词组（序列化省略，存量指纹逐字节不变）
+	URLTest     bool              `json:"urlTest"`
+	BackupRules map[string]string `json:"backupRules,omitempty"` // v1.9.0: key 为备用机场 Tag，value 为替补匹配规则
 }
 
 // UnmarshalJSON 旧格式容错（试运行期存量）：keyword 单字段且无 keywords → 当单词组；
 // 请求解码与 parseGroupsJSON（库存旧 JSON）共用此路径。写入侧只写新格式（默认 Marshal）
 func (g *nodeGroup) UnmarshalJSON(b []byte) error {
 	var aux struct {
-		Name     string    `json:"name"`
-		Keywords []string  `json:"keywords"`
-		Pattern  string    `json:"pattern"`
-		URLTest  bool      `json:"urlTest"`
-		Keyword  *string   `json:"keyword"`
+		Name        string            `json:"name"`
+		Keywords    []string          `json:"keywords"`
+		Pattern     string            `json:"pattern"`
+		URLTest     bool              `json:"urlTest"`
+		Keyword     *string           `json:"keyword"`
+		BackupRules map[string]string `json:"backupRules"`
 	}
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
-	*g = nodeGroup{Name: aux.Name, Keywords: aux.Keywords, Pattern: aux.Pattern, URLTest: aux.URLTest}
+	*g = nodeGroup{
+		Name:        aux.Name,
+		Keywords:    aux.Keywords,
+		Pattern:     aux.Pattern,
+		URLTest:     aux.URLTest,
+		BackupRules: aux.BackupRules,
+	}
 	if len(g.Keywords) == 0 && aux.Keyword != nil {
 		g.Keywords = []string{*aux.Keyword}
 	}
@@ -51,7 +59,7 @@ func (g *nodeGroup) UnmarshalJSON(b []byte) error {
 }
 
 // normalizeGroups 请求组归一化：name/每词/pattern 两端 trim（trim 后落定，校验/存储/
-// groupsJSON 都用规范化值）
+// groupsJSON 都用规范化值）；v1.9.0: BackupRules key 与 value 做 trim，剔除空 value
 func normalizeGroups(raw []nodeGroup) []nodeGroup {
 	out := make([]nodeGroup, 0, len(raw))
 	for _, g := range raw {
@@ -62,6 +70,21 @@ func normalizeGroups(raw []nodeGroup) []nodeGroup {
 		}
 		g.Keywords = kw
 		g.Pattern = strings.TrimSpace(g.Pattern)
+		if len(g.BackupRules) > 0 {
+			norm := make(map[string]string, len(g.BackupRules))
+			for k, v := range g.BackupRules {
+				tk := strings.TrimSpace(k)
+				tv := strings.TrimSpace(v)
+				if tk != "" && tv != "" {
+					norm[tk] = tv
+				}
+			}
+			if len(norm) > 0 {
+				g.BackupRules = norm
+			} else {
+				g.BackupRules = nil
+			}
+		}
 		out = append(out, g)
 	}
 	return out
@@ -71,6 +94,7 @@ func normalizeGroups(raw []nodeGroup) []nodeGroup {
 // 非空、各 ≤32 rune、禁反引号与控制字符（U+0000–U+001F、U+007F）、keywords 1..5 词、
 // name 组内不重复、≤10 项；v1.6.1：keywords 与 pattern 至少一个有效，pattern ≤256 rune、
 // 禁反引号与控制字符（\r \n 属控制字符自然涵盖，防破坏 ini 组行格式）。
+// v1.9.0：BackupRules 每项校验：key ≤32 rune、value ≤256 rune，禁反引号与控制字符。
 // 铁律：绝不用 regexp.Compile 校验 pattern——Go regexp 是 RE2，不支持 Perl 前瞻
 // (?=...) / (?!...)，Compile 会误拒引擎侧完全合法的 PCRE；语法合法性由前端
 // JS RegExp 实时校验把关，服务端只做长度与非法字符
@@ -113,6 +137,14 @@ func validateGroups(gs []nodeGroup) error {
 		}
 		if g.Pattern != "" {
 			if err := check("pattern", g.Pattern, maxPatternRunes); err != nil {
+				return err
+			}
+		}
+		for k, v := range g.BackupRules {
+			if err := check("backupRule tag", k, maxGroupRunes); err != nil {
+				return err
+			}
+			if err := check("backupRule pattern", v, maxPatternRunes); err != nil {
 				return err
 			}
 		}

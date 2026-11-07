@@ -1489,4 +1489,127 @@ https://b.com/sub|https://b.com/sub2`
       expect(conv.mainTag.value).toBe('')
     })
   })
+
+  // ---- v1.9.0：多机场同区容灾与替补规则（backupRules）----
+  describe('多机场同区容灾与替补规则（v1.9.0）', () => {
+    it('本地草稿快照携带 backupRules：保存到 localStorage，恢复时完整保留', async () => {
+      vi.useFakeTimers()
+      try {
+        const backupIntent = [
+          {
+            name: '美国节点',
+            keywords: ['美', 'US'],
+            urlTest: true,
+            backupRules: { 备用: 'SiliconValley|Portland' },
+          },
+        ]
+        const conv = setup()
+        conv.inputUrl.value = SUB
+        conv.groups.value = backupIntent
+        await vi.advanceTimersByTimeAsync(300)
+
+        const snap = getSnapshot(SUB)
+        expect(snap?.groups[0].backupRules).toEqual({ 备用: 'SiliconValley|Portland' })
+
+        // 切换为空 URL，再切回 SUB 触发本地恢复
+        conv.inputUrl.value = ''
+        expect(conv.groups.value).toEqual([])
+        conv.inputUrl.value = SUB
+        await tickUntil(() => conv.groups.value.length === 1)
+        expect(conv.groups.value[0].backupRules).toEqual({ 备用: 'SiliconValley|Portland' })
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('服务端偏好回填携带 backupRules：query 回传的 backupRules 完整落位到 groups', async () => {
+      vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+      const conv = setup()
+      await conv.loadClients()
+      conv.inputUrl.value = SUB
+      vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['[主力] 香港 01'] })
+      const remoteCustomGroups = [
+        {
+          name: '美国节点',
+          keywords: ['美'],
+          urlTest: false,
+          backupRules: { 备用: 'SiliconValley' },
+        },
+      ]
+      vi.mocked(fetchPreferences).mockResolvedValue({
+        custom_groups: remoteCustomGroups,
+        exclude: ['🇰🇷 韩国节点'],
+      })
+
+      conv.groupsOpen.value = true
+      await vi.waitFor(() => expect(conv.groups.value).toHaveLength(1))
+      expect(conv.groups.value[0].backupRules).toEqual({ 备用: 'SiliconValley' })
+      expect(conv.restoreNoticeText.value).toBe('已恢复 1 个自定义分组、剔除 1 个模板组')
+    })
+
+    it('撤销回填支持 backupRules：回滚时恢复回填前的 backupRules', async () => {
+      vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+      const conv = setup()
+      await conv.loadClients()
+      conv.inputUrl.value = SUB
+      const beforeGroups = [
+        {
+          name: '本地旧组',
+          keywords: ['旧'],
+          urlTest: false,
+          backupRules: { 备用: 'LocalBackup' },
+        },
+      ]
+      conv.groups.value = beforeGroups
+      vi.mocked(fetchPreview).mockResolvedValue({ ...okResponse, nodes: ['A'] })
+      vi.mocked(fetchPreferences).mockResolvedValue({
+        custom_groups: [
+          {
+            name: '远端组',
+            keywords: ['远端'],
+            urlTest: true,
+            backupRules: { 备用: 'RemoteBackup' },
+          },
+        ],
+        exclude: [],
+      })
+
+      conv.groupsOpen.value = true
+      await vi.waitFor(() => expect(conv.groups.value[0].name).toBe('远端组'))
+      expect(conv.groups.value[0].backupRules).toEqual({ 备用: 'RemoteBackup' })
+
+      conv.undoRestore()
+      expect(conv.groups.value).toEqual(beforeGroups)
+      expect(conv.groups.value[0].backupRules).toEqual({ 备用: 'LocalBackup' })
+    })
+
+    it('提交预览带 backupRules：groups.backupRules 正常传给 fetchPreview', async () => {
+      vi.mocked(fetchClients).mockResolvedValueOnce(capableClients)
+      const conv = setup()
+      await conv.loadClients()
+      conv.inputUrl.value = SUB
+      conv.selectPreset('default')
+      const groupsWithBackup = [
+        {
+          name: '美国节点',
+          keywords: ['美'],
+          urlTest: true,
+          backupRules: { 备用: 'SiliconValley' },
+        },
+      ]
+      conv.groups.value = groupsWithBackup
+      vi.mocked(fetchPreview).mockResolvedValueOnce(okResponse)
+
+      await conv.submit()
+
+      expect(fetchPreview).toHaveBeenLastCalledWith(
+        SUB,
+        'auto',
+        'default',
+        {
+          groups: groupsWithBackup,
+        },
+      )
+    })
+  })
 })

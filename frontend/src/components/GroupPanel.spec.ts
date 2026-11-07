@@ -41,6 +41,7 @@ function mountPanel(initial: Partial<PanelProps> = {}, attach = false) {
     draftMode: 'keyword' as PanelProps['draftMode'],
     draftPattern: '',
     canClear: false,
+    backupTags: [] as string[],
     ...initial,
   })
   const Host = defineComponent({
@@ -919,5 +920,229 @@ describe('GroupPanel 正则匹配模式（v1.6.1）', () => {
     await wrapper.setProps({ nodes: ['新节点-01'] })
     await nextTick()
     expect(wrapper.find('input[aria-label="分组名称"]').exists()).toBe(false)
+  })
+})
+
+describe('GroupPanel 替补规则交互（v1.9.0）', () => {
+  it('backupTags 为空或缺席：不渲染「⚙️ 替补规则（可选）」按钮', () => {
+    const wrapper = mountPanel()
+    expect(wrapper.find('.backup-toggle').exists()).toBe(false)
+    expect(wrapper.find('.backup-rules-section').exists()).toBe(false)
+  })
+
+  it('backupTags 非空：渲染「⚙️ 替补规则（可选）」折叠按钮，默认收起', () => {
+    const wrapper = mountPanel({ backupTags: ['备用'] })
+    const btn = wrapper.find('.backup-toggle')
+    expect(btn.exists()).toBe(true)
+    expect(btn.text()).toContain('⚙️ 替补规则（可选）')
+    expect(btn.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('.backup-rules-body').exists()).toBe(false)
+  })
+
+  it('点击「⚙️ 替补规则（可选）」展开与收起，展示各备用 Tag 输入框与 placeholder', async () => {
+    const wrapper = mountPanel({ backupTags: ['备用A', '备用B'] })
+    await wrapper.find('.backup-toggle').trigger('click')
+    expect(wrapper.find('.backup-rules-body').exists()).toBe(true)
+
+    const inputs = wrapper.findAll('.backup-rule-input')
+    expect(inputs).toHaveLength(2)
+    expect(inputs[0].attributes('placeholder')).toBe('留空自动继承主力规则')
+    expect(inputs[0].attributes('aria-label')).toBe('[备用A] 替补匹配规则')
+    expect(inputs[1].attributes('aria-label')).toBe('[备用B] 替补匹配规则')
+    expect(wrapper.text()).toContain('[备用A] 替补匹配规则')
+    expect(wrapper.text()).toContain('[备用B] 替补匹配规则')
+
+    // 再次点击收起
+    await wrapper.find('.backup-toggle').trigger('click')
+    expect(wrapper.find('.backup-rules-body').exists()).toBe(false)
+  })
+
+  it('新建分组时填写替补规则：非空规则写入 backupRules[tag]，成组后折叠收起且清空草稿', async () => {
+    const wrapper = mountPanel({ backupTags: ['备用'] })
+    await wrapper.find('.backup-toggle').trigger('click')
+    const input = wrapper.find('input[aria-label="[备用] 替补匹配规则"]')
+    await input.setValue('SiliconValley|Portland')
+
+    await enterNaming(wrapper, ['美国'])
+    await wrapper.find('.group-confirm').trigger('click')
+
+    expect(wrapper.emitted('update:modelValue')![0][0]).toEqual([
+      {
+        name: '美国',
+        keywords: ['美国'],
+        urlTest: false,
+        backupRules: { 备用: 'SiliconValley|Portland' },
+      },
+    ])
+    // 成组后折叠收起
+    expect(wrapper.find('.backup-rules-body').exists()).toBe(false)
+  })
+
+  it('新建分组时替补规则全留空（或纯空格）：不写入 backupRules 属性', async () => {
+    const wrapper = mountPanel({ backupTags: ['备用'] })
+    await wrapper.find('.backup-toggle').trigger('click')
+    await wrapper.find('input[aria-label="[备用] 替补匹配规则"]').setValue('   ')
+
+    await enterNaming(wrapper, ['美国'])
+    await wrapper.find('.group-confirm').trigger('click')
+
+    const group = (wrapper.emitted('update:modelValue')![0][0] as NodeGroup[])[0]
+    expect(group.name).toBe('美国')
+    expect(group.backupRules).toBeUndefined()
+  })
+
+  it('多备用 Tag 混合输入：非空存入、空白 tag 忽略', async () => {
+    const wrapper = mountPanel({ backupTags: ['备用A', '备用B'] })
+    await wrapper.find('.backup-toggle').trigger('click')
+    await wrapper.find('input[aria-label="[备用A] 替补匹配规则"]').setValue('US-West')
+    await wrapper.find('input[aria-label="[备用B] 替补匹配规则"]').setValue('   ')
+
+    await enterNaming(wrapper, ['美国'])
+    await wrapper.find('.group-confirm').trigger('click')
+
+    expect(wrapper.emitted('update:modelValue')![0][0]).toEqual([
+      {
+        name: '美国',
+        keywords: ['美国'],
+        urlTest: false,
+        backupRules: { 备用A: 'US-West' },
+      },
+    ])
+  })
+
+  it('已建分组卡片展示：配置了替补规则展示「替补: [备用Tag] 规则」，未配置不展示', () => {
+    const wrapper = mountPanel({
+      backupTags: ['备用'],
+      modelValue: [
+        { name: '美国节点', keywords: ['美'], urlTest: false, backupRules: { 备用: 'SiliconValley' } },
+        { name: '日本节点', keywords: ['日'], urlTest: false },
+      ],
+    })
+    const rows = wrapper.findAll('.group-row')
+    expect(rows[0].find('.group-backup-summary').text()).toBe('替补: [备用] SiliconValley')
+    expect(rows[1].find('.group-backup-summary').exists()).toBe(false)
+  })
+
+  it('已建分组编辑：点「编辑」展开编辑表单，已有 backupRules 自动展开，保存更新', async () => {
+    const wrapper = mountPanel({
+      backupTags: ['备用'],
+      modelValue: [
+        { name: '美国节点', keywords: ['美'], urlTest: false, backupRules: { 备用: 'OldRule' } },
+      ],
+    })
+    await wrapper.find('button[aria-label="编辑分组 美国节点"]').trigger('click')
+    expect(wrapper.find('.group-edit-box').exists()).toBe(true)
+
+    // 已有替补规则自动展开，无需二次点击
+    expect(wrapper.find('.group-edit-box .backup-rules-body').exists()).toBe(true)
+    const input = wrapper.find('.group-edit-box input[aria-label="[备用] 替补匹配规则"]')
+    expect((input.element as HTMLInputElement).value).toBe('OldRule')
+
+    await input.setValue('NewRule')
+    await wrapper.find('.group-save-btn').trigger('click')
+
+    expect(wrapper.emitted('update:modelValue')![0][0]).toEqual([
+      { name: '美国节点', keywords: ['美'], urlTest: false, backupRules: { 备用: 'NewRule' } },
+    ])
+    expect(wrapper.find('.group-edit-box').exists()).toBe(false)
+  })
+
+  it('已建分组编辑取消：点「取消」还原，不 emit update:modelValue', async () => {
+    const wrapper = mountPanel({
+      backupTags: ['备用'],
+      modelValue: [
+        { name: '美国节点', keywords: ['美'], urlTest: false, backupRules: { 备用: 'OldRule' } },
+      ],
+    })
+    await wrapper.find('button[aria-label="编辑分组 美国节点"]').trigger('click')
+    await wrapper.find('.group-edit-box .group-cancel').trigger('click')
+    expect(wrapper.find('.group-edit-box').exists()).toBe(false)
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+  })
+
+  it('已建分组编辑清空规则：保存后 backupRules 被移除', async () => {
+    const wrapper = mountPanel({
+      backupTags: ['备用'],
+      modelValue: [
+        { name: '美国节点', keywords: ['美'], urlTest: false, backupRules: { 备用: 'OldRule' } },
+      ],
+    })
+    await wrapper.find('button[aria-label="编辑分组 美国节点"]').trigger('click')
+    await wrapper.find('.group-edit-box input[aria-label="[备用] 替补匹配规则"]').setValue('')
+    await wrapper.find('.group-save-btn').trigger('click')
+
+    expect(wrapper.emitted('update:modelValue')![0][0]).toEqual([
+      { name: '美国节点', keywords: ['美'], urlTest: false },
+    ])
+  })
+
+  it('节点列表变更（换订阅重探）：退出编辑状态并清空替补草稿', async () => {
+    const wrapper = mountPanel({
+      backupTags: ['备用'],
+      modelValue: [
+        { name: '美国节点', keywords: ['美'], urlTest: false, backupRules: { 备用: 'OldRule' } },
+      ],
+    })
+    await wrapper.find('button[aria-label="编辑分组 美国节点"]').trigger('click')
+    expect(wrapper.find('.group-edit-box').exists()).toBe(true)
+
+    // 模拟换订阅 nodes 改变
+    await wrapper.setProps({ nodes: ['新节点-01'] })
+    await nextTick()
+    expect(wrapper.find('.group-edit-box').exists()).toBe(false)
+  })
+
+  it('替补规则输入非法正则或反引号时：展示错误提示并阻止成组', async () => {
+    const wrapper = mountPanel({ backupTags: ['备用'] })
+    await addWords(wrapper, ['香港'])
+    await wrapper.find('.backup-toggle').trigger('click')
+    const input = wrapper.find('input[aria-label="[备用] 替补匹配规则"]')
+
+    // 1. 未闭合括号非法正则
+    await input.setValue('(unclosed')
+    expect(wrapper.find('.backup-rule-error').text()).toBe('正则语法有误，检查括号与转义')
+
+    // 成组按钮应为 disabled 且无法进入命名
+    const confirmBtn = wrapper.find('.group-confirm')
+    expect(confirmBtn.attributes('disabled')).toBeDefined()
+    await confirmBtn.trigger('click')
+    expect(wrapper.find('input[aria-label="分组名称"]').exists()).toBe(false)
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+
+    // 2. 含反引号
+    await input.setValue('has`backtick')
+    expect(wrapper.find('.backup-rule-error').text()).toBe('不能包含反引号或控制字符')
+    expect(wrapper.find('.group-confirm').attributes('disabled')).toBeDefined()
+    await wrapper.find('.group-confirm').trigger('click')
+    expect(wrapper.find('input[aria-label="分组名称"]').exists()).toBe(false)
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+
+    // 3. 修正后恢复可成组
+    await input.setValue('valid-regex')
+    expect(wrapper.find('.backup-rule-error').exists()).toBe(false)
+    await wrapper.find('.group-confirm').trigger('click')
+    await nextTick()
+    // 进入命名步骤
+    expect(wrapper.find('input[aria-label="分组名称"]').exists()).toBe(true)
+    await wrapper.find('.group-confirm').trigger('click')
+    expect(wrapper.emitted('update:modelValue')).toBeDefined()
+  })
+
+  it('编辑状态下替补规则非法时：展示错误提示并阻止保存', async () => {
+    const wrapper = mountPanel({
+      backupTags: ['备用'],
+      modelValue: [
+        { name: '美国节点', keywords: ['美'], urlTest: false, backupRules: { 备用: 'Valid' } },
+      ],
+    })
+    await wrapper.find('button[aria-label="编辑分组 美国节点"]').trigger('click')
+    const input = wrapper.find('.group-edit-box input[aria-label="[备用] 替补匹配规则"]')
+
+    await input.setValue('(?invalid')
+    expect(wrapper.find('.group-edit-box .backup-rule-error').text()).toBe('正则语法有误，检查括号与转义')
+
+    await wrapper.find('.group-save-btn').trigger('click')
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect(wrapper.find('.group-edit-box').exists()).toBe(true)
   })
 })

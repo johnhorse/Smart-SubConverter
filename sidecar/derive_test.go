@@ -633,7 +633,7 @@ func TestDeriveININoExcludeByteIdentical(t *testing.T) {
 	}
 }
 
-// 多机场专属组与 🔯 机场容灾 策略组生成与注入
+// 多机场专属组与 🔯 机场容灾 策略组生成与注入（v1.9.0 注入收窄与模板地区组自动容灾）
 func TestDeriveAirportGroups(t *testing.T) {
 	src := readFixture(t, "ACL4SSR_Online_Full_MultiMode.ini")
 	airportTags := []string{"主力", "备用"}
@@ -658,12 +658,97 @@ func TestDeriveAirportGroups(t *testing.T) {
 		t.Errorf("缺少机场容灾组:\n%s", s)
 	}
 
-	// 检查 select 组（如 🚀 节点选择、💬 Ai平台）是否把 []🔯 机场容灾 放在首位
+	// v1.9.0 收窄注入：仅主入口（含「节点选择」）注入 []🔯 机场容灾，具体业务组（💬 Ai平台、🌍 国外媒体等）绝不注入
 	if !strings.Contains(s, "custom_proxy_group=🚀 节点选择`select`[]🔯 机场容灾`") {
 		t.Errorf("主组首位应为 []🔯 机场容灾:\n%s", s)
 	}
-	if !strings.Contains(s, "custom_proxy_group=💬 Ai平台`select`[]🔯 机场容灾`") {
-		t.Errorf("Ai平台组首位应为 []🔯 机场容灾:\n%s", s)
+	if strings.Contains(s, "custom_proxy_group=💬 Ai平台`select`[]🔯 机场容灾`") {
+		t.Errorf("具体业务组（💬 Ai平台）绝不应注入 []🔯 机场容灾:\n%s", s)
+	}
+	if strings.Contains(s, "custom_proxy_group=🌍 国外媒体`select`[]🔯 机场容灾`") {
+		t.Errorf("具体业务组（🌍 国外媒体）绝不应注入 []🔯 机场容灾:\n%s", s)
+	}
+
+	// 检查模板原生地区测速组重写为 fallback 容灾组
+	wantHKPrimary := "custom_proxy_group=⚡ [主力] 🇭🇰 香港节点`url-test`(?i)(?=.*\\[主力\\])(?=.*(?:(港|HK|hk|Hong Kong|HongKong|hongkong)))`http://www.gstatic.com/generate_204`300,,50"
+	wantHKBackup := "custom_proxy_group=⚡ [备用] 🇭🇰 香港节点`url-test`(?i)(?=.*\\[备用\\])(?=.*(?:(港|HK|hk|Hong Kong|HongKong|hongkong)))`http://www.gstatic.com/generate_204`300,,50"
+	wantHKFallback := "custom_proxy_group=🇭🇰 香港节点`fallback`[]⚡ [主力] 🇭🇰 香港节点`[]⚡ [备用] 🇭🇰 香港节点`http://www.gstatic.com/generate_204`300,,50"
+	if !strings.Contains(s, wantHKPrimary) {
+		t.Errorf("缺少主力香港节点子组:\n%s", s)
+	}
+	if !strings.Contains(s, wantHKBackup) {
+		t.Errorf("缺少备用香港节点子组:\n%s", s)
+	}
+	if !strings.Contains(s, wantHKFallback) {
+		t.Errorf("缺少香港节点 fallback 容灾组:\n%s", s)
+	}
+
+	// 检查非地区测速组（如 ♻️ 自动选择）不被错误重写为地区 fallback
+	if strings.Contains(s, "custom_proxy_group=⚡ [主力] ♻️ 自动选择") {
+		t.Errorf("♻️ 自动选择不应被重写为地区子组:\n%s", s)
+	}
+}
+
+// 多机场下自定义分组升级为 主备测速子组 + 顶层 fallback 组
+func TestDeriveMultiAirportCustomGroupsFallback(t *testing.T) {
+	src := readFixture(t, "ACL4SSR_Online_Full_MultiMode.ini")
+	airportTags := []string{"主力", "备用"}
+	groups := []nodeGroup{
+		{
+			Name:     "🇺🇸 美国专线",
+			Keywords: []string{"美", "US"},
+			URLTest:  true,
+			BackupRules: map[string]string{
+				"备用": "SiliconValley|Portland",
+			},
+		},
+		{
+			Name:    "HK-Direct",
+			Pattern: "HK|HongKong",
+			URLTest: false,
+			// 无 BackupRules，自动继承主力匹配
+		},
+	}
+
+	out, err := deriveINI(src, groups, nil, airportTags)
+	if err != nil {
+		t.Fatalf("deriveINI failed: %v", err)
+	}
+	s := string(out)
+
+	// 1. 组 1：urlTest=true，且带 BackupRules
+	wantG1Primary := "custom_proxy_group=⚡ [主力] 🇺🇸 美国专线`url-test`(?i)(?=.*\\[主力\\])(?=.*美)(?=.*US)`http://www.gstatic.com/generate_204`300,,50"
+	wantG1Backup := "custom_proxy_group=⚡ [备用] 🇺🇸 美国专线`url-test`(?i)(?=.*\\[备用\\])(?=.*(?:SiliconValley|Portland))`http://www.gstatic.com/generate_204`300,,50"
+	wantG1Fallback := "custom_proxy_group=🇺🇸 美国专线`fallback`[]⚡ [主力] 🇺🇸 美国专线`[]⚡ [备用] 🇺🇸 美国专线`http://www.gstatic.com/generate_204`300,,50"
+
+	if !strings.Contains(s, wantG1Primary) {
+		t.Errorf("缺少自定义组 1 主力测速子组:\n%s", s)
+	}
+	if !strings.Contains(s, wantG1Backup) {
+		t.Errorf("缺少自定义组 1 备用测速子组（BackupRules）:\n%s", s)
+	}
+	if !strings.Contains(s, wantG1Fallback) {
+		t.Errorf("缺少自定义组 1 顶层 fallback 组:\n%s", s)
+	}
+
+	// 2. 组 2：urlTest=false（主力为 select，备用为 url-test），未配置 BackupRules 继承主力 pattern
+	wantG2Primary := "custom_proxy_group=⚡ [主力] HK-Direct`select`(?i)(?=.*\\[主力\\])(?=.*(?:HK|HongKong))"
+	wantG2Backup := "custom_proxy_group=⚡ [备用] HK-Direct`url-test`(?i)(?=.*\\[备用\\])(?=.*(?:HK|HongKong))`http://www.gstatic.com/generate_204`300,,50"
+	wantG2Fallback := "custom_proxy_group=HK-Direct`fallback`[]⚡ [主力] HK-Direct`[]⚡ [备用] HK-Direct`http://www.gstatic.com/generate_204`300,,50"
+
+	if !strings.Contains(s, wantG2Primary) {
+		t.Errorf("缺少自定义组 2 主力 select 子组:\n%s", s)
+	}
+	if !strings.Contains(s, wantG2Backup) {
+		t.Errorf("缺少自定义组 2 备用 url-test 继承子组:\n%s", s)
+	}
+	if !strings.Contains(s, wantG2Fallback) {
+		t.Errorf("缺少自定义组 2 顶层 fallback 组:\n%s", s)
+	}
+
+	// 3. 原组名保持向模板所有 select 组行尾注入接线
+	if !strings.Contains(s, "`[]🇺🇸 美国专线`[]HK-Direct") {
+		t.Errorf("select 组行尾应追加各自定义 fallback 组引用:\n%s", s)
 	}
 }
 

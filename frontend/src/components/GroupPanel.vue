@@ -20,6 +20,8 @@ const props = defineProps<{
   draftPattern: string
   // v1.6.0 清除本订阅记忆入口可用（粘贴了订阅链接才有记忆可清）
   canClear?: boolean
+  // v1.9.0 备用机场 Tag 清单（有备用机场时展示替补规则入口）
+  backupTags?: string[]
 }>()
 const emit = defineEmits<{
   (e: 'update:open', open: boolean): void
@@ -230,7 +232,7 @@ const fullGroups = computed(() => props.modelValue.length >= GROUPS_MAX)
 
 // 创建期零命中不确认成组（UI 挡；契约明确服务端不管）；正则模式：语法正确且非空且命中>0
 const canConfirm = computed(() => {
-  if (props.probeState !== 'ready' || fullGroups.value) return false
+  if (props.probeState !== 'ready' || fullGroups.value || hasDraftBackupError.value) return false
   if (props.draftMode === 'regex') return regexOk.value && regexHitCount.value > 0
   return confirmWords.value.length > 0 && hitCountWords(confirmWords.value) > 0
 })
@@ -274,7 +276,6 @@ const nameDuplicate = computed(() => {
   const t = nameInput.value.trim()
   return t !== '' && props.modelValue.some((g) => g.name === t)
 })
-const canConfirmName = computed(() => !nameInvalid.value && !nameDuplicate.value)
 
 const nameHint = computed(() => {
   if (nameInvalid.value) return '组名不超过 32 字，不能用反引号'
@@ -282,26 +283,153 @@ const nameHint = computed(() => {
   return ''
 })
 
+// v1.9.0 替补规则状态、校验与操作
+const backupOpen = ref(false)
+const draftBackupRules = ref<Record<string, string>>({})
+
+const editingName = ref<string | null>(null)
+const editBackupRules = ref<Record<string, string>>({})
+const editBackupOpen = ref(false)
+
+function validateBackupRule(val: string): string {
+  const p = val.trim()
+  if (!p) return ''
+  if ([...p].length > 256) return '替补规则不超过 256 字符'
+  if (p.includes('`') || /[\r\n\x00-\x1f\x7f]/.test(p)) return '不能包含反引号或控制字符'
+  const stripped = p.replace(/^\(\?i\)/i, '')
+  try {
+    new RegExp(stripped, 'i')
+    return ''
+  } catch {
+    return '正则语法有误，检查括号与转义'
+  }
+}
+
+const draftBackupErrors = computed<Record<string, string>>(() => {
+  const errors: Record<string, string> = {}
+  for (const tag of props.backupTags ?? []) {
+    const err = validateBackupRule(draftBackupRules.value[tag] ?? '')
+    if (err) errors[tag] = err
+  }
+  return errors
+})
+const hasDraftBackupError = computed(() => Object.keys(draftBackupErrors.value).length > 0)
+
+const editBackupErrors = computed<Record<string, string>>(() => {
+  const errors: Record<string, string> = {}
+  for (const tag of props.backupTags ?? []) {
+    const err = validateBackupRule(editBackupRules.value[tag] ?? '')
+    if (err) errors[tag] = err
+  }
+  return errors
+})
+const hasEditBackupError = computed(() => Object.keys(editBackupErrors.value).length > 0)
+
+const canConfirmName = computed(
+  () => !nameInvalid.value && !nameDuplicate.value && !hasDraftBackupError.value,
+)
+
+function getCleanBackupRules(raw: Record<string, string>): Record<string, string> | undefined {
+  const result: Record<string, string> = {}
+  for (const tag of props.backupTags ?? []) {
+    const val = raw[tag]?.trim()
+    if (val) {
+      result[tag] = val
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
+function startEdit(g: NodeGroup) {
+  editingName.value = g.name
+  editBackupOpen.value = !!(g.backupRules && Object.keys(g.backupRules).length > 0)
+  const initial: Record<string, string> = {}
+  for (const tag of props.backupTags ?? []) {
+    initial[tag] = g.backupRules?.[tag] ?? ''
+  }
+  editBackupRules.value = initial
+}
+
+function cancelEdit() {
+  editingName.value = null
+  editBackupRules.value = {}
+  editBackupOpen.value = false
+}
+
+function saveEdit(name: string) {
+  if (hasEditBackupError.value) return
+  const rules = getCleanBackupRules(editBackupRules.value)
+  emit(
+    'update:modelValue',
+    props.modelValue.map((g) => {
+      if (g.name !== name) return g
+      const updated: NodeGroup = { ...g }
+      if (rules) {
+        updated.backupRules = rules
+      } else {
+        delete updated.backupRules
+      }
+      return updated
+    }),
+  )
+  editingName.value = null
+  editBackupRules.value = {}
+  editBackupOpen.value = false
+}
+
+function formatBackupSummary(rules?: Record<string, string>): string {
+  if (!rules) return ''
+  const entries = Object.entries(rules).filter(([_, r]) => r && r.trim() !== '')
+  if (entries.length === 0) return ''
+  return entries.map(([tag, rule]) => `[${tag}] ${rule}`).join(', ')
+}
+
+const backupSummaryMap = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  for (const g of props.modelValue) {
+    if (g.backupRules) {
+      map[g.name] = formatBackupSummary(g.backupRules)
+    }
+  }
+  return map
+})
+
 function confirmName() {
   if (!naming.value || !canConfirmName.value) return
+  const backupRules = getCleanBackupRules(draftBackupRules.value)
   if (props.draftMode === 'regex') {
     // 正则组：keywords 空、pattern 落位（trim）；成组后清空正则草稿
     emit('update:modelValue', [
       ...props.modelValue,
-      { name: nameInput.value.trim(), keywords: [], pattern: props.draftPattern.trim(), urlTest: false },
+      {
+        name: nameInput.value.trim(),
+        keywords: [],
+        pattern: props.draftPattern.trim(),
+        urlTest: false,
+        ...(backupRules ? { backupRules } : {}),
+      },
     ])
     emit('update:draftPattern', '')
     naming.value = false
     nameInput.value = ''
+    draftBackupRules.value = {}
+    backupOpen.value = false
     return
   }
   emit('update:modelValue', [
     ...props.modelValue,
-    { name: nameInput.value.trim(), keywords: [...words.value], urlTest: false },
+    {
+      name: nameInput.value.trim(),
+      keywords: [...words.value],
+      urlTest: false,
+      ...(backupRules ? { backupRules } : {}),
+    },
   ])
   emit('update:draftKeywords', []) // 成组后清 chips
   naming.value = false
   nameInput.value = ''
+  draftBackupRules.value = {}
+  backupOpen.value = false
 }
 
 function cancelName() {
@@ -317,6 +445,9 @@ function toggleUrlTest(name: string) {
 }
 
 function removeGroup(name: string) {
+  if (editingName.value === name) {
+    cancelEdit()
+  }
   emit('update:modelValue', props.modelValue.filter((g) => g.name !== name))
 }
 
@@ -342,6 +473,9 @@ watch(
     nameInput.value = ''
     kwInput.value = ''
     kwDebounced.value = ''
+    cancelEdit()
+    draftBackupRules.value = {}
+    backupOpen.value = false
   },
 )
 
@@ -563,6 +697,36 @@ function focusInput() {
         </p>
         <p v-if="!naming && draftMode === 'regex' && regexHint" class="group-kw-hint">{{ regexHint }}</p>
 
+        <!-- v1.9.0 新建分组：替补规则（可选） -->
+        <div v-if="backupTags && backupTags.length > 0" class="backup-rules-section">
+          <button
+            type="button"
+            class="backup-toggle"
+            :aria-expanded="backupOpen"
+            @click="backupOpen = !backupOpen"
+          >
+            ⚙️ 替补规则（可选）
+          </button>
+          <div v-if="backupOpen" class="backup-rules-body">
+            <div v-for="tag in backupTags" :key="tag" class="backup-rule-row">
+              <label class="backup-tag-label" :for="`new-backup-${tag}`">[{{ tag }}] 替补匹配规则</label>
+              <input
+                :id="`new-backup-${tag}`"
+                v-model="draftBackupRules[tag]"
+                class="backup-rule-input"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="留空自动继承主力规则"
+                :aria-label="`[${tag}] 替补匹配规则`"
+              />
+              <span v-if="draftBackupErrors[tag]" class="backup-rule-error" role="alert">
+                {{ draftBackupErrors[tag] }}
+              </span>
+            </div>
+          </div>
+        </div>
+
         <ul class="node-list">
           <li v-for="(n, i) in nodes" :key="i" :class="hasActiveFilter ? (nodeHits(n) ? 'hit' : 'dim') : ''">
             {{ n }}
@@ -572,25 +736,87 @@ function focusInput() {
 
       <div v-if="modelValue.length" class="group-rows">
         <div v-for="g in modelValue" :key="g.name" class="group-row">
-          <!-- 正则组：[正则] 微标（title 悬浮显示完整 pattern），命中计数 pattern 优先 -->
-          <span class="group-chip">{{ g.name }}<span v-if="g.pattern" class="group-chip-regex" :title="g.pattern">[正则]</span> ×{{ groupHitCount(g) }}</span>
-          <label class="group-switch">
-            <input
-              type="checkbox"
-              :checked="g.urlTest"
-              :aria-label="`${g.name} 自动选最快`"
-              @change="toggleUrlTest(g.name)"
-            />
-            自动选最快
-          </label>
-          <button
-            type="button"
-            class="group-remove"
-            :aria-label="`删除分组 ${g.name}`"
-            @click="removeGroup(g.name)"
-          >
-            ×
-          </button>
+          <!-- 编辑状态 -->
+          <div v-if="editingName === g.name" class="group-edit-box">
+            <div class="group-edit-row">
+              <span class="group-edit-name">{{ g.name }}</span>
+              <div class="group-edit-actions">
+                <button type="button" class="secondary-btn group-save-btn" @click="saveEdit(g.name)">
+                  保存
+                </button>
+                <button type="button" class="group-cancel" @click="cancelEdit">
+                  取消
+                </button>
+              </div>
+            </div>
+            <!-- 编辑分组表单中的替补规则折叠项 -->
+            <div v-if="backupTags && backupTags.length > 0" class="backup-rules-section">
+              <button
+                type="button"
+                class="backup-toggle"
+                :aria-expanded="editBackupOpen"
+                @click="editBackupOpen = !editBackupOpen"
+              >
+                ⚙️ 替补规则（可选）
+              </button>
+              <div v-if="editBackupOpen" class="backup-rules-body">
+                <div v-for="tag in backupTags" :key="tag" class="backup-rule-row">
+                  <label class="backup-tag-label" :for="`edit-backup-${tag}`">[{{ tag }}] 替补匹配规则</label>
+                  <input
+                    :id="`edit-backup-${tag}`"
+                    v-model="editBackupRules[tag]"
+                    class="backup-rule-input"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="留空自动继承主力规则"
+                    :aria-label="`[${tag}] 替补匹配规则`"
+                    @keydown.enter.prevent="saveEdit(g.name)"
+                  />
+                  <span v-if="editBackupErrors[tag]" class="backup-rule-error" role="alert">
+                    {{ editBackupErrors[tag] }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 常态展示 -->
+          <template v-else>
+            <!-- 正则组：[正则] 微标（title 悬浮显示完整 pattern），命中计数 pattern 优先 -->
+            <span class="group-chip">
+              {{ g.name }}<span v-if="g.pattern" class="group-chip-regex" :title="g.pattern">[正则]</span> ×{{ groupHitCount(g) }}
+            </span>
+            <span v-if="backupSummaryMap[g.name]" class="group-backup-summary">
+              替补: {{ backupSummaryMap[g.name] }}
+            </span>
+            <label class="group-switch">
+              <input
+                type="checkbox"
+                :checked="g.urlTest"
+                :aria-label="`${g.name} 自动选最快`"
+                @change="toggleUrlTest(g.name)"
+              />
+              自动选最快
+            </label>
+            <button
+              v-if="backupTags && backupTags.length > 0"
+              type="button"
+              class="group-edit"
+              :aria-label="`编辑分组 ${g.name}`"
+              @click="startEdit(g)"
+            >
+              编辑
+            </button>
+            <button
+              type="button"
+              class="group-remove"
+              :aria-label="`删除分组 ${g.name}`"
+              @click="removeGroup(g.name)"
+            >
+              ×
+            </button>
+          </template>
         </div>
       </div>
 

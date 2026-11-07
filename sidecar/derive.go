@@ -77,15 +77,19 @@ func deriveINI(src []byte, groups []nodeGroup, exclude []string, airportTagsArgs
 	if len(removed) > 0 {
 		lines = pruneTemplateGroups(lines, info, removed)
 	}
+	var airportTags []string
+	if len(airportTagsArgs) > 0 {
+		airportTags = airportTagsArgs[0]
+	}
 	if len(groups) > 0 {
 		var err error
-		lines, err = appendGroups(lines, groups, info)
+		lines, err = appendGroups(lines, groups, info, airportTags)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if len(airportTagsArgs) > 0 && len(airportTagsArgs[0]) >= 2 {
-		lines = appendAirportGroups(lines, airportTagsArgs[0], info)
+	if len(airportTags) >= 2 {
+		lines = appendAirportGroups(lines, airportTags, info)
 	}
 	out := []byte(strings.Join(lines, "\n"))
 	if len(removed) > 0 {
@@ -96,33 +100,144 @@ func deriveINI(src []byte, groups []nodeGroup, exclude []string, airportTagsArgs
 	return out, nil
 }
 
-// appendAirportGroups 为多机场自动生成各机场专属测速组与 🔯 机场容灾 策略组，并注入各 select 组首位
+// overlayTagPattern 将机场标签前瞻正则 (?i)(?=.*\[{tag}\]) 叠加到 basePattern 上
+// 铁律：base 若为关键词前瞻串联（以 (?= 开头），直接拼接；
+// base 若为普通正则/字面量，必须用 (?=.*(?:...)) 包裹，与前瞻串联形成「既含 [tag] 又含 base」的 AND 语义，
+// 绝不能写成 (?=.*\[tag\])pattern——后者在 position 0 处要求 pattern 立即从 '[' 开始匹配，导致全部节点匹配失败（code-review finding 1 & 3）
+func overlayTagPattern(tag, base string) string {
+	tagPrefix := fmt.Sprintf("(?i)(?=.*\\[%s\\])", regexp.QuoteMeta(tag))
+	raw := strings.TrimPrefix(base, "(?i)")
+	if strings.HasPrefix(raw, "(?=") {
+		return tagPrefix + raw
+	}
+	return fmt.Sprintf("%s(?=.*(?:%s))", tagPrefix, raw)
+}
+
+// isPrimarySelectGroup 判定是否为主代理选择组（🚀 节点选择 / PROXY / Node Select 等）
+func isPrimarySelectGroup(name string) bool {
+	if strings.Contains(name, "节点选择") {
+		return true
+	}
+	norm := strings.TrimSpace(strings.ToLower(name))
+	return norm == "proxy" || norm == "proxies" || norm == "node select" || norm == "node-select"
+}
+
+// isRegionUrlTestGroup 判断是否为模板自带的地区测速组
+func isRegionUrlTestGroup(name, typ string, members []string) bool {
+	if typ != "url-test" || len(members) == 0 {
+		return false
+	}
+	pat := members[0]
+	if pat == ".*" || pat == "" {
+		return false
+	}
+	if strings.HasPrefix(name, "✈️ ") || strings.HasPrefix(name, "⚡ ") || strings.HasPrefix(name, "🔯 ") {
+		return false
+	}
+	return isRegionName(name)
+}
+
+// isRegionName 判断组名是否包含地区标识（国旗 emoji、含「节点」或常见地区名）
+func isRegionName(name string) bool {
+	if strings.Contains(name, "节点") {
+		return true
+	}
+	for _, r := range name {
+		if r >= 0x1F1E6 && r <= 0x1F1FF {
+			return true
+		}
+	}
+	regionWords := []string{
+		"香港", "台湾", "日本", "美国", "狮城", "新加坡",
+		"韩国", "英国", "德国", "法国", "俄罗斯", "加拿大",
+		"澳大利亚", "欧洲", "印度", "马来西亚", "泰国",
+	}
+	for _, w := range regionWords {
+		if strings.Contains(name, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// appendAirportGroups 为多机场自动生成各机场专属测速组、全局 🔯 机场容灾 策略组，
+// 并将模板原生的地区测速组重写为主备测速 + fallback 容灾组；全局容灾组仅收窄注入到名称含「节点选择」的 select 组。
 func appendAirportGroups(lines []string, airportTags []string, info templateInfo) []string {
 	if len(airportTags) < 2 {
 		return lines
 	}
 
-	lastCPG := -1
+	primaryTag := airportTags[0]
+	backupTags := airportTags[1:]
+
+	newLines := make([]string, 0, len(lines)+16)
 	var selectRows []int
 	inCustom := false
-	for i, line := range lines {
+
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if name, ok := sectionName(t); ok {
+			inCustom = name == "custom"
+			newLines = append(newLines, line)
+			continue
+		}
+		if !inCustom {
+			newLines = append(newLines, line)
+			continue
+		}
+
+		name, typ, members, ok := parseCPGLine(t)
+		if !ok {
+			newLines = append(newLines, line)
+			continue
+		}
+
+		// 识别模板原生的地区测速组，重写为主备测速子组 + fallback 容灾组
+		if _, isTemplate := info.byName[name]; isTemplate && isRegionUrlTestGroup(name, typ, members) {
+			pat := members[0]
+			tail := urlTestTail
+			if len(members) > 1 {
+				tail = strings.Join(members[1:], "`")
+			}
+
+			primarySubName := fmt.Sprintf("⚡ [%s] %s", primaryTag, name)
+			primaryPat := overlayTagPattern(primaryTag, pat)
+			newLines = append(newLines, fmt.Sprintf("custom_proxy_group=%s`url-test`%s`%s", primarySubName, primaryPat, tail))
+
+			fbMembers := "`[]" + primarySubName
+			for _, bTag := range backupTags {
+				backupSubName := fmt.Sprintf("⚡ [%s] %s", bTag, name)
+				backupPat := overlayTagPattern(bTag, pat)
+				newLines = append(newLines, fmt.Sprintf("custom_proxy_group=%s`url-test`%s`%s", backupSubName, backupPat, tail))
+				fbMembers += "`[]" + backupSubName
+			}
+
+			newLines = append(newLines, fmt.Sprintf("custom_proxy_group=%s`fallback%s`%s", name, fbMembers, tail))
+			continue
+		}
+
+		// 记录 select 类组（排除已生成的 ⚡ 子组）
+		if isSelectCPG(t) && !strings.HasPrefix(name, "⚡ ") {
+			selectRows = append(selectRows, len(newLines))
+		}
+		newLines = append(newLines, line)
+	}
+
+	// 找到 [custom] 段最后一个 custom_proxy_group= 行
+	lastCPG := -1
+	inCustom = false
+	for i, line := range newLines {
 		t := strings.TrimSpace(line)
 		if name, ok := sectionName(t); ok {
 			inCustom = name == "custom"
 			continue
 		}
-		if !inCustom {
-			continue
-		}
-		if _, ok := parseProxyGroupName(t); ok {
-			if isSelectCPG(t) {
-				selectRows = append(selectRows, i)
-			}
+		if inCustom && strings.HasPrefix(t, "custom_proxy_group=") {
 			lastCPG = i
 		}
 	}
 	if lastCPG < 0 {
-		return lines
+		return newLines
 	}
 
 	var gen []string
@@ -138,21 +253,38 @@ func appendAirportGroups(lines []string, airportTags []string, info templateInfo
 	fbName := "🔯 机场容灾"
 	gen = append(gen, fmt.Sprintf("custom_proxy_group=%s`fallback%s`%s", fbName, members, urlTestTail))
 
-	// 将 []🔯 机场容灾 注入为所有 select 类组的首选，行尾追加各机场专属组引用
+	// 收窄注入：[]🔯 机场容灾 及 airportGroupWire 仅注入到名称包含「节点选择」或主选择组（如 🚀 节点选择、PROXY 等），
+	// 绝不注入到 💬 Ai平台、🌍 国外媒体 等具体业务组，彻底杜绝跨区串流封号
+	hasInjected := false
 	for _, i := range selectRows {
-		line := lines[i]
+		line := newLines[i]
+		name, ok := parseProxyGroupName(line)
+		if !ok || !isPrimarySelectGroup(name) {
+			continue
+		}
 		const selMarker = "`select`"
 		if idx := strings.Index(line, selMarker); idx >= 0 {
 			prefix := line[:idx+len(selMarker)]
 			suffix := line[idx+len(selMarker):]
-			lines[i] = prefix + "[]" + fbName + "`" + suffix + airportGroupWire
+			newLines[i] = prefix + "[]" + fbName + "`" + suffix + airportGroupWire
+			hasInjected = true
+		}
+	}
+	if !hasInjected && len(selectRows) > 0 {
+		i := selectRows[0]
+		line := newLines[i]
+		const selMarker = "`select`"
+		if idx := strings.Index(line, selMarker); idx >= 0 {
+			prefix := line[:idx+len(selMarker)]
+			suffix := line[idx+len(selMarker):]
+			newLines[i] = prefix + "[]" + fbName + "`" + suffix + airportGroupWire
 		}
 	}
 
-	out := make([]string, 0, len(lines)+len(gen))
-	out = append(out, lines[:lastCPG+1]...)
+	out := make([]string, 0, len(newLines)+len(gen))
+	out = append(out, newLines[:lastCPG+1]...)
 	out = append(out, gen...)
-	out = append(out, lines[lastCPG+1:]...)
+	out = append(out, newLines[lastCPG+1:]...)
 	return out
 }
 
@@ -160,7 +292,14 @@ func appendAirportGroups(lines []string, airportTags []string, info templateInfo
 // taken 用删减前模板原始名单（含被删名——用户组不得复用被删组名，避免与删减自检
 // 冲突，契约第 4 步）；主组接线（用户裁决 B，2026-10-28）：每个 select 类模板组行
 // 行尾为每组追加 []组引用段，规则流量可达自定义组。
-func appendGroups(lines []string, groups []nodeGroup, info templateInfo) ([]string, error) {
+// v1.9.0: 支持 airportTags 可变参数——多机场时每个自定义分组升级为主备测速子组 + 顶层 fallback 组
+func appendGroups(lines []string, groups []nodeGroup, info templateInfo, airportTagsArgs ...[]string) ([]string, error) {
+	var airportTags []string
+	if len(airportTagsArgs) > 0 {
+		airportTags = airportTagsArgs[0]
+	}
+	multiAirport := len(airportTags) >= 2
+
 	taken := make(map[string]bool, len(info.groups))
 	for _, g := range info.groups {
 		taken[g.Name] = true
@@ -205,37 +344,71 @@ func appendGroups(lines []string, groups []nodeGroup, info templateInfo) ([]stri
 		}
 		taken[name] = true
 		wire += "`[]" + name
-		// 匹配表达式两态（v1.6.1 pattern 优先）：pattern 非空 = 正则组，未以 (?i)
-		// 开头自动拼前缀（默认忽略大小写，设计决策 4；引擎 PCRE 实测支持 inline
-		// flag），pattern 原样放入不 Compile——Go regexp 是 RE2 不支持 Perl 前瞻，
-		// 语法合法性由前端 JS RegExp 把关，服务端只校长度/非法字符（铁律）；
-		// pattern 空 = 关键词组，前瞻串联 AND（gate2 实证写法）：词 w1..wn 各
-		// QuoteMeta 转义后拼 (?=.*w1)(?=.*w2)…(?=.*wn)；单词同款写法（gate2 例 4
-		// 与裸词等价，不按词数分支）
-		var escaped string
-		if g.Pattern != "" {
-			if strings.HasPrefix(g.Pattern, "(?i)") {
-				escaped = g.Pattern
+
+		if !multiAirport {
+			var escaped string
+			if g.Pattern != "" {
+				if strings.HasPrefix(g.Pattern, "(?i)") {
+					escaped = g.Pattern
+				} else {
+					escaped = "(?i)" + g.Pattern
+				}
 			} else {
-				escaped = "(?i)" + g.Pattern
+				var kb strings.Builder
+				for _, w := range g.Keywords {
+					kb.WriteString("(?=.*")
+					kb.WriteString(regexp.QuoteMeta(w))
+					kb.WriteString(")")
+				}
+				escaped = kb.String()
+			}
+			if g.URLTest {
+				gen = append(gen, "custom_proxy_group="+name+"`url-test`"+escaped+"`"+urlTestTail)
+			} else {
+				gen = append(gen, "custom_proxy_group="+name+"`select`"+escaped)
 			}
 		} else {
-			var kb strings.Builder
-			for _, w := range g.Keywords {
-				kb.WriteString("(?=.*")
-				kb.WriteString(regexp.QuoteMeta(w))
-				kb.WriteString(")")
+			// v1.9.0: 多机场同区容灾与替补规则
+			primaryTag := airportTags[0]
+			primarySubName := fmt.Sprintf("⚡ [%s] %s", primaryTag, name)
+			taken[primarySubName] = true
+
+			var primaryBase string
+			if g.Pattern != "" {
+				primaryBase = g.Pattern
+			} else {
+				var kb strings.Builder
+				for _, w := range g.Keywords {
+					kb.WriteString("(?=.*")
+					kb.WriteString(regexp.QuoteMeta(w))
+					kb.WriteString(")")
+				}
+				primaryBase = kb.String()
 			}
-			escaped = kb.String()
-		}
-		// 行格式 = 闸门实证形态（与 ACL4SSR 模板原生行同构，无前导反引号）：
-		// name`select`escaped / name`url-test`escaped`url`interval,,tolerance。
-		// 实证（2026-10-28 本机引擎复测）：前导反引号形态（=`name`select`k`）组被
-		// 引擎静默吞——正是闸门例 5 记录的有害形态；契约节内行示例已对齐本形态
-		if g.URLTest {
-			gen = append(gen, "custom_proxy_group="+name+"`url-test`"+escaped+"`"+urlTestTail)
-		} else {
-			gen = append(gen, "custom_proxy_group="+name+"`select`"+escaped)
+			primaryPat := overlayTagPattern(primaryTag, primaryBase)
+			if g.URLTest {
+				gen = append(gen, fmt.Sprintf("custom_proxy_group=%s`url-test`%s`%s", primarySubName, primaryPat, urlTestTail))
+			} else {
+				gen = append(gen, fmt.Sprintf("custom_proxy_group=%s`select`%s", primarySubName, primaryPat))
+			}
+
+			fbMembers := "`[]" + primarySubName
+			for _, bTag := range airportTags[1:] {
+				backupSubName := fmt.Sprintf("⚡ [%s] %s", bTag, name)
+				taken[backupSubName] = true
+				var backupBase string
+				if rule, ok := g.BackupRules[bTag]; ok && strings.TrimSpace(rule) != "" {
+					backupBase = strings.TrimSpace(rule)
+				} else {
+					backupBase = primaryBase
+				}
+				backupPat := overlayTagPattern(bTag, backupBase)
+				gen = append(gen, fmt.Sprintf("custom_proxy_group=%s`url-test`%s`%s", backupSubName, backupPat, urlTestTail))
+				fbMembers += "`[]" + backupSubName
+			}
+
+			// 顶层 Fallback 容灾组：原名 {name}
+			gen = append(gen, fmt.Sprintf("custom_proxy_group=%s`fallback%s`%s", name, fbMembers, urlTestTail))
 		}
 	}
 	// 全 select 组接线（用户裁决 A，2026-10-28）：自定义组追加到每个 select 类模板组行尾

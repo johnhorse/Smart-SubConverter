@@ -29,6 +29,13 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === 'string')
 }
 
+function isStringRecord(v: unknown): v is Record<string, string> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false
+  return Object.entries(v as Record<string, unknown>).every(
+    ([k, val]) => typeof k === 'string' && typeof val === 'string',
+  )
+}
+
 function isNodeGroupArray(v: unknown): v is NodeGroup[] {
   return (
     Array.isArray(v) &&
@@ -41,7 +48,10 @@ function isNodeGroupArray(v: unknown): v is NodeGroup[] {
         // v1.6.1：可选 pattern，缺席或 string 均合法（正则组）
         ((g as Record<string, unknown>).pattern === undefined ||
           typeof (g as Record<string, unknown>).pattern === 'string') &&
-        typeof (g as Record<string, unknown>).urlTest === 'boolean',
+        typeof (g as Record<string, unknown>).urlTest === 'boolean' &&
+        // v1.9.0：可选 backupRules，缺席或 Record<string, string> 均合法
+        ((g as Record<string, unknown>).backupRules === undefined ||
+          isStringRecord((g as Record<string, unknown>).backupRules)),
     )
   )
 }

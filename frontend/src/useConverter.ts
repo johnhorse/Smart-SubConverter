@@ -103,6 +103,22 @@ export function useConverter() {
     return list
   })
 
+  // v1.9.0 备用机场 Tag 清单（单源收敛：与 allSubscriptions 契约严格同源）
+  const backupTags = computed<string[]>(() => {
+    const subs = allSubscriptions.value
+    if (subs.length <= 1) return []
+    const seen = new Set<string>()
+    const tags: string[] = []
+    for (const s of subs.slice(1)) {
+      const t = s.tag.trim()
+      if (t && !seen.has(t)) {
+        seen.add(t)
+        tags.push(t)
+      }
+    }
+    return tags
+  })
+
   const selectedTarget = ref('auto')
   // 模板无「未选」态：default 永远默认选中（契约保证 default 永远第一）
   const selectedPreset = ref('default')
@@ -232,7 +248,11 @@ export function useConverter() {
       saveSnapshot(key, {
         target: selectedTarget.value,
         preset: selectedPreset.value,
-        groups: [...groups.value],
+        groups: groups.value.map((g) => ({
+          ...g,
+          keywords: [...g.keywords],
+          ...(g.backupRules ? { backupRules: { ...g.backupRules } } : {}),
+        })),
         excluded: [...excluded.value],
         draftKeywords: [...draftKeywords.value],
         draftMode: draftMode.value,
@@ -286,7 +306,11 @@ export function useConverter() {
         const presetValid = presets.value.some((p) => p.id === snap.preset)
         const presetChanged = presetValid && selectedPreset.value !== snap.preset
         if (presetValid) selectedPreset.value = snap.preset
-        groups.value = snap.groups.map((g) => ({ ...g, keywords: [...g.keywords] }))
+        groups.value = snap.groups.map((g) => ({
+          ...g,
+          keywords: [...g.keywords],
+          ...(g.backupRules ? { backupRules: { ...g.backupRules } } : {}),
+        }))
         excluded.value = [...snap.excluded]
         draftKeywords.value = [...snap.draftKeywords]
         // v1.6.1：恢复匹配模式与正则草稿（字段缺席按关键词模式/空正则降级）
@@ -355,8 +379,19 @@ export function useConverter() {
     if (customGroups.length === 0 && exclude.length === 0) return // 无档案（或被交集滤光）：不动面板
     suppressDraft = true // 程序化回填不落盘：快照只由用户编辑产生
     try {
-      preRestoreState = { groups: [...groups.value], excluded: [...excluded.value] }
-      groups.value = customGroups
+      preRestoreState = {
+        groups: groups.value.map((g) => ({
+          ...g,
+          keywords: [...g.keywords],
+          ...(g.backupRules ? { backupRules: { ...g.backupRules } } : {}),
+        })),
+        excluded: [...excluded.value],
+      }
+      groups.value = customGroups.map((g) => ({
+        ...g,
+        keywords: Array.isArray(g.keywords) ? [...g.keywords] : [],
+        ...(g.backupRules ? { backupRules: { ...g.backupRules } } : {}),
+      }))
       excluded.value = exclude
       restoreNotice.value = { groups: customGroups.length, excluded: exclude.length }
     } finally {
@@ -369,7 +404,11 @@ export function useConverter() {
     if (!preRestoreState) return
     suppressDraft = true
     try {
-      groups.value = preRestoreState.groups
+      groups.value = preRestoreState.groups.map((g) => ({
+        ...g,
+        keywords: [...g.keywords],
+        ...(g.backupRules ? { backupRules: { ...g.backupRules } } : {}),
+      }))
       excluded.value = preRestoreState.excluded
     } finally {
       suppressDraft = false
@@ -536,6 +575,7 @@ export function useConverter() {
     updateExtraSub,
     handleUrlBatch,
     allSubscriptions,
+    backupTags,
     selectedTarget,
     selectedPreset,
     advancedOpen,

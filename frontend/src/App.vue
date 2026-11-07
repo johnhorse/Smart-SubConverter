@@ -9,7 +9,7 @@ import ResultPanel from './components/ResultPanel.vue'
 import StatusBadge from './components/StatusBadge.vue'
 
 const {
-  phase, inputUrl, mainTag, extraSubs, addExtraSub, removeExtraSub, handleUrlBatch,
+  phase, inputUrl, mainTag, extraSubs, addExtraSub, removeExtraSub, handleUrlBatch, backupTags,
   selectedTarget, selectedPreset, advancedOpen, submitting,
   convertError, result, clients, presets, customGroupsAvailable,
   groupsOpen, groups, nodes, probeState, excluded, groupHits, templateGroups,
@@ -226,6 +226,7 @@ onMounted(() => {
           :draft-mode="draftMode"
           :draft-pattern="draftPattern"
           :can-clear="inputUrl.trim() !== ''"
+          :backup-tags="backupTags"
           @update:open="groupsOpen = $event"
           @update:model-value="groups = $event"
           @update:excluded="excluded = $event"
