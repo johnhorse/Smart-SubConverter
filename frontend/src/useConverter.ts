@@ -58,8 +58,12 @@ export function useConverter() {
   }
 
   function handleUrlBatch(rawText: string): boolean {
-    if (rawText.includes('\n') || rawText.includes('|')) {
-      const parts = rawText.split(/[\r\n|]+/).map((s) => s.trim()).filter(Boolean)
+    const hasMultipleHttp = (rawText.match(/https?:\/\//gi) || []).length > 1
+    if (rawText.includes('\n') || rawText.includes('\r') || rawText.includes('|') || hasMultipleHttp) {
+      let parts = rawText.split(/[\r\n|]+/).map((s) => s.trim()).filter(Boolean)
+      if (parts.length === 1 && hasMultipleHttp) {
+        parts = parts[0].split(/\s+/).map((s) => s.trim()).filter(Boolean)
+      }
       if (parts.length > 1) {
         inputUrl.value = parts[0]
         if (!mainTag.value) {
@@ -102,6 +106,10 @@ export function useConverter() {
     }
     return list
   })
+
+  function getSubscriptionsSignature(): string {
+    return allSubscriptions.value.map((s) => `${s.tag}:${s.url}`).join('|')
+  }
 
   // v1.9.0 备用机场 Tag 清单（单源收敛：与 allSubscriptions 契约严格同源）
   const backupTags = computed<string[]>(() => {
@@ -170,9 +178,9 @@ export function useConverter() {
   }
 
   let probeSeq = 0
-  // 上次成功 probe 的 url / 模板档：同 url 同档重新展开面板时复用结果不重发（F6）；
-  // 任一不匹配（含换档、清空 URL）都重新探测，不复用旧档结果
-  let probedUrl = ''
+  // 上次成功 probe 的订阅签名 / 模板档：同签名同档重新展开面板时复用结果不重发（F6）；
+  // 任一不匹配（含换档、清空/修改 URL 或备用订阅）都重新探测，不复用旧档结果
+  let probedSignature = ''
   let probedPreset = ''
 
   // 清空探针状态并作废在途响应（F2/F5）：旧链接/旧模板的名单与命中数一律不得残留
@@ -181,7 +189,7 @@ export function useConverter() {
     nodes.value = []
     groupHits.value = {}
     probeState.value = 'idle'
-    probedUrl = ''
+    probedSignature = ''
     probedPreset = ''
   }
 
@@ -192,6 +200,7 @@ export function useConverter() {
       return
     }
     const seq = ++probeSeq
+    const reqSig = getSubscriptionsSignature()
     const url = inputUrl.value // F3：归属按请求时的 URL 记账，不取响应时的当前值
     const preset = selectedPreset.value
     probeState.value = 'loading'
@@ -204,7 +213,7 @@ export function useConverter() {
         nodes.value = res.nodes
         groupHits.value = res.groupHits && typeof res.groupHits === 'object' ? res.groupHits : {}
         probeState.value = 'ready'
-        probedUrl = url
+        probedSignature = reqSig
         probedPreset = preset
         // v1.6.0：probe 成功后尝试服务端偏好回填（本地无快照才问服务端，内部静默）
         void maybeRestoreFromServer(seq, url, preset)
@@ -445,14 +454,14 @@ export function useConverter() {
     }
   }
 
-  // 展开分组面板 → probe（url 非空才发；同 url 同档已 ready 复用不重发）；收起 → 清
+  // 展开分组面板 → probe（url 非空才发；同签名同档已 ready 复用不重发）；收起 → 清
   // pending 防抖（收起后 400ms 内不得再触发 probe / 重置面板状态）
   let reprobeTimer: ReturnType<typeof setTimeout> | undefined
   watch(groupsOpen, (open) => {
     if (open) {
       if (
         probeState.value === 'ready' &&
-        probedUrl === inputUrl.value &&
+        probedSignature === getSubscriptionsSignature() &&
         probedPreset === selectedPreset.value
       ) {
         return
@@ -463,12 +472,12 @@ export function useConverter() {
     clearTimeout(reprobeTimer)
   })
 
-  // 面板展开期间改 url → 防抖重 probe（节点名单要跟订阅一致）；清空 url 回 idle。
+  // 面板展开期间改订阅（主力 URL、备用订阅列表、主力 Tag）→ 防抖重 probe（节点名单要跟订阅一致）；清空 url 回 idle。
   // flush:'sync'：回调在赋值瞬间取 groupsOpen 真值——「先粘贴 url 后展开面板」时
   // url 变化发生在面板关闭态，不埋防抖（展开 probe 已覆盖），避免展开后 400ms
   // 又重复 probe 一次（批量 flush 下回调会误读到已翻转的 groupsOpen）
   watch(
-    inputUrl,
+    [inputUrl, extraSubs, mainTag],
     () => {
       if (!groupsOpen.value) return
       clearTimeout(reprobeTimer)
@@ -477,10 +486,13 @@ export function useConverter() {
           resetProbe()
           return
         }
-        void probeNodes()
+        const sig = getSubscriptionsSignature()
+        if (sig !== probedSignature || selectedPreset.value !== probedPreset) {
+          void probeNodes()
+        }
       }, URL_REPROBE_DEBOUNCE_MS)
     },
-    { flush: 'sync' },
+    { deep: true, flush: 'sync' },
   )
 
   // 切换模板 → 剔除清单与命中数按新模板重置（不按组名继承）；作废在途 probe——旧模板
@@ -490,7 +502,7 @@ export function useConverter() {
     if (restoring) return
     excluded.value = []
     groupHits.value = {}
-    probedUrl = ''
+    probedSignature = ''
     probedPreset = ''
     probeSeq++
     if (groupsOpen.value && customGroupsAvailable.value) void probeNodes()
@@ -575,6 +587,7 @@ export function useConverter() {
     updateExtraSub,
     handleUrlBatch,
     allSubscriptions,
+    getSubscriptionsSignature,
     backupTags,
     selectedTarget,
     selectedPreset,

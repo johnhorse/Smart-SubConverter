@@ -62,6 +62,18 @@ func TestResolveSubscriptions(t *testing.T) {
 	if badCode != "bad_url_private" {
 		t.Errorf("expected bad_url_private, got: %s", badCode)
 	}
+
+	// 经由 rawURL 传入带竖线分隔的订阅（非 JSON 单串输入）
+	pipeSubs, pipeCode := resolveSubscriptions("https://sub.airport-one.com/link|https://sub.airport-two.com/link", nil)
+	if pipeCode != "" {
+		t.Fatalf("expected no error for pipe separated subs, got: %s", pipeCode)
+	}
+	if len(pipeSubs) != 2 {
+		t.Fatalf("expected 2 items for pipe separated subs, got: %d", len(pipeSubs))
+	}
+	if pipeSubs[0].Tag != "airport-one" || pipeSubs[1].Tag != "airport-two" {
+		t.Errorf("unexpected tags for pipe subs: %+v", pipeSubs)
+	}
 }
 
 func TestStage1MixedMulti_Tolerance(t *testing.T) {

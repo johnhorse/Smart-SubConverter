@@ -110,6 +110,22 @@ func parseSubscriptions(raw string) []subscriptionItem {
 	if raw == "" {
 		return nil
 	}
+	if strings.ContainsAny(raw, "\n\r|") {
+		parts := strings.FieldsFunc(raw, func(r rune) bool {
+			return r == '\n' || r == '\r' || r == '|'
+		})
+		var valid []subscriptionItem
+		for _, p := range parts {
+			u := strings.TrimSpace(p)
+			if u != "" {
+				valid = append(valid, subscriptionItem{URL: u, Tag: ""})
+			}
+		}
+		if len(valid) > 0 {
+			return valid
+		}
+		return nil
+	}
 	return []subscriptionItem{{URL: raw, Tag: ""}}
 }
 

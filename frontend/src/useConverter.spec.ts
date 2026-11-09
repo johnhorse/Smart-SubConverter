@@ -1612,4 +1612,128 @@ https://b.com/sub|https://b.com/sub2`
       )
     })
   })
+
+  // ---- v1.10.1：多机场订阅 UX 修复 ----
+  describe('多机场订阅 UX 修复（v1.10.1）', () => {
+    it('handleUrlBatch 支持空格分隔多个 URL，单 URL 返回 false', () => {
+      const conv = setup()
+      // 空白分隔多个链接
+      const res = conv.handleUrlBatch('https://sub.a.com/link   https://sub.b.com/link')
+      expect(res).toBe(true)
+      expect(conv.inputUrl.value).toBe('https://sub.a.com/link')
+      expect(conv.mainTag.value).toBe('a')
+      expect(conv.extraSubs.value).toEqual([{ url: 'https://sub.b.com/link', tag: 'b' }])
+
+      // 单链接或单链接带换行/竖线结尾返回 false
+      expect(conv.handleUrlBatch('https://sub.a.com/link')).toBe(false)
+      expect(conv.handleUrlBatch('https://sub.a.com/link\n')).toBe(false)
+      expect(conv.handleUrlBatch('https://sub.a.com/link|')).toBe(false)
+      expect(conv.handleUrlBatch('')).toBe(false)
+    })
+
+    it('getSubscriptionsSignature 正确生成签名串', () => {
+      const conv = setup()
+      expect(conv.getSubscriptionsSignature()).toBe('')
+
+      conv.inputUrl.value = 'https://main.com/sub'
+      conv.mainTag.value = '主力'
+      expect(conv.getSubscriptionsSignature()).toBe('主力:https://main.com/sub')
+
+      conv.addExtraSub('https://backup.com/sub', '备用')
+      expect(conv.getSubscriptionsSignature()).toBe('主力:https://main.com/sub|备用:https://backup.com/sub')
+    })
+
+    it('分组面板开启时，添加/修改 extraSubs 或 mainTag 触发 400ms 防抖 re-probe', async () => {
+      vi.useFakeTimers()
+      try {
+        const conv = setup()
+        conv.inputUrl.value = 'https://main.com/sub'
+        conv.mainTag.value = '主力'
+        vi.mocked(fetchPreview).mockResolvedValue({
+          ...okResponse,
+          nodes: ['香港 01'],
+        })
+
+        conv.groupsOpen.value = true
+        await vi.advanceTimersByTimeAsync(0)
+        await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+        expect(fetchPreview).toHaveBeenCalledTimes(1)
+        expect(fetchPreview).toHaveBeenLastCalledWith('https://main.com/sub', 'auto', 'default', { probe: true })
+        expect(conv.nodes.value).toEqual(['香港 01'])
+
+        // 添加备用订阅
+        vi.mocked(fetchPreview).mockResolvedValueOnce({
+          ...okResponse,
+          nodes: ['[主力] 香港 01', '[备用] 香港 02'],
+        })
+        conv.addExtraSub('https://backup.com/sub', '备用')
+        expect(fetchPreview).toHaveBeenCalledTimes(1) // 400ms 内不立刻发
+
+        await vi.advanceTimersByTimeAsync(400)
+        expect(fetchPreview).toHaveBeenCalledTimes(2)
+        expect(fetchPreview).toHaveBeenLastCalledWith('https://main.com/sub', 'auto', 'default', {
+          probe: true,
+          subscriptions: [
+            { url: 'https://main.com/sub', tag: '主力' },
+            { url: 'https://backup.com/sub', tag: '备用' },
+          ],
+        })
+        expect(conv.nodes.value).toEqual(['[主力] 香港 01', '[备用] 香港 02'])
+
+        // 修改备用订阅 url
+        vi.mocked(fetchPreview).mockResolvedValueOnce({
+          ...okResponse,
+          nodes: ['[主力] 香港 01', '[备用2] 香港 03'],
+        })
+        conv.extraSubs.value[0].url = 'https://backup2.com/sub'
+        conv.extraSubs.value[0].tag = '备用2'
+        await vi.advanceTimersByTimeAsync(400)
+        expect(fetchPreview).toHaveBeenCalledTimes(3)
+        expect(conv.nodes.value).toEqual(['[主力] 香港 01', '[备用2] 香港 03'])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('probedSignature 缓存匹配逻辑：无变更重开面板复用缓存，有变更重开立即重探', async () => {
+      const conv = setup()
+      conv.inputUrl.value = 'https://main.com/sub'
+      conv.mainTag.value = '主力'
+      conv.addExtraSub('https://backup.com/sub', '备用')
+      vi.mocked(fetchPreview).mockResolvedValue({
+        ...okResponse,
+        nodes: ['[主力] 香港 01', '[备用] 香港 02'],
+      })
+
+      conv.groupsOpen.value = true
+      await vi.waitFor(() => expect(conv.probeState.value).toBe('ready'))
+      expect(fetchPreview).toHaveBeenCalledTimes(1)
+
+      // 收起面板
+      conv.groupsOpen.value = false
+      await nextTick()
+
+      // 未做任何改动重新打开面板 → 命中 probedSignature 缓存，不发新请求
+      conv.groupsOpen.value = true
+      await nextTick()
+      expect(fetchPreview).toHaveBeenCalledTimes(1)
+
+      // 收起并在关闭期间添加第三个订阅
+      conv.groupsOpen.value = false
+      await nextTick()
+      conv.addExtraSub('https://backup2.com/sub', '备用2')
+
+      // 再次打开面板 → probedSignature 不匹配，重新触发 probe
+      conv.groupsOpen.value = true
+      await vi.waitFor(() => expect(fetchPreview).toHaveBeenCalledTimes(2))
+      expect(fetchPreview).toHaveBeenLastCalledWith('https://main.com/sub', 'auto', 'default', {
+        probe: true,
+        subscriptions: [
+          { url: 'https://main.com/sub', tag: '主力' },
+          { url: 'https://backup.com/sub', tag: '备用' },
+          { url: 'https://backup2.com/sub', tag: '备用2' },
+        ],
+      })
+    })
+  })
 })

@@ -512,3 +512,65 @@ func TestGetOrCreateExcludeRoundtrip(t *testing.T) {
 		t.Errorf("无删减读回应为空串，得 %q", lnk0.Exclude)
 	}
 }
+
+func TestParseSubscriptionsMultiAndPipe(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		expected []string
+	}{
+		{
+			name:     "竖线分隔两个 URL",
+			raw:      "https://a.com/sub|https://b.com/sub",
+			expected: []string{"https://a.com/sub", "https://b.com/sub"},
+		},
+		{
+			name:     "换行分隔两个 URL",
+			raw:      "https://a.com/sub\nhttps://b.com/sub",
+			expected: []string{"https://a.com/sub", "https://b.com/sub"},
+		},
+		{
+			name:     "CRLF 分隔与两端空白",
+			raw:      "  https://a.com/sub\r\nhttps://b.com/sub  \r\n",
+			expected: []string{"https://a.com/sub", "https://b.com/sub"},
+		},
+		{
+			name:     "竖线与换行混合",
+			raw:      "https://a.com/sub\nhttps://b.com/sub|https://c.com/sub",
+			expected: []string{"https://a.com/sub", "https://b.com/sub", "https://c.com/sub"},
+		},
+		{
+			name:     "单 URL 尾随换行",
+			raw:      "https://a.com/sub\n",
+			expected: []string{"https://a.com/sub"},
+		},
+		{
+			name:     "仅有换行和竖线",
+			raw:      "\n | \r\n",
+			expected: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := parseSubscriptions(tc.raw)
+			if tc.expected == nil {
+				if res != nil {
+					t.Fatalf("expected nil, got: %+v", res)
+				}
+				return
+			}
+			if len(res) != len(tc.expected) {
+				t.Fatalf("expected %d items, got %d: %+v", len(tc.expected), len(res), res)
+			}
+			for i, exp := range tc.expected {
+				if res[i].URL != exp {
+					t.Errorf("[%d] expected URL %q, got %q", i, exp, res[i].URL)
+				}
+				if res[i].Tag != "" {
+					t.Errorf("[%d] expected empty tag, got %q", i, res[i].Tag)
+				}
+			}
+		})
+	}
+}

@@ -508,4 +508,47 @@ describe('App 分组偏好记忆（v1.6.0）', () => {
     expect(deletePreferences).toHaveBeenCalledWith('https://example.com/sub')
     expect(localStorage.getItem('ssc.draft.v1')).toBeNull()
   })
+
+  it('paste 多行/竖线/空格多订阅：阻止浏览器默认行为并自动拆分为多卡片模式', async () => {
+    const wrapper = await mountApp()
+    const input = wrapper.find('input[aria-label="订阅链接"]')
+    expect(input.exists()).toBe(true)
+
+    const pasteText = 'https://sub.airport-a.com/sub\nhttps://sub.airport-b.com/sub'
+    const event = new Event('paste', { bubbles: true, cancelable: true }) as any
+    event.clipboardData = {
+      getData: (format: string) => (format === 'text' ? pasteText : ''),
+    }
+    input.element.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(true)
+    await vi.waitFor(() => {
+      expect(wrapper.find('.multi-sub-container').exists()).toBe(true)
+    })
+    expect(wrapper.findAll('.sub-item-row')).toHaveLength(2)
+    expect(wrapper.find('input[aria-label="主力机场标记"]').exists()).toBe(true)
+    expect((wrapper.find('input[aria-label="主力订阅链接"]').element as HTMLInputElement).value).toBe(
+      'https://sub.airport-a.com/sub',
+    )
+    expect((wrapper.find('input[aria-label="备用机场标记"]').element as HTMLInputElement).value).toBe(
+      'airport-b',
+    )
+    expect((wrapper.find('input[aria-label="备用订阅链接"]').element as HTMLInputElement).value).toBe(
+      'https://sub.airport-b.com/sub',
+    )
+  })
+
+  it('paste 单订阅：不阻止默认行为（由浏览器正常粘贴填入）', async () => {
+    const wrapper = await mountApp()
+    const input = wrapper.find('input[aria-label="订阅链接"]')
+
+    const event = new Event('paste', { bubbles: true, cancelable: true }) as any
+    event.clipboardData = {
+      getData: (format: string) => (format === 'text' ? 'https://single.com/sub' : ''),
+    }
+    input.element.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(wrapper.find('.multi-sub-container').exists()).toBe(false)
+  })
 })

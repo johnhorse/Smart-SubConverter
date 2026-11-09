@@ -26,6 +26,13 @@ function onMainInput(e: Event) {
   }
 }
 
+function onMainPaste(e: ClipboardEvent) {
+  const text = e.clipboardData?.getData('text') ?? ''
+  if (handleUrlBatch(text)) {
+    e.preventDefault()
+  }
+}
+
 function onExtraUrlInput(index: number, e: Event) {
   const target = e.target as HTMLInputElement
   const val = target.value
@@ -87,6 +94,7 @@ onMounted(() => {
               placeholder="粘贴你的订阅链接（支持多行/竖线分隔）"
               aria-label="订阅链接"
               @input="onMainInput"
+              @paste="onMainPaste"
             />
             <button type="submit" class="primary-btn" :disabled="submitting">
               {{ submitting ? '转换中…' : '转换' }}
@@ -114,6 +122,7 @@ onMounted(() => {
                 placeholder="主力机场订阅链接"
                 aria-label="主力订阅链接"
                 @input="onMainInput"
+                @paste="onMainPaste"
               />
             </div>
 
