@@ -17,8 +17,8 @@ else
   SHACMD="shasum -a 256"
 fi
 
-# 清空旧快照数据（保留本脚本自身），上游删除文件时不留残迹
-find . -maxdepth 1 -type f ! -name fetch.sh -delete
+# 清空旧快照数据（保留本脚本自身与自定义规则文件），上游删除文件时不留残迹
+find . -maxdepth 1 -type f ! -name fetch.sh ! -name custom-rules.ini -delete
 
 echo "== 拉取三档预设 .ini =="
 for rel in \
@@ -55,10 +55,11 @@ echo "== 写 SNAPSHOT_META (upstream ${commit}) =="
   printf '  "files": {\n'
   first=1
   for f in $(ls *.ini *.list | sort); do
+    [ "$f" = "custom-rules.ini" ] && continue
     if [ "$first" -eq 1 ]; then first=0; else printf ',\n'; fi
     printf '    "%s": "%s"' "$f" "$($SHACMD "$f" | cut -d' ' -f1)"
   done
   printf '\n  }\n}\n'
 } > SNAPSHOT_META
 
-echo "done: $(ls *.ini | wc -l | tr -d ' ') ini + $(ls *.list | wc -l | tr -d ' ') list"
+echo "done: $(ls *.ini | grep -v custom-rules.ini | wc -l | tr -d ' ') ini + $(ls *.list | wc -l | tr -d ' ') list"

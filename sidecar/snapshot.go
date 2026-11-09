@@ -27,6 +27,11 @@ const (
 	vendorSnapshotDir = "/base/rules-snapshot"
 	// vendor 层拉取时间戳文件名（内容 RFC3339 或 unix 秒）
 	snapshotMetaFile = "SNAPSHOT_META"
+	// 自定义规则文件名（用户在仓库维护或运行时挂载自定义分流/直连规则）
+	customRulesFileName = "custom-rules.ini"
+	// 自定义规则注入块标记（确保幂等重置）
+	customRulesBeginMarker = "; --- BEGIN CUSTOM RULES ---"
+	customRulesEndMarker   = "; --- END CUSTOM RULES ---"
 )
 
 type snapshotState struct {
@@ -36,6 +41,7 @@ type snapshotState struct {
 
 type snapshotManager struct {
 	mu        sync.Mutex // 只护 states
+	swapMu    sync.Mutex // 串行化 rewriteAndSwap 改写切换（防高频并发请求竞争 IO 与写坏目标产物）
 	dataDir   string
 	rulesDir  string        // {dataDir}/rules
 	vendorDir string        // 出厂层（测试注入）
@@ -247,6 +253,9 @@ func dependsOnAny(urls []string, fetched map[string]bool) bool {
 // rewriteAndSwap 改写该档 .ini 并在校验通过后原子切换。静默丢规则防护（契约
 // 硬性要求）：改写产物引用的全部规则集文件必须存在，否则不切换、保留旧产物。
 func (m *snapshotManager) rewriteAndSwap(p presetEntry, upstreamLM string, updated bool, now time.Time) {
+	m.swapMu.Lock()
+	defer m.swapMu.Unlock()
+
 	origPath := filepath.Join(m.rulesDir, urlBasename(p.URL))
 	src, err := os.ReadFile(origPath)
 	if err != nil {
@@ -258,6 +267,9 @@ func (m *snapshotManager) rewriteAndSwap(p presetEntry, upstreamLM string, updat
 			log.Printf("snapshot %s 改写校验不过：引用 %s 缺失或出 %s 树，保留旧产物不切换", p.ID, ref, m.baseDir)
 			return
 		}
+	}
+	if cr := m.loadCustomRules(); len(cr) > 0 {
+		rewritten = injectCustomRules(rewritten, cr)
 	}
 	outPath := rewrittenPathOf(origPath)
 	if err := atomicWrite(outPath, rewritten); err != nil {
@@ -287,6 +299,9 @@ func (m *snapshotManager) rewrittenPath(p presetEntry) (string, bool) {
 	outPath := rewrittenPathOf(filepath.Join(m.rulesDir, urlBasename(p.URL)))
 	if _, err := os.Stat(outPath); err != nil {
 		return "", false
+	}
+	if m.isCustomRulesNewer(outPath) {
+		m.rewriteAndSwap(p, "", false, time.Now())
 	}
 	return outPath, true
 }
@@ -488,4 +503,201 @@ func snapshotEnabled(dataDir string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
+// customRulesPath 返回当前生效的自定义规则文件绝对路径。
+// 优先使用运行时持久层（{dataDir}/rules/custom-rules.ini，允许用户修改、清空或覆盖）；
+// 运行时层不存在时回退使用出厂快照层（/base/rules-snapshot/custom-rules.ini）。
+func (m *snapshotManager) customRulesPath() string {
+	if m.rulesDir != "" {
+		p := filepath.Join(m.rulesDir, customRulesFileName)
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	if m.vendorDir != "" {
+		p := filepath.Join(m.vendorDir, customRulesFileName)
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// loadCustomRules 读取当前生效的自定义规则。
+func (m *snapshotManager) loadCustomRules() []string {
+	p := m.customRulesPath()
+	if p == "" {
+		return nil
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		log.Printf("snapshot 读取自定义规则 %s 失败: %v", p, err)
+		return nil
+	}
+	return parseCustomRules(data)
+}
+
+// isCustomRulesNewer 检查自定义规则文件是否有更新（ModTime 晚于产物生成时间）。
+func (m *snapshotManager) isCustomRulesNewer(outPath string) bool {
+	statOut, err := os.Stat(outPath)
+	if err != nil {
+		return true // 产物不存在，视为需更新
+	}
+	p := m.customRulesPath()
+	if p == "" {
+		return false
+	}
+	statCustom, err := os.Stat(p)
+	if err != nil {
+		return false
+	}
+	return statCustom.ModTime().After(statOut.ModTime())
+}
+
+// parseCustomRules 解析 custom-rules.ini 为规范化的 ruleset= 行列表。
+// 忽略空行与以 ; 或 # 开头的注释行；
+// 支持 Subconverter 原生语法：ruleset=策略组,[]规则内容
+// 支持 Clash 常见语法：规则类型,匹配值,策略组[,参数]（自动规范化为 ruleset=）
+func parseCustomRules(data []byte) []string {
+	lines := strings.Split(string(data), "\n")
+	out := make([]string, 0, len(lines))
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "ruleset=") {
+			out = append(out, line)
+			continue
+		}
+		// Clash 语法自动转换: TYPE,ARG,TARGET[,EXTRA]
+		parts := strings.Split(line, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		if len(parts) >= 3 {
+			target := parts[2]
+			rule := parts[0] + "," + parts[1]
+			if len(parts) >= 4 {
+				rule += "," + strings.Join(parts[3:], ",")
+			}
+			out = append(out, fmt.Sprintf("ruleset=%s,[]%s", target, rule))
+		} else if len(parts) == 2 {
+			target := parts[1]
+			rule := parts[0]
+			// MATCH 转换为 Subconverter 内联规则关键词 FINAL
+			if strings.EqualFold(rule, "MATCH") {
+				rule = "FINAL"
+			}
+			out = append(out, fmt.Sprintf("ruleset=%s,[]%s", target, rule))
+		}
+	}
+	return out
+}
+
+// injectCustomRules 将自定义规则注入到模板 [custom] 段 ruleset 顶部（最高优先级）。
+// 幂等设计：若已存在自定义规则块则原位替换；
+// 容错降级：若目标策略组在当前模板中不存在（如 default 模板无 💬 Ai平台），
+// 自动降级为 🚀 节点选择（或 DIRECT），防止下游客户端加载配置报错。
+func injectCustomRules(src []byte, customRules []string) []byte {
+	if len(customRules) == 0 {
+		return src
+	}
+	info := analyzeTemplate(src)
+	lines := strings.Split(string(src), "\n")
+
+	// 1. 若已存在注入标记块，先清除（保证幂等）
+	cleanLines := make([]string, 0, len(lines))
+	inBlock := false
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		if t == customRulesBeginMarker {
+			inBlock = true
+			continue
+		}
+		if t == customRulesEndMarker {
+			inBlock = false
+			continue
+		}
+		if !inBlock {
+			cleanLines = append(cleanLines, l)
+		}
+	}
+	lines = cleanLines
+
+	// 2. 规范化并校验目标组
+	injected := make([]string, 0, len(customRules)+2)
+	injected = append(injected, customRulesBeginMarker)
+	for _, rule := range customRules {
+		if !strings.HasPrefix(rule, "ruleset=") {
+			continue
+		}
+		target, rest, hasRest := strings.Cut(rule[len("ruleset="):], ",")
+		target = strings.TrimSpace(target)
+		effectiveTarget := target
+
+		upperTarget := strings.ToUpper(target)
+		if upperTarget == "DIRECT" || upperTarget == "REJECT" {
+			effectiveTarget = upperTarget
+		} else if target == "🎯 全球直连" || target == "全球直连" {
+			if _, ok := info.byName[target]; ok {
+				effectiveTarget = target
+			} else if _, ok := info.byName[fallbackDirect]; ok {
+				effectiveTarget = fallbackDirect
+			} else {
+				effectiveTarget = "DIRECT"
+			}
+		} else if _, ok := info.byName[target]; ok {
+			effectiveTarget = target
+		} else {
+			// 模板中不存在该组（如 default 档无 💬 Ai平台），安全回退
+			effectiveTarget = fallbackRuleTarget(info, target)
+		}
+
+		if hasRest {
+			injected = append(injected, fmt.Sprintf("ruleset=%s,%s", effectiveTarget, rest))
+		} else {
+			injected = append(injected, fmt.Sprintf("ruleset=%s", effectiveTarget))
+		}
+	}
+	injected = append(injected, customRulesEndMarker)
+
+	// 3. 寻找 [custom] 段内插入位：首个 ruleset= 行之前；无 ruleset= 时在 [custom] 之后
+	firstRuleset := -1
+	customSection := -1
+	inCustom := false
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if sec, ok := sectionName(t); ok {
+			inCustom = sec == "custom"
+			if inCustom {
+				customSection = i
+			}
+			continue
+		}
+		if inCustom && strings.HasPrefix(t, "ruleset=") {
+			firstRuleset = i
+			break
+		}
+	}
+
+	insertAt := -1
+	if firstRuleset >= 0 {
+		insertAt = firstRuleset
+	} else if customSection >= 0 {
+		insertAt = customSection + 1
+	}
+
+	if insertAt < 0 {
+		// 极端情况无 [custom] 段，直接首部追加
+		out := append(injected, lines...)
+		return []byte(strings.Join(out, "\n"))
+	}
+
+	out := make([]string, 0, len(lines)+len(injected))
+	out = append(out, lines[:insertAt]...)
+	out = append(out, injected...)
+	out = append(out, lines[insertAt:]...)
+	return []byte(strings.Join(out, "\n"))
 }

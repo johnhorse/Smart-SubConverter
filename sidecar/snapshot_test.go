@@ -669,3 +669,165 @@ func readTB(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// TestParseCustomRules 测试 parseCustomRules 支持 Subconverter 原生语法与 Clash 常见语法及注释过滤
+func TestParseCustomRules(t *testing.T) {
+	input := `; 注释行
+# 另一种注释
+ruleset=💬 Ai平台,[]DOMAIN-KEYWORD,cloudcode-pa
+ruleset=💬 Ai平台,[]DOMAIN,cloudcode-pa.googleapis.com
+
+; Clash 语法自动转换（含大小写兼容与 MATCH 转换为 FINAL）
+DOMAIN-SUFFIX,claudemax.xyz,direct
+DST-PORT,22,DIRECT
+IP-CIDR,1.2.3.4/32,DIRECT,no-resolve
+DOMAIN-KEYWORD,ad,reject
+MATCH,🐟 漏网之鱼
+`
+	got := parseCustomRules([]byte(input))
+	want := []string{
+		"ruleset=💬 Ai平台,[]DOMAIN-KEYWORD,cloudcode-pa",
+		"ruleset=💬 Ai平台,[]DOMAIN,cloudcode-pa.googleapis.com",
+		"ruleset=direct,[]DOMAIN-SUFFIX,claudemax.xyz",
+		"ruleset=DIRECT,[]DST-PORT,22",
+		"ruleset=DIRECT,[]IP-CIDR,1.2.3.4/32,no-resolve",
+		"ruleset=reject,[]DOMAIN-KEYWORD,ad",
+		"ruleset=🐟 漏网之鱼,[]FINAL",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parseCustomRules 产出数量 = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("rule[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestInjectCustomRules 测试 injectCustomRules 注入到首部、幂等性、大小写归一及缺失组安全降级
+func TestInjectCustomRules(t *testing.T) {
+	// 模板 A：含 💬 Ai平台
+	tplA := "[custom]\n" +
+		"custom_proxy_group=🚀 节点选择`select`[]DIRECT\n" +
+		"custom_proxy_group=💬 Ai平台`select`[]DIRECT\n" +
+		"ruleset=🎯 全球直连,https://up/a.list\n" +
+		"ruleset=🐟 漏网之鱼,[]FINAL\n"
+	rules := []string{
+		"ruleset=💬 Ai平台,[]DOMAIN-KEYWORD,cloudcode-pa",
+		"ruleset=direct,[]DST-PORT,22",
+		"ruleset=reject,[]DOMAIN-KEYWORD,ad",
+	}
+
+	outA := string(injectCustomRules([]byte(tplA), rules))
+	if !strings.Contains(outA, "ruleset=💬 Ai平台,[]DOMAIN-KEYWORD,cloudcode-pa") {
+		t.Fatalf("含 💬 Ai平台 模板应保留原目标组:\n%s", outA)
+	}
+	// direct / reject 应大小写归一化为 DIRECT / REJECT
+	if !strings.Contains(outA, "ruleset=DIRECT,[]DST-PORT,22") {
+		t.Fatalf("direct 应归一化为 DIRECT:\n%s", outA)
+	}
+	if !strings.Contains(outA, "ruleset=REJECT,[]DOMAIN-KEYWORD,ad") {
+		t.Fatalf("reject 应归一化为 REJECT:\n%s", outA)
+	}
+	// 确保注入在原首条 ruleset= 之前
+	idxCustom := strings.Index(outA, "ruleset=💬 Ai平台,[]DOMAIN-KEYWORD,cloudcode-pa")
+	idxOriginal := strings.Index(outA, "ruleset=🎯 全球直连,https://up/a.list")
+	if !(idxCustom >= 0 && idxCustom < idxOriginal) {
+		t.Fatalf("自定义规则应注入在原有规则集之前 (custom=%d, original=%d)", idxCustom, idxOriginal)
+	}
+
+	// 幂等性测试：再次注入应替换而不是重复追加
+	outA2 := string(injectCustomRules([]byte(outA), rules))
+	if strings.Count(outA2, "ruleset=💬 Ai平台,[]DOMAIN-KEYWORD,cloudcode-pa") != 1 {
+		t.Fatalf("多次注入应保持幂等（仅出现 1 次）:\n%s", outA2)
+	}
+
+	// 验证 Finding 1: 注入后的模板 analyzeTemplate 不得将 💬 Ai平台 标记为 inlineTargets / locked
+	infoA := analyzeTemplate([]byte(outA))
+	if infoA.locked("💬 Ai平台") {
+		t.Fatal("注入自定义内联规则后，💬 Ai平台 业务组绝不应被锁死（locked 必须为 false）")
+	}
+
+	// 模板 B：无 💬 Ai平台（模拟 default 档）
+	tplB := "[custom]\n" +
+		"custom_proxy_group=🚀 节点选择`select`[]DIRECT\n" +
+		"ruleset=🎯 全球直连,https://up/a.list\n" +
+		"ruleset=🐟 漏网之鱼,[]FINAL\n"
+
+	outB := string(injectCustomRules([]byte(tplB), rules))
+	// 💬 Ai平台 应自动回退为 🚀 节点选择
+	if !strings.Contains(outB, "ruleset=🚀 节点选择,[]DOMAIN-KEYWORD,cloudcode-pa") {
+		t.Fatalf("无 💬 Ai平台 模板应安全回退到 🚀 节点选择:\n%s", outB)
+	}
+	if strings.Contains(outB, "ruleset=💬 Ai平台") {
+		t.Fatalf("无 💬 Ai平台 模板不应产生悬空组引用:\n%s", outB)
+	}
+}
+
+// TestCustomRulesFixtureFile 确保 sidecar/testdata/custom-rules.ini 作为真实测试用例被解析并验证
+func TestCustomRulesFixtureFile(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "custom-rules.ini"))
+	if err != nil {
+		t.Fatalf("读取 testdata/custom-rules.ini 失败: %v", err)
+	}
+	rules := parseCustomRules(data)
+	if len(rules) < 5 {
+		t.Fatalf("testdata/custom-rules.ini 应包含有效规则，解析得到 %d 条", len(rules))
+	}
+	hasCloudCode := false
+	for _, r := range rules {
+		if strings.Contains(r, "cloudcode-pa") {
+			hasCloudCode = true
+			break
+		}
+	}
+	if !hasCloudCode {
+		t.Fatal("testdata/custom-rules.ini 应包含 cloudcode-pa 规则")
+	}
+}
+
+// TestSnapshotManagerCustomRulesIntegration 测试 snapshotManager 在 bootstrap 和 rewriteAndSwap 中集成 custom-rules.ini 并支持热更新
+func TestSnapshotManagerCustomRulesIntegration(t *testing.T) {
+	vendorDir := t.TempDir()
+	customRulesContent := "ruleset=💬 Ai平台,[]DOMAIN-KEYWORD,cloudcode-pa\nDST-PORT,22,DIRECT\n"
+	writeTB(t, filepath.Join(vendorDir, "custom-rules.ini"), customRulesContent)
+	writeTB(t, filepath.Join(vendorDir, "ACL4SSR_Online.ini"),
+		"[custom]\ncustom_proxy_group=🚀 节点选择`select`[]DIRECT\ncustom_proxy_group=💬 Ai平台`select`[]DIRECT\nruleset=DIRECT,http://up/a.list\n")
+	writeTB(t, filepath.Join(vendorDir, "a.list"), "a-content")
+
+	m := newTestManager(t)
+	m.vendorDir = vendorDir
+	m.presets = []presetEntry{{"default", "ACL4SSR 默认", "http://127.0.0.1:1/ACL4SSR_Online.ini"}}
+	m.bootstrap()
+
+	rewrittenPath, ok := m.rewrittenPath(m.presets[0])
+	if !ok {
+		t.Fatal("bootstrap 后改写产物应存在")
+	}
+	content := readTB(t, rewrittenPath)
+	if !strings.Contains(content, "ruleset=💬 Ai平台,[]DOMAIN-KEYWORD,cloudcode-pa") {
+		t.Fatalf("改写产物中应包含注入的自定义规则:\n%s", content)
+	}
+	if !strings.Contains(content, "ruleset=DIRECT,[]DST-PORT,22") {
+		t.Fatalf("改写产物中应包含 Clash 语法转换的 DIRECT 规则:\n%s", content)
+	}
+
+	// 测试热更新：更新 rulesDir/custom-rules.ini，再次获取 rewrittenPath 应自动重新改写
+	time.Sleep(10 * time.Millisecond) // 保证 mtime 发生变化
+	updatedCustomRules := customRulesContent + "DOMAIN-SUFFIX,newdomain.com,DIRECT\n"
+	writeTB(t, filepath.Join(m.rulesDir, "custom-rules.ini"), updatedCustomRules)
+
+	// 修改后的 custom-rules.ini 应该触发 isCustomRulesNewer 为 true
+	if !m.isCustomRulesNewer(rewrittenPath) {
+		t.Fatal("更新 custom-rules.ini 后 isCustomRulesNewer 应为 true")
+	}
+
+	newPath, ok := m.rewrittenPath(m.presets[0])
+	if !ok {
+		t.Fatal("重新获取改写产物失败")
+	}
+	newContent := readTB(t, newPath)
+	if !strings.Contains(newContent, "ruleset=DIRECT,[]DOMAIN-SUFFIX,newdomain.com") {
+		t.Fatalf("更新后的自定义规则应热重载进产物:\n%s", newContent)
+	}
+}

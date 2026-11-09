@@ -82,8 +82,20 @@ func analyzeTemplate(src []byte) templateInfo {
 		referenced:    map[string]bool{},
 	}
 	inCustom := false
+	inCustomRules := false
 	for _, raw := range strings.Split(string(src), "\n") {
 		t := strings.TrimSpace(raw)
+		if t == customRulesBeginMarker {
+			inCustomRules = true
+			continue
+		}
+		if t == customRulesEndMarker {
+			inCustomRules = false
+			continue
+		}
+		if inCustomRules {
+			continue // 自定义规则叠加块不参与模板骨架锁定判定
+		}
 		if name, ok := sectionName(t); ok {
 			inCustom = name == "custom"
 			continue
@@ -97,8 +109,8 @@ func analyzeTemplate(src []byte) templateInfo {
 			info.ruleTargets[name] = true
 			if hasSource {
 				s := strings.TrimSpace(source)
-				// 内联规则（[]FINAL / []GEOIP,CN / 裸 FINAL）非 URL、非快照本地路径
-				if strings.HasPrefix(s, "[]") || strings.EqualFold(s, "FINAL") {
+				// 仅兜底路由骨架内联规则（[]FINAL / []GEOIP / 裸 FINAL）锁定组，普通业务分流不锁定
+				if isFallbackInlineRule(s) {
 					info.inlineTargets[name] = true
 				}
 			}
@@ -120,6 +132,17 @@ func analyzeTemplate(src []byte) templateInfo {
 		}
 	}
 	return info
+}
+
+// isFallbackInlineRule 判定是否为兜底路由骨架内联规则（[]FINAL / []GEOIP 等）。
+// 仅此类规则的承载组（如 🐟 漏网之鱼、🎯 全球直连）才被锁定防删；业务分流内联规则不锁组。
+func isFallbackInlineRule(s string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(s))
+	if strings.HasPrefix(upper, "[]") {
+		upper = upper[2:]
+	}
+	return upper == "FINAL" || strings.HasPrefix(upper, "FINAL,") ||
+		upper == "GEOIP" || strings.HasPrefix(upper, "GEOIP,")
 }
 
 // isIntervalToken url-test 行尾 interval,,tolerance（`300,,50` 形态）

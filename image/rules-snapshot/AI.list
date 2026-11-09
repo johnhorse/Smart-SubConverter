@@ -1,17 +1,22 @@
 # 内容：内容：AI平台-国外
-# 数量：47条
+# 数量：52条
 DOMAIN-KEYWORD,anthropic
 DOMAIN-KEYWORD,claude
+DOMAIN-KEYWORD,cloudcode-pa
 DOMAIN-KEYWORD,openai
 DOMAIN,ai.google.dev
+DOMAIN,aiplatform.googleapis.com
 DOMAIN,aistudio.google.com
 DOMAIN,alkalimakersuite-pa.clients6.google.com
 DOMAIN,api.githubcopilot.com
 DOMAIN,api.groq.com
 DOMAIN,api.together.xyz
 DOMAIN,bard.google.com
+DOMAIN,cloudaicompanion.googleapis.com
+DOMAIN,cloudcode-pa.googleapis.com
 DOMAIN,console.groq.com
 DOMAIN,copilot-proxy.githubusercontent.com
+DOMAIN,daily-cloudcode-pa.googleapis.com
 DOMAIN,gemini.google.com
 DOMAIN,generativelanguage.googleapis.com
 DOMAIN,notebooklm.google.com
