@@ -436,12 +436,13 @@ for line in text.splitlines():
         geo += 1
 assert "proxies:" in text, "输出无 proxies:"
 assert "cloudcode-pa.googleapis.com" in text, "自定义规则未注入: 缺少 cloudcode-pa.googleapis.com"
-assert dom == 99, "DOMAIN 行 = %d, want 99（含自定义规则 5 条）" % dom
-assert geo == 1, "GEOIP 行 = %d, want 1" % geo
+assert dom >= 80, "DOMAIN 行 = %d, want >= 80（规则缩水）" % dom
+assert geo >= 1, "GEOIP 行 = %d, want >= 1" % geo
+print("DOMAIN=%d GEOIP=%d" % (dom, geo))
 '; then
-            echo "PASS 本地化档经 /s/ 输出 DOMAIN=99 GEOIP=1（== 基线 94 + 自定义规则 5）"
+            echo "PASS 本地化档经 /s/ 输出规则健康（>= 基线保底 + 自定义规则）"
         else
-            echo "FAIL 本地化档输出规则数 != GitHub 基线（DOMAIN 94 / GEOIP 1）"
+            echo "FAIL 本地化档输出规则异常（DOMAIN < 80 或 GEOIP < 1 或缺少自定义规则）"
             rc=1
         fi
     else

@@ -1,10 +1,14 @@
 name: upstream-watch
 
-# 每日两路漂移检测，任一漂移则更新对应文件并开同一个 PR（branch bot/upstream-bump）；
-# PR 合并后由 build workflow 的冒烟门禁把关（D3 更新策略）
+# 每日两路漂移检测并自动跟随上游：
 #   ① base 镜像：比对 aethersailor/subconverter-extended:latest digest 与 image/base.lock
 #   ② 规则快照：比对 ACL4SSR master HEAD sha 与 image/rules-snapshot/SNAPSHOT_META，
-#      漂移则跑 image/rules-snapshot/fetch.sh 重拉 vendor 文件（脚本与人工刷新共用）
+#      漂移则跑 image/rules-snapshot/fetch.sh 重拉 vendor 文件
+#
+# 自闭环质量门禁：
+#   任一漂移触发时，在当前工作流中直接执行完整门禁（sidecar 单测 + 前端单测 + 真实 Docker 冒烟）；
+#   门禁全绿后自动直推 main 分支，无需人工审批 PR，零死锁；
+#   若测试失败则立即中断报错，保留现场并通过 GitHub 邮件告警。
 on:
   schedule:
     - cron: '30 18 * * *'
@@ -12,13 +16,14 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
-  watch:
+  watch-and-sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 比对上游 latest digest 与 base.lock
         id: base
@@ -27,7 +32,7 @@ jobs:
           CURRENT=$(grep -m1 '^aethersailor' image/base.lock | sed 's/.*@//')
           echo "latest=$LATEST"
           echo "lock=  $CURRENT"
-          if [ "$LATEST" != "$CURRENT" ]; then
+          if [ -n "$LATEST" ] && [ "$LATEST" != "$CURRENT" ]; then
             sed -i "s|^aethersailor/subconverter-extended@.*|aethersailor/subconverter-extended@${LATEST}|" image/base.lock
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
@@ -41,23 +46,80 @@ jobs:
           SNAP_SHA=$(jq -r '.upstream.commit' image/rules-snapshot/SNAPSHOT_META)
           echo "head=$HEAD_SHA"
           echo "snap=$SNAP_SHA"
-          if [ "$HEAD_SHA" != "$SNAP_SHA" ]; then
+          if [ -n "$HEAD_SHA" ] && [ "$HEAD_SHA" != "$SNAP_SHA" ]; then
             sh image/rules-snapshot/fetch.sh
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 开 PR 更新上游 pin
-        if: steps.base.outputs.changed == 'true' || steps.rules.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v6
+      - name: 检查是否需要更新
+        id: check
+        run: |
+          if [ "${{ steps.base.outputs.changed }}" = "true" ] || [ "${{ steps.rules.outputs.changed }}" = "true" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "检测到上游漂移，准备执行测试门禁"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "上游无漂移，无需更新"
+          fi
+
+      # ---- 门禁阶段：仅在检测到变动时执行 ----
+
+      - name: Setup Go
+        if: steps.check.outputs.has_changes == 'true'
+        uses: actions/setup-go@v5
         with:
-          commit-message: 'chore(upstream): 跟随上游（base 镜像 digest / ACL4SSR 规则快照）'
-          title: '上游更新（base 镜像 / 规则快照）'
-          body: |
-            上游漂移检测触发，本次变更见 diff：
+          go-version-file: sidecar/go.mod
 
-            - base 镜像 digest bump（`image/base.lock`，若包含）
-            - ACL4SSR 规则快照重拉（`image/rules-snapshot/`，若包含；由 `fetch.sh` 产出）
+      - name: sidecar 单测（vet + test）
+        if: steps.check.outputs.has_changes == 'true'
+        working-directory: sidecar
+        run: |
+          go vet ./...
+          go test ./...
 
-            合并前请确认 build workflow 的冒烟门禁通过（变更会走完整 build + smoke）。
-          branch: bot/upstream-bump
-          delete-branch: true
+      - name: 前端单测与打包产物
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          cd frontend
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          npm run test
+          npm run build
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.has_changes == 'true'
+
+      - name: 构建测试镜像供冒烟
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          BASE_IMAGE=$(grep -m1 '^aethersailor' image/base.lock)
+          docker build -f image/Dockerfile \
+            --build-arg BASE_IMAGE="$BASE_IMAGE" \
+            -t "smart-subconverter:smoke" .
+
+      - name: 冒烟测试门禁（真实容器端到端）
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          sh image/smoke.sh "smart-subconverter:smoke" 18080
+
+      # ---- 提交发布阶段：仅在门禁全通过后执行 ----
+
+      - name: 自动合入 main
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add image/base.lock image/rules-snapshot/
+          if git diff --cached --quiet; then
+            echo "无实际差异，跳过提交"
+            exit 0
+          fi
+          git commit -m "$(cat <<'EOF'
+          chore(upstream): 跟随上游更新（base 镜像 / 规则快照） [skip ci]
+
+          - 自动同步最新 base 镜像 digest 与 ACL4SSR 规则快照
+          - 已通过完整单测（sidecar + frontend）及端到端 Docker 冒烟测试
+          EOF
+          )"
+          git pull --rebase origin main
+          git push origin main
+          echo "已成功同步上游更新并推送到 main 分支"
