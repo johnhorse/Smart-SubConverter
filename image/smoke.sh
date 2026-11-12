@@ -435,10 +435,11 @@ for line in text.splitlines():
     elif k.startswith("GEOIP"):
         geo += 1
 assert "proxies:" in text, "输出无 proxies:"
-assert dom == 100, "DOMAIN 行 = %d, want 100（含自定义规则 6 条）" % dom
+assert "cloudcode-pa.googleapis.com" in text, "自定义规则未注入: 缺少 cloudcode-pa.googleapis.com"
+assert dom == 99, "DOMAIN 行 = %d, want 99（含自定义规则 5 条）" % dom
 assert geo == 1, "GEOIP 行 = %d, want 1" % geo
 '; then
-            echo "PASS 本地化档经 /s/ 输出 DOMAIN=100 GEOIP=1（== 基线 + 自定义规则）"
+            echo "PASS 本地化档经 /s/ 输出 DOMAIN=99 GEOIP=1（== 基线 94 + 自定义规则 5）"
         else
             echo "FAIL 本地化档输出规则数 != GitHub 基线（DOMAIN 94 / GEOIP 1）"
             rc=1
