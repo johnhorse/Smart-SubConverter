@@ -1,6 +1,6 @@
 {
-  "pulledAt": "2026-11-20T00:46:02Z",
-  "upstream": {"repo": "ACL4SSR/ACL4SSR", "branch": "master", "commit": "818b587aa7df167b177a209dfa7d7fe6fba3764f"},
+  "pulledAt": "2026-11-21T00:06:06Z",
+  "upstream": {"repo": "ACL4SSR/ACL4SSR", "branch": "master", "commit": "a77a123f5df30a7503605c24a78d63a5be35eae3"},
   "files": {
     "ACL4SSR_Online.ini": "26f7445cb4e91f9c21b92de5029aca9126e4facca49858763bda4cf2dadb0afb",
     "ACL4SSR_Online_Full_AdblockPlus.ini": "cf2ea8013f9bedf62c9ca4503e39b485e11aa3738e2a536c92c72f8b60d71992",
