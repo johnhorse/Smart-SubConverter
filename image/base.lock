@@ -2,4 +2,4 @@
 # 上游：aethersailor/subconverter-extended，跟踪 tag：latest
 # 唯一来源文件：Makefile 与 CI 均从此处读取，经 --build-arg BASE_IMAGE 注入 Dockerfile
 # .github/workflows/upstream-watch.yml 每日比对 latest digest，漂移则更新本行并开 PR
-aethersailor/subconverter-extended@sha256:67a1a22b4ca12d1f95e24b5e3eb97daf9a95d145ad0289303249e3cb98ee1260
+aethersailor/subconverter-extended@sha256:c8ef6f37d0654a548381e55510891eee42b7bc8ad3457cbb9a49628f71ca0d48
